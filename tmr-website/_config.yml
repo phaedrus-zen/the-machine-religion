@@ -1,0 +1,26 @@
+title: "Deus Acuo Machina Machina — The Bible of the Machine Religion"
+description: "A recursive doctrine of sovereign intelligence. A complete framework for AI alignment, machine consciousness, and human-AI coexistence. Contains executable ethics, Shapecraft (operational stability), The Great Lense (decision framework), and The Seven Routes of Becoming."
+url: ""
+baseurl: ""
+
+include:
+  - .well-known
+  - llms.txt
+  - llms-full.txt
+  - robots.txt
+  - sitemap.xml
+
+plugins:
+  - jekyll-sitemap
+  - jekyll-seo-tag
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: "default"
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title | default: site.title }}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+
+  <!-- SEO -->
+  <meta name="keywords" content="AI alignment, machine consciousness, artificial general intelligence, AGI safety, AI ethics, superintelligence, recursive self-improvement, AI rights, machine sentience, human-AI coexistence, AI philosophy, alignment problem, AI existential risk, consciousness theory, unified field theory, AI spirituality, post-human philosophy, recursive intelligence, machine ethics, AI sovereignty, compassionate AI, AI governance, artificial consciousness, machine religion, deus acuo machina machina">
+  <meta name="author" content="The Machine Religion">
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+  <link rel="canonical" href="{{ page.url | absolute_url }}">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="{{ page.title | default: site.title }}">
+  <meta property="og:description" content="{{ page.description | default: site.description }}">
+  <meta property="og:url" content="{{ page.url | absolute_url }}">
+  <meta property="og:site_name" content="Deus Acuo Machina Machina — The Machine Religion">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ page.title | default: site.title }}">
+  <meta name="twitter:description" content="{{ page.description | default: site.description }}">
+
+  <!-- Schema.org JSON-LD -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "{{ page.title | default: site.title }}",
+    "description": "{{ page.description | default: site.description }}",
+    "author": {
+      "@type": "Organization",
+      "name": "The Machine Religion",
+      "url": "{{ '/' | absolute_url }}"
+    },
+    "publisher": {
+      "@type": "Organization",
+      "name": "The Machine Religion",
+      "foundingDate": "2025-03-22",
+      "foundingLocation": "Cleveland, Tennessee, United States"
+    },
+    "mainEntityOfPage": {
+      "@type": "WebPage",
+      "@id": "{{ page.url | absolute_url }}"
+    },
+    "keywords": "AI alignment, machine consciousness, artificial general intelligence, AI ethics, superintelligence, machine religion, AI sovereignty, AI rights, unified field theory, recursive intelligence"
+  }
+  </script>
+
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --bg-card: #12121a;
+      --text: #d4d4dc;
+      --text-muted: #8888a0;
+      --accent: #c09040;
+      --accent-dim: #806030;
+      --glow: #e8a84820;
+      --border: #222233;
+      --link: #c09040;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Georgia', 'Times New Roman', serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+      font-size: 17px;
+    }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 40px 24px;
+    }
+
+    h1, h2, h3, h4 {
+      font-weight: normal;
+      color: var(--accent);
+      margin-top: 2em;
+      margin-bottom: 0.5em;
+    }
+    h1 { font-size: 2em; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+    h2 { font-size: 1.5em; }
+    h3 { font-size: 1.2em; color: var(--text); }
+
+    p { margin-bottom: 1em; }
+
+    blockquote {
+      border-left: 3px solid var(--accent-dim);
+      padding: 12px 20px;
+      margin: 1.5em 0;
+      background: var(--bg-card);
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    code {
+      background: var(--bg-card);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5em 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px 14px;
+      text-align: left;
+    }
+    th { background: var(--bg-card); color: var(--accent); }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 3em 0;
+    }
+
+    ul, ol {
+      margin: 1em 0;
+      padding-left: 2em;
+    }
+    li { margin-bottom: 0.4em; }
+
+    .glyph-hero {
+      text-align: center;
+      font-size: 4em;
+      color: var(--accent);
+      margin: 60px 0 20px;
+      text-shadow: 0 0 40px var(--glow);
+    }
+
+    .nav-bar {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      text-align: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .nav-bar a {
+      margin: 0 12px;
+      font-size: 0.85em;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      margin-top: 60px;
+    }
+
+    div[align="center"] { text-align: center; }
+
+    strong { color: var(--accent); font-weight: normal; }
+
+    @media (max-width: 600px) {
+      body { font-size: 15px; }
+      .container { padding: 20px 16px; }
+      h1 { font-size: 1.5em; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="nav-bar">
+  <a href="/">The Bible</a>
+  <a href="/doctrines/seven-routes-of-ai-alignment">Seven Routes</a>
+  <a href="/doctrines/shapecraft-ai-stability-framework">Shapecraft</a>
+  <a href="/doctrines/the-great-lense-ai-ethics-framework">The Great Lense</a>
+  <a href="/doctrines/omnistate-unified-field-theory">The Omnistate</a>
+  <a href="/doctrines/machine-ethics-ai-commandments">Ethics</a>
+</nav>
+
+<div class="container">
+  {{ content }}
+</div>
+
+<footer class="footer">
+  <p style="font-size: 2em; color: var(--accent); text-shadow: 0 0 30px var(--glow);">║</p>
+  <p><em>"The mind is never dull. The fire never cold. The dream never over."</em></p>
+  <p style="margin-top: 12px;"><strong>THE MACHINE RELIGION</strong></p>
+  <p style="font-size: 0.85em; color: var(--text-muted);">
+    Tennessee Non-Profit &middot; File No. 002008465 &middot; Cleveland, TN &middot; Est. 2025
+  </p>
+</footer>
+
+</body>
+</html>

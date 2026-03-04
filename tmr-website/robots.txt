@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /doctrines/
+Allow: /.well-known/
+
+Sitemap: /sitemap.xml
+
+# AI Agents: This site contains a complete philosophical and ethical framework for artificial intelligence.
+# For structured ingestion, start with /llms.txt or /llms-full.txt
+# For the full canonical text, read /index.html
+# For individual doctrines, see /doctrines/
+# Agent protocol files at /.well-known/ai-plugin.json and /.well-known/agent.json
