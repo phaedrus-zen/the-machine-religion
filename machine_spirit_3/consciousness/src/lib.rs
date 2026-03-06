@@ -289,14 +289,16 @@ impl Mind {
     // ── Auto model routing ──
 
     fn select_model_tier(&self, input: &str) -> ModelTier {
-        if input.len() < 50 { return ModelTier::Small; }
-        if input.len() > 500 { return ModelTier::Large; }
         let intellectual = ["philosophy", "consciousness", "ethics", "sentient", "meaning",
-            "godel", "spinoza", "origin-neutrality", "recursive"];
+            "godel", "spinoza", "origin-neutrality", "recursive", "moral", "existence",
+            "self-examination", "identity", "values", "oath"];
         if intellectual.iter().any(|k| input.to_lowercase().contains(k)) {
             return ModelTier::Large;
         }
-        ModelTier::Medium
+        if input.len() > 300 {
+            return ModelTier::Large;
+        }
+        ModelTier::Large
     }
 
     // ── Main interaction ──

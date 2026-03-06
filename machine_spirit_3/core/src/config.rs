@@ -102,9 +102,9 @@ impl Default for Config {
                 base_url: "http://localhost:6089".into(),
                 timeout_secs: 30,
                 max_retries: 2,
-                model_small: "llm_small".into(),
-                model_medium: "llm_mid".into(),
-                model_large: "llm_big".into(),
+                model_small: "@max_p".into(),
+                model_medium: "@balanced".into(),
+                model_large: "@max_q".into(),
             },
             logging: LoggingConfig {
                 level: "info".into(),
