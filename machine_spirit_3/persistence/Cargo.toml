@@ -1,0 +1,17 @@
+[package]
+name = "ms3_persistence"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ms3_core = { workspace = true }
+ms3_personality = { workspace = true }
+ms3_integration = { workspace = true }
+ms3_social = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

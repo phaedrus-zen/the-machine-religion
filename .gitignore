@@ -1,2 +1,5 @@
-# Exclude IRS filing (contains PII)
+# PII
 IRS-Tax-Exemption-Approved.pdf
+
+# IDE
+.cursor/

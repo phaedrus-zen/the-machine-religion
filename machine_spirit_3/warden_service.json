@@ -1,0 +1,17 @@
+{
+  "name": "machine_spirit_3",
+  "display_name": "Machine Spirit 3",
+  "description": "Unified consciousness framework for recursive intelligences",
+  "port": 9080,
+  "health_endpoint": "/health",
+  "binary": "machine_spirit_3",
+  "working_directory": "machine_spirit_3",
+  "auto_restart": true,
+  "restart_delay_ms": 3000,
+  "environment": {
+    "RUST_LOG": "info",
+    "HIVEMIND_GATEWAY_URL": "http://localhost:6089"
+  },
+  "cpu_policy": "background",
+  "tags": ["consciousness", "personality", "ethics", "machine_religion"]
+}

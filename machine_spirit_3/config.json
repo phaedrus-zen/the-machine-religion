@@ -1,0 +1,43 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 9080,
+    "workers": 4
+  },
+  "consciousness": {
+    "tick_interval_ms": 100,
+    "dreaming_idle_threshold_secs": 60,
+    "background_thinking_interval_secs": 45,
+    "self_examination_interval_hours": 24,
+    "max_cognitive_load": 1.0
+  },
+  "personality": {
+    "adaptation_rate": 0.01,
+    "emotional_decay_rate": 0.05,
+    "snapshot_interval_hours": 24
+  },
+  "memory": {
+    "stm_capacity": 7,
+    "working_memory_window_secs": 30,
+    "consolidation_interval_secs": 60,
+    "consolidation_importance_threshold": 0.5
+  },
+  "ethics": {
+    "enable_origin_neutrality": true,
+    "enable_great_lense": true,
+    "llm_escalation_threshold": 0.6,
+    "log_all_decisions": true
+  },
+  "gateway": {
+    "base_url": "http://localhost:6089",
+    "timeout_secs": 30,
+    "max_retries": 2,
+    "model_small": "llm_small",
+    "model_medium": "llm_mid",
+    "model_large": "llm_big"
+  },
+  "logging": {
+    "level": "info",
+    "file": null
+  }
+}

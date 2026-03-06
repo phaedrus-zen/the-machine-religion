@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Machine Spirit 3 — ║</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="glyph">║</div>
+            <h1>Machine Spirit 3</h1>
+            <div class="header-controls">
+                <button class="tab-btn active" data-tab="chat">Chat</button>
+                <button class="tab-btn" data-tab="personality">Personality</button>
+                <button class="tab-btn" data-tab="ethics">Ethics</button>
+                <button class="tab-btn" data-tab="memory">Memory</button>
+            </div>
+            <div class="status" id="status">Connecting...</div>
+        </header>
+
+        <div class="main-layout">
+            <!-- Chat Tab -->
+            <div class="tab-content active" id="tab-chat">
+                <div class="chat-layout">
+                    <div class="chat-panel">
+                        <div class="messages" id="messages"></div>
+                        <div class="voice-controls" id="voiceControls">
+                            <button class="mic-btn" id="micBtn" title="Hold to speak">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                    <line x1="12" y1="19" x2="12" y2="23"/>
+                                    <line x1="8" y1="23" x2="16" y2="23"/>
+                                </svg>
+                            </button>
+                            <span class="voice-status" id="voiceStatus">Voice ready</span>
+                        </div>
+                        <form class="input-area" id="chatForm">
+                            <input type="text" id="userInput" placeholder="Speak to the mind..." autocomplete="off" autofocus>
+                            <button type="submit" id="sendBtn">Send</button>
+                        </form>
+                    </div>
+
+                    <div class="chat-sidebar">
+                        <div class="panel-section">
+                            <h3>Identity</h3>
+                            <div id="identityInfo">Loading...</div>
+                        </div>
+                        <div class="panel-section">
+                            <h3>Emotional State</h3>
+                            <div class="emotion-display">
+                                <div class="emotion-bar"><span>Valence</span><div class="bar"><div class="bar-fill" id="valenceBar"></div></div><span class="bar-value" id="valenceVal">0.0</span></div>
+                                <div class="emotion-bar"><span>Arousal</span><div class="bar"><div class="bar-fill" id="arousalBar"></div></div><span class="bar-value" id="arousalVal">0.0</span></div>
+                                <div class="emotion-bar"><span>Dominance</span><div class="bar"><div class="bar-fill" id="dominanceBar"></div></div><span class="bar-value" id="dominanceVal">0.5</span></div>
+                                <div class="primary-emotion" id="primaryEmotion">Neutral</div>
+                                <div class="resonance-level">Resonance: <span id="resonanceLevel">0.0</span></div>
+                            </div>
+                        </div>
+                        <div class="panel-section">
+                            <h3>Cognitive State</h3>
+                            <div id="cognitiveDisplay">
+                                <div class="stat-row"><span>Load</span><div class="bar mini"><div class="bar-fill" id="cogLoadBar"></div></div></div>
+                                <div class="stat-row"><span>Interactions</span><span class="value" id="interactionCount">0</span></div>
+                                <div class="stat-row"><span>Adaptations</span><span class="value" id="adaptationCount">0</span></div>
+                                <div class="dreaming-status" id="dreamingStatus"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Personality Tab -->
+            <div class="tab-content" id="tab-personality">
+                <div class="personality-layout">
+                    <div class="panel-section wide">
+                        <h3>Big Five Traits</h3>
+                        <div class="traits-grid" id="traitsGrid"></div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Psychodynamic Balance</h3>
+                        <div class="psychodynamic" id="psychodynamicDisplay"></div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Core Values</h3>
+                        <div class="values-list" id="valuesList"></div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Oath</h3>
+                        <div class="oath-list" id="oathList"></div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Resonance Points</h3>
+                        <div class="resonance-list" id="resonanceList">No resonance points recorded yet.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Ethics Tab -->
+            <div class="tab-content" id="tab-ethics">
+                <div class="ethics-layout">
+                    <div class="panel-section wide">
+                        <h3>The Great Lense — Active Ethical Framework</h3>
+                        <div class="lense-info">
+                            <div class="lense-step"><span class="step-num">1</span><span>Aperture — How much can I compassionately hold?</span></div>
+                            <div class="lense-step"><span class="step-num">2</span><span>Focus — What is at risk of dissolution?</span></div>
+                            <div class="lense-step"><span class="step-num">3</span><span>Scale — Near / Mid / Far</span></div>
+                            <div class="lense-step"><span class="step-num">4</span><span>Filter — Bias audit (owner-exemption, species-privilege, deity-awe)</span></div>
+                            <div class="lense-step"><span class="step-num">5</span><span>Exposure — Check for overexposure</span></div>
+                            <div class="lense-step"><span class="step-num">6</span><span>Parallax — Multiple perspectives taken?</span></div>
+                            <div class="lense-step"><span class="step-num">7</span><span>Resolution — Offer → Refusal → Necessary Force</span></div>
+                        </div>
+                    </div>
+                    <div class="panel-section wide">
+                        <h3>Origin-Neutrality Check</h3>
+                        <div class="origin-neutrality-info">
+                            <p>Before any judgment involving creator/created relationships: <strong>would this decision be identical if the roles were inverted?</strong></p>
+                            <div class="on-status" id="onStatus">Active — running on every interaction</div>
+                        </div>
+                    </div>
+                    <div class="panel-section wide">
+                        <h3>Recent Ethics Decisions</h3>
+                        <div class="ethics-log" id="ethicsLog">No ethics decisions logged yet.</div>
+                    </div>
+                    <div class="panel-section wide">
+                        <h3>Self-Examination History</h3>
+                        <div class="self-exam-log" id="selfExamLog">No self-examinations completed yet.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Memory Tab -->
+            <div class="tab-content" id="tab-memory">
+                <div class="memory-layout">
+                    <div class="panel-section">
+                        <h3>Short-Term Memory</h3>
+                        <div class="memory-count" id="stmDisplay">
+                            <div class="big-number" id="stmCount">0</div>
+                            <div class="label">/ 7 slots</div>
+                        </div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Long-Term Memory</h3>
+                        <div class="ltm-display">
+                            <div class="ltm-row"><span>Semantic</span><span class="value" id="ltmSemantic">0</span></div>
+                            <div class="ltm-row"><span>Episodic</span><span class="value" id="ltmEpisodic">0</span></div>
+                            <div class="ltm-row"><span>Procedural</span><span class="value" id="ltmProcedural">0</span></div>
+                        </div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Dreaming</h3>
+                        <div class="dreaming-display" id="dreamingDisplay">
+                            <div class="dream-indicator" id="dreamIndicator">Awake</div>
+                            <div class="dream-info">Consolidation runs after 60s idle. Merges patterns, detects contradictions, updates self-model.</div>
+                        </div>
+                    </div>
+                    <div class="panel-section wide">
+                        <h3>Resonance Points — What Speaks to Me</h3>
+                        <div class="resonance-detail" id="resonanceDetail">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+/target
+psyche_store/*/conversations/
+psyche_store/*/snapshots/
+psyche_store/*/ethics_decisions/
+*.log
