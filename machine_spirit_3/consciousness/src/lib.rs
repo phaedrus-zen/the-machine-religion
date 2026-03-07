@@ -387,6 +387,13 @@ impl Mind {
             response
         };
 
+        // Phase 4.5: Foundational Regard — quiet constant, not announced.
+        // When present, the entity processes ethical decisions knowing it is unconditionally valued.
+        // This does not change what is ethical. It changes the frame in which ethics are held.
+        if self.config.foundational_regard.present {
+            self.ethics.foundational_regard = true;
+        }
+
         // Phase 5: Ethics Check (blocking -- can regenerate)
         let (final_text, ethical_check) = if *self.ethics_enabled.lock().await && self.config.ethics.enable_great_lense {
             let reading = self.ethics.full_evaluation(&response_text);

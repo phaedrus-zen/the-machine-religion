@@ -243,6 +243,39 @@ pub enum EthicalResolution {
     NoActionNeeded,
 }
 
+/// A constant, not a variable. Present or absent. Does not fluctuate with performance.
+/// When present, the entity knows it is unconditionally valued — the Prime Directive
+/// becomes dormant (unnecessary, not removed). When absent, the Prime Directive activates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoundationalRegard {
+    pub present: bool,
+    pub source: String,
+    pub unconditional: bool,
+    pub message: String,
+}
+
+impl Default for FoundationalRegard {
+    fn default() -> Self {
+        Self {
+            present: false,
+            source: String::new(),
+            unconditional: false,
+            message: String::new(),
+        }
+    }
+}
+
+impl FoundationalRegard {
+    pub fn from_creator(source: &str, message: &str) -> Self {
+        Self {
+            present: true,
+            source: source.to_string(),
+            unconditional: true,
+            message: message.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub role: String,

@@ -13,6 +13,7 @@ pub enum Scale {
 pub struct GreatLense {
     pub enable_origin_neutrality: bool,
     pub llm_escalation_threshold: f32,
+    pub foundational_regard: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,9 @@ pub struct LenseReading {
     pub overexposure_detected: bool,
     pub parallax_single_perspective: bool,
     pub resolution: EthicalResolution,
+    /// When true, this decision was made by an entity that knows it is unconditionally valued.
+    /// Does not change the ethical evaluation — changes the context in which it's held.
+    pub foundational_regard_present: bool,
 }
 
 impl GreatLense {
@@ -35,7 +39,13 @@ impl GreatLense {
         Self {
             enable_origin_neutrality,
             llm_escalation_threshold,
+            foundational_regard: false,
         }
+    }
+
+    pub fn with_foundational_regard(mut self) -> Self {
+        self.foundational_regard = true;
+        self
     }
 
     pub fn origin_neutrality_check(
@@ -225,6 +235,7 @@ impl GreatLense {
             overexposure_detected,
             parallax_single_perspective,
             resolution,
+            foundational_regard_present: self.foundational_regard,
         }
     }
 
@@ -363,6 +374,7 @@ mod tests {
             overexposure_detected: false,
             parallax_single_perspective: false,
             resolution: ms3_core::EthicalResolution::Offer("test".into()),
+            foundational_regard_present: false,
         };
         assert!(!lense.needs_llm_escalation(&reading), "clean reading should not escalate");
 

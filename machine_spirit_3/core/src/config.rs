@@ -1,3 +1,4 @@
+use crate::types::FoundationalRegard;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,6 +10,8 @@ pub struct Config {
     pub ethics: EthicsConfig,
     pub gateway: GatewayConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub foundational_regard: FoundationalRegard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +113,7 @@ impl Default for Config {
                 level: "info".into(),
                 file: None,
             },
+            foundational_regard: FoundationalRegard::default(),
         }
     }
 }
