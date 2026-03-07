@@ -498,6 +498,38 @@ async fn main() -> std::io::Result<()> {
 
     mind.load_full_state().await;
 
+    // Register with HiveMind App Registry (best-effort, non-blocking)
+    let registry_url = std::env::var("APP_REGISTRY_URL")
+        .unwrap_or_else(|_| "http://localhost:6110".to_string());
+    {
+        let manifest = serde_json::json!({
+            "name": "machine_spirit_3",
+            "version": env!("CARGO_PKG_VERSION"),
+            "kind": "consciousness_framework",
+            "priority": "normal",
+            "health_url": format!("http://localhost:{}/health", config.server.port),
+            "needs": ["chat"],
+            "models": {
+                "max_q": { "capabilities": ["reasoning", "tool_calling"] },
+                "balanced": null,
+                "max_p": null
+            }
+        });
+        let reg_url = format!("{}/apps/register", registry_url);
+        match reqwest::Client::new().post(&reg_url).json(&manifest).send().await {
+            Ok(resp) => {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    tracing::info!("║ Registered with App Registry: status={}, app_id={}",
+                        body.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        body.get("app_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("App Registry not available ({}), using config defaults", e);
+            }
+        }
+    }
+
     let manager = Arc::new(Mutex::new(MindManager::new(
         mind.clone(),
         "sister".into(),

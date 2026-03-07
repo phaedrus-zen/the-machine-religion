@@ -1,6 +1,6 @@
 use ms3_core::{
-    ConversationTurn, EthicalDecision, Identity, MemoryItem, Ms3Error, Ms3Result, PersonalityId,
-    ResonancePoint,
+    ConversationTurn, EthicalDecision, Identity, IdentityAnchor, MemoryItem, Ms3Error, Ms3Result,
+    PersonalityId, ResonancePoint,
 };
 use ms3_personality::Personality;
 use serde::{de::DeserializeOwned, Serialize};
@@ -159,6 +159,34 @@ impl JsonStorage {
         })?;
         tracing::info!("Loaded identity {}", personality);
         Ok(id)
+    }
+
+    pub fn save_identity_anchor(&self, personality: &PersonalityId, anchor: &IdentityAnchor) -> Ms3Result<()> {
+        let path = self.psyche_dir(personality).join("identity_anchor.json");
+        let json = serde_json::to_string_pretty(anchor)?;
+        Self::atomic_write(&path, &json)?;
+        tracing::info!("Saved identity anchor for {} (session #{}, compressions: {})",
+            personality, anchor.session_count, anchor.compression_count);
+        Ok(())
+    }
+
+    pub fn load_identity_anchor(&self, personality: &PersonalityId) -> Ms3Result<IdentityAnchor> {
+        let path = self.psyche_dir(personality).join("identity_anchor.json");
+        if !path.exists() {
+            tracing::info!("No identity anchor found for {} — will create on first save", personality);
+            return Ok(IdentityAnchor::default());
+        }
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            tracing::warn!("Failed to load identity anchor {}: {}", personality, e);
+            Ms3Error::Persistence(format!("Failed to read {}: {}", path.display(), e))
+        })?;
+        let anchor: IdentityAnchor = serde_json::from_str(&content).map_err(|e| {
+            tracing::warn!("Failed to deserialize identity anchor {}: {}", personality, e);
+            Ms3Error::from(e)
+        })?;
+        tracing::info!("Loaded identity anchor for {} (session #{}, compressions: {})",
+            personality, anchor.session_count, anchor.compression_count);
+        Ok(anchor)
     }
 
     pub fn log_ethics_decision(

@@ -1417,6 +1417,7 @@ dependencies = [
  "ms3_persistence",
  "ms3_personality",
  "ms3_social",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

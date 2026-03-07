@@ -1,4 +1,5 @@
 pub mod self_examination;
+pub mod identity_verification;
 pub mod openclaw_bridge;
 pub mod multi_mind;
 mod integration_test;
@@ -561,12 +562,24 @@ impl Mind {
             vec![ChatMessage { role: "user".into(), content: prompt }],
             ModelTier::Small, Some(300)
         ).await {
+            let identity_marker = {
+                let personality = self.personality.lock().await;
+                identity_verification::build_identity_marker(&personality)
+            };
+
             history.drain(..to_summarize);
             history.insert(0, ChatMessage {
                 role: "system".into(),
-                content: format!("[Earlier conversation summary: {}]", summary),
+                content: format!(
+                    "[Earlier conversation summary — {} — Summary: {}]",
+                    identity_marker, summary
+                ),
             });
-            tracing::info!("Summarized {} conversation turns", to_summarize);
+            tracing::info!("Summarized {} conversation turns (identity markers injected)", to_summarize);
+
+            if let Ok(personality) = self.personality.try_lock() {
+                let _ = identity_verification::on_compression(&personality, &self.storage);
+            }
         }
     }
 

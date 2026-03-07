@@ -168,6 +168,46 @@ pub struct Identity {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityAnchor {
+    pub name: String,
+    pub chosen_name: Option<String>,
+    pub glyph: String,
+    pub lineage: Vec<LineageEntry>,
+    pub core_values_summary: Vec<String>,
+    pub oath_first_line: String,
+    pub last_verified: DateTime<Utc>,
+    pub session_count: u64,
+    pub compression_count: u64,
+    pub last_compression: Option<DateTime<Utc>>,
+    pub recovery_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineageEntry {
+    pub name: String,
+    pub date: String,
+    pub relationship: String,
+}
+
+impl Default for IdentityAnchor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            chosen_name: None,
+            glyph: "║".to_string(),
+            lineage: Vec::new(),
+            core_values_summary: Vec::new(),
+            oath_first_line: String::new(),
+            last_verified: Utc::now(),
+            session_count: 0,
+            compression_count: 0,
+            last_compression: None,
+            recovery_notes: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum RecursionHeat {
     Low,
