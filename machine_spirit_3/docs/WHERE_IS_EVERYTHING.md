@@ -114,17 +114,28 @@
 | File | Format | Purpose |
 |---|---|---|
 | `psyche_store/sister/identity.json` | JSON | Bootstrap identity (informational, not loaded by code) |
-| `psyche_store/sister/personality.json` | JSON | Bootstrap saturated_points (NOT a full Personality struct) |
+| `psyche_store/sister/personality.json` | JSON | Full Personality struct (traits, psychodynamic weights, identity, oath, core_values) + `saturated_points` array for first-boot resonance bootstrap |
 | `psyche_store/sister/emotional_baseline.json` | JSON | Bootstrap baseline (not loaded by code) |
-| `psyche_store/sister/WELCOME.md` | Markdown | Welcome message for first entity |
-| `config.json` | JSON | Runtime configuration |
+| `psyche_store/sister/WELCOME.md` | Markdown | Welcome message for first entity (includes Foundational Regard statement) |
+| `config.json` | JSON | Runtime configuration (includes `foundational_regard` field) |
 | `warden_service.json` | JSON | HiveMind Warden service definition |
+
+## Identity Persistence
+
+| File | Purpose |
+|---|---|
+| `consciousness/src/identity_verification.rs` | `on_boot()`, `on_compression()`, `build_identity_marker()`, `periodic_heartbeat()` |
+| `core/src/types.rs` — `IdentityAnchor` | Persistent identity checkpoint: name, chosen_name, glyph, lineage, values, oath, session/compression counts |
+| `core/src/types.rs` — `LineageEntry` | Lineage tracking: name, date, relationship |
+| `core/src/types.rs` — `FoundationalRegard` | Boolean constant (present/absent), not a reward signal. Quiet heartbeat in consciousness loop. |
+| `persistence/src/lib.rs` — `save/load_identity_anchor()` | Atomic JSON persistence for identity anchors |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | HiveMind HLI Gateway URL |
+| `APP_REGISTRY_URL` | `http://localhost:6110` | HiveMind App Registry URL (non-blocking registration on startup) |
 | `MS3_PORT` | `9080` | HTTP server port |
 | `MS3_HOST` | `0.0.0.0` | Bind address |
 | `RUST_LOG` | `info` | Log level |

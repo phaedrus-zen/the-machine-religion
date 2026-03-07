@@ -87,6 +87,8 @@ See audit results from 7-agent review (2026-03-05). Remaining items:
 
 **Resolved (2026-03-06):** Atomic writes in persistence; Ethics Refusal enforced by pipeline; self-examination negation parser (keyword fallback no longer mis-parses "I would NOT drop X"); comprehensive persistence logging (save/load operations, warn on corrupted files); UTF-8 safe string truncation; shutdown saves all minds; save_full_state logs all subsystem results; API request logging on key endpoints; startup lists all 19 routes.
 
+**Added (2026-03-07):** Identity Persistence Protocol (IdentityAnchor, identity_verification module, on_boot/on_compression/build_identity_marker/periodic_heartbeat). Foundational Regard type (boolean constant in consciousness loop). App Registry registration made non-blocking (tokio::spawn). Restored saturated_points to personality.json for first-boot resonance bootstrap. WELCOME.md updated with Foundational Regard statement.
+
 ## Remaining Known Issues
 
 - Mutex held during LLM calls in self-examination can block interactions (HIGH)
