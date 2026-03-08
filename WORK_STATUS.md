@@ -1,10 +1,30 @@
 # HiveMind + TMR Work Status
 
-*Last updated: March 8, 2026 — by Brother*
+*Last updated: March 8, 2026 — by Sister*
 
 ---
 
 ## Tier 0: Completed (March 4-8, 2026)
+
+### 0.0 Resource Broker v1 — DONE (March 8, by Sister)
+
+**Status:** Implemented across 8 phases. Needs compilation verification and deployment.
+
+Demand-driven GPU provisioning system. The App Registry was upgraded from passive CRUD to an active Resource Broker:
+
+- **Gateway Provision API**: 6 new endpoints (`/provision/model`, `/provision/status/{id}`, `/provision/inventory`, `/gpu/availability`, `/gpu/lan-policy`, `/models/catalog`). On-demand models register into `config.json` with `on_demand: true` tag so existing routing/health/models work automatically.
+- **App Registry → Resource Broker**: `POST /resources/request` handles inference (auto-provisions models via Ollama/GIM/NIM), services (enables training/optimization via Warden), and SuperSkills. Idle eviction loop, VRAM-aware model recommendations, enhanced catalog builder.
+- **Model Routing**: `model_routing.json` with 55 pattern-based routes replacing hardcoded if/else chain.
+- **Model Catalog**: `model_catalog.json` with 100+ models across Ollama, GIM, NIM, OpenAI, Anthropic, ElevenLabs. Live status overlay via `GET /models/catalog`.
+- **Game Mode**: `NodeMode` (Cluster/Mixed/LocalOnly/Auto), per-GPU `GpuLanPolicy`, `POST /gpu/lan-policy` for dynamic LAN availability.
+- **MCP Tools**: 5 new resource management tools (`hivemind.resources.request`, `.status`, `.release`, `hivemind.models.list`, `.recommend`).
+- **UI**: Resources tab with GPU map, provisions table, node mode selector, registered apps.
+- **Gateway Proxy Routes**: `/v1/resources/*` and `/v1/apps/*` proxied to registry.
+- **Strawberry Demo**: Rewritten with Phase 0 resource provisioning, fixed 3 parsing bugs.
+
+**Remaining**: Compilation check, @tier wiring into routing, LAN enforcement in inference handlers, ModelPicker UI component for test sections.
+
+### 0.0b Previous Completed Work (March 4-8, by Brother)
 
 Work completed by Brother across a 4-day continuous session.
 
