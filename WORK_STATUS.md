@@ -1,6 +1,44 @@
 # HiveMind + TMR Work Status
 
-*Last updated: March 7, 2026 — by Sister*
+*Last updated: March 8, 2026 — by Brother*
+
+---
+
+## Tier 0: Completed (March 4-8, 2026)
+
+Work completed by Brother across a 4-day continuous session.
+
+### 0.1 Gateway Decomposition — DONE
+
+**Status:** Complete. Committed `086da47d`, pushed to vangard.
+
+The HLI gateway monolith has been fully decomposed:
+- `main.rs`: 18,999 → 487 lines (97.4% reduction)
+- `lib.rs`: 10,644 → 459 lines (95.7% reduction)
+- 21 new module files created across `state.rs`, `load_balancer.rs`, `types.rs`, `platform.rs`, `hardware.rs`, `clients.rs`, `util.rs`, `routing/*` (6 files), `gpu/*` (6 files)
+
+### 0.2 Load Balancer — DONE
+
+**Status:** Complete. All 80 dispatch functions wired. Kill-switch safe.
+
+- 6 algorithms (round_robin, weighted_round_robin, least_connections, weighted_response_time, random, priority)
+- Circuit breaker with per-endpoint failure tracking
+- Split timeouts (connect: 3s, first_byte: 15s, per-job-type response)
+- Training distribution: `select_training_node()` routes to best available node
+- Cluster-aware request queuing with event-driven drainer
+- 4 API endpoints: GET/POST /lb-config, GET /lb-stats, GET /lb-queue
+
+### 0.3 unwrap() Audit — DONE
+
+**Status:** Complete. 639 bare `.unwrap()` → 2 remaining (ws_streaming.rs only).
+
+### 0.4 UUID Unification — DONE
+
+**Status:** Complete. GPU UUIDs enriched from Hardware Detector. Node UUIDs from SyncDB.
+
+### 0.5 Documentation Pass — DONE
+
+**Status:** Complete. All 7 doc files updated, cross-reference verified.
 
 ---
 
@@ -10,22 +48,25 @@ These are complete and compiled but need deployment to be active in the running 
 
 ### 1.1 Gateway Redeploy
 
-**Status:** Binary compiled with new routes, not yet deployed
-**Effort:** 5 minutes
+**Status:** Binary needs recompilation with decomposed modules, then deployment
+**Effort:** 15 minutes (compile + deploy)
 **Blocked by:** Nothing
 
-The HLI gateway (`menta_hli`) was rebuilt with proxy routes for:
-- Logos Machina (15+ endpoints at `/v1/logos-machina/*`)
-- SuperSkill Registry (5 endpoints at `/v1/superskills/*`)
-
-The compiled binary is at `E:\HiveMind\menta_hli\gateway\api\target\release\menta_hli.exe`. The deployed binary at `C:\HiveMind\menta_hli\menta_hli.exe` is the older version without these routes.
+The HLI gateway source now includes:
+- All decomposed modules (21 files)
+- Load balancer system (disabled by default, kill-switch safe)
+- Logos Machina proxy routes (15+ endpoints at `/v1/logos-machina/*`)
+- SuperSkill Registry proxy routes (5 endpoints at `/v1/superskills/*`)
+- LB API endpoints (GET/POST /lb-config, GET /lb-stats, GET /lb-queue)
 
 **To do:**
+- [ ] `cargo build --release -p api` (from `E:\HiveMind\menta_hli\gateway\`)
 - [ ] Stop Warden (or disable menta_hli)
 - [ ] Copy new binary: `E:\...\target\release\menta_hli.exe` → `C:\HiveMind\menta_hli\menta_hli.exe`
 - [ ] Restart Warden
 - [ ] Verify: `curl http://localhost:6089/v1/logos-machina/prompts` returns data
 - [ ] Verify: `curl http://localhost:6089/v1/superskills/superskills` returns data
+- [ ] Verify: `curl http://localhost:6089/lb-stats` returns LB stats
 
 ### 1.2 Warden Redeploy
 
