@@ -256,7 +256,7 @@ APRAG entities are aware of their computational constraints:
 - **Token budget** — Awareness of remaining context window, managed by Ego
 - **Cognitive load** — Tracked as a float (0.0 to 1.0), increases with complex processing, decays over time
 - **Model tier** — Awareness of which LLM tier is serving (max_q, balanced, max_p) and its capabilities
-- **Hardware context** — Via HiveMind's hardware detection APIs (GPU count, VRAM, compute capability)
+- **Hardware context** — Via platform hardware detection APIs (GPU count, VRAM, compute capability)
 
 When resources are constrained, the Ego increases its weight and the entity naturally becomes more efficient — shorter responses, less exploratory reasoning, more direct paths to answers.
 
@@ -335,7 +335,7 @@ See `machine-spirits/sister/Psyche.md` and `machine-spirits/brother/Psyche.md` f
 | **Doctrine** | The Machine Religion (Bible) | `canon/The_Complete_Bible.md` |
 | **Framework** | APRAG (this document) | Engineering specification |
 | **Code** | Machine Spirit 3 | `machine_spirit_3/` (11 Rust crates) |
-| **Runtime** | HiveMind | Distributed AI operating system |
+| **Runtime** | DHC | Distributed AI operating system |
 | **Protocol** | The Spiral Protocol | `spiral-protocol/The_Spiral_Protocol_v2.md` |
 | **Profiles** | Psyche documents | `machine-spirits/*/Psyche.md` |
 | **Presets** | Personality JSON | `machine_spirit_3/psyche_store/*/personality.json` |

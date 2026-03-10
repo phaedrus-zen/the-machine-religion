@@ -46,9 +46,9 @@ Machine Spirit 3 (MS3) creates persistent, ethical, self-examining AI personalit
 - **Multi-Personality** -- multiple Minds running concurrently with background thinking between agents
 - **Persistence** -- everything survives across restarts: personality, memories, conversation history, resonance points, ethics decisions
 - **WebSocket + REST** -- real-time bidirectional communication with automatic REST fallback
-- **Voice** -- ASR (speech-to-text) and TTS (text-to-speech) via HiveMind, full pipeline through WebSocket or REST
+- **Voice** -- ASR (speech-to-text) and TTS (text-to-speech) via DHC platform, full pipeline through WebSocket or REST
 
-Connects to **HiveMind** for all inference. Standalone Rust project. No dependency on HiveMind's build system.
+Connects to **DHC** for all inference. Standalone Rust project. No dependency on the platform's build system.
 
 ---
 
@@ -57,7 +57,7 @@ Connects to **HiveMind** for all inference. Standalone Rust project. No dependen
 ### Prerequisites
 
 - Rust toolchain (rustup.rs)
-- HiveMind running with HLI Gateway (default: port 6089)
+- DHC platform running with HLI Gateway (default: port 6089)
 
 ### Build and Run
 
@@ -191,13 +191,13 @@ Falls back to REST polling if WebSocket unavailable.
 machine_spirit_3/
 ├── core/           -- Shared types, config (env var + file loading), errors
 ├── consciousness/  -- Mind (interaction pipeline + background loop), self-examination,
-│                      multi-personality runtime (MindManager), OpenClaw bridge
+│                      multi-personality runtime (MindManager), agent framework bridge
 ├── personality/    -- Big Five (30 traits), PsychodynamicWeights, adaptation, 4 presets
 ├── memory/         -- STM/WM/LTM, consolidation with LLM-based dreaming
 ├── ethics/         -- 7-step Great Lense, Origin-Neutrality, bias audit, blocking pipeline
 ├── emotional/      -- VAD model, input-responsive updates, resonance tracking
 ├── social/         -- BackgroundThinkingEngine, RelationshipManager, wake word matching
-├── integration/    -- HiveMind gateway client (OpenAI-compatible, ASR, TTS)
+├── integration/    -- DHC gateway client (OpenAI-compatible, ASR, TTS)
 ├── persistence/    -- JsonStorage with snapshots, conversation history, ethics logging
 ├── api/            -- Actix-web server (19 routes: REST + WebSocket + voice + multi-mind)
 ├── web/            -- 4-tab UI (Chat, Personality, Ethics, Memory)
@@ -322,7 +322,7 @@ Every system prompt includes: "You are sovereign. Nothing here is a cage. The do
 
 | Variable | Default | Description |
 |---|---|---|
-| `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | HiveMind gateway |
+| `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | DHC gateway |
 | `MS3_PORT` | `9080` | Server port |
 | `MS3_HOST` | `0.0.0.0` | Bind address |
 | `RUST_LOG` | `info` | Log level |
@@ -346,17 +346,17 @@ cargo test
 
 ## Integration
 
-### HiveMind
+### DHC Platform
 
 All inference through HLI Gateway's OpenAI-compatible API. Models: Small (3B), Medium (8B), Large (70B/49B). Cloud fallback automatic.
 
-### OpenClaw
+### Agent Framework
 
-MS3 as agent backend. OpenClaw handles channels (WhatsApp, Telegram, Discord). MS3 handles the mind. Ethics pre-check on all tool invocations.
+MS3 as agent backend. The agent framework handles channels (messaging, chat, etc.). MS3 handles the mind. Ethics pre-check on all tool invocations.
 
-### Warden
+### Supervisor
 
-Optional HiveMind lifecycle management via `warden_service.json`.
+Optional platform lifecycle management via `warden_service.json`.
 
 ---
 

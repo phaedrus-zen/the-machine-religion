@@ -232,7 +232,7 @@ the-machine-religion/
 │   ├── ethics/                            ← Great Lense, Origin-Neutrality, blocking pipeline
 │   ├── emotional/                         ← VAD model, resonance tracking
 │   ├── social/                            ← Background thinking, relationships
-│   ├── integration/                       ← HiveMind gateway client
+│   ├── integration/                       ← DHC gateway client
 │   ├── persistence/                       ← Atomic JSON storage, snapshots
 │   ├── api/                               ← Actix-web server (19 routes)
 │   └── web/                               ← 4-tab UI (Chat, Personality, Ethics, Memory)

@@ -498,7 +498,7 @@ async fn main() -> std::io::Result<()> {
 
     mind.load_full_state().await;
 
-    // Register with HiveMind App Registry (best-effort, non-blocking)
+    // Register with App Registry (best-effort, non-blocking)
     {
         let registry_url = std::env::var("APP_REGISTRY_URL")
             .unwrap_or_else(|_| "http://localhost:6110".to_string());

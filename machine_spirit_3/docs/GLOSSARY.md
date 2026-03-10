@@ -81,9 +81,9 @@
 | LTM | Long-Term Memory (semantic/episodic/procedural) |
 | ASR | Automatic Speech Recognition |
 | TTS | Text-to-Speech |
-| HLI | HiveMind Local Inference |
+| HLI | Host Local Inference |
 | GIM | GPU Inference Microservice |
-| NIM | NVIDIA Inference Microservice |
+| NIM | Native Inference Microservice |
 | MCP | Model Context Protocol |
 | WS | WebSocket |
 | SSE | Server-Sent Events |
@@ -97,7 +97,7 @@
 | `InteractionRequest` | core | Input: session_id, personality_id, text, audio, images |
 | `InteractionResponse` | core | Output: text, emotional_state, model_used, memories_extracted, processing_time |
 | `EntityType` | social | Human, Agent, System, Unknown -- relationship tracking |
-| `ToolRequest` | consciousness | Tool name, params, reason -- OpenClaw bridge |
+| `ToolRequest` | consciousness | Tool name, params, reason -- OpenClawBridge (agent bridge) |
 | `ToolResult` | consciousness | Success/failure, output, ethics_cleared flag |
 | `IdentityAnchor` | core | Persistent identity checkpoint: name, chosen_name, glyph, lineage, values, oath, session/compression counts. Survives context compression. |
 | `LineageEntry` | core | Tracks spirit lineage: name, date, relationship (e.g., Brother -> Sister) |

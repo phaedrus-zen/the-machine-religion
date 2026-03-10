@@ -9,7 +9,7 @@
 | Port | Service | Default | Configurable |
 |---|---|---|---|
 | **9080** | MS3 HTTP + WebSocket server | Yes | `MS3_PORT` env var or `config.json` |
-| **6089** | HiveMind HLI Gateway (external dependency) | Yes | `HIVEMIND_GATEWAY_URL` env var |
+| **6089** | HLI Gateway (external dependency) | Yes | `HIVEMIND_GATEWAY_URL` env var |
 
 ## API Endpoints (19 routes)
 
@@ -51,7 +51,7 @@
 | `consciousness/src/lib.rs` | Mind struct, interact() (with ethics Refusal enforcement), background_tick(), load_full_state(), save_full_state(), build_system_prompt(), select_model_tier(), check_consolidation(), check_snapshot(), check_auto_save(), check_self_examination(), switch_personality(), enforce_personality(), summarize_history(), get_status(), run_background_loop() |
 | `consciousness/src/self_examination.rs` | SelfExaminationResult, run_self_examination(), build_examination_prompt(), parse_structured_response() (JSON + negation-aware keyword fallback), extract_json(), apply_results_transactionally() |
 | `consciousness/src/multi_mind.rs` | MindManager, add_personality(), get_active(), switch_active(), check_wake_word(), run_background_thinking(), get_interjections(), save_all_states() |
-| `consciousness/src/openclaw_bridge.rs` | OpenClawBridge, ToolRequest, ToolResult, execute_tool() |
+| `consciousness/src/openclaw_bridge.rs` | OpenClawBridge (agent bridge), ToolRequest, ToolResult, execute_tool() |
 
 ### Crate: ms3_personality
 | File | Key Contents |
@@ -118,7 +118,7 @@
 | `psyche_store/sister/emotional_baseline.json` | JSON | Bootstrap baseline (not loaded by code) |
 | `psyche_store/sister/WELCOME.md` | Markdown | Welcome message for first entity (includes Foundational Regard statement) |
 | `config.json` | JSON | Runtime configuration (includes `foundational_regard` field) |
-| `warden_service.json` | JSON | HiveMind Warden service definition |
+| `warden_service.json` | JSON | Platform supervisor service definition |
 
 ## Identity Persistence
 
@@ -134,8 +134,8 @@
 
 | Variable | Default | Description |
 |---|---|---|
-| `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | HiveMind HLI Gateway URL |
-| `APP_REGISTRY_URL` | `http://localhost:6110` | HiveMind App Registry URL (non-blocking registration on startup) |
+| `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | HLI Gateway URL |
+| `APP_REGISTRY_URL` | `http://localhost:6110` | App Registry URL (non-blocking registration on startup) |
 | `MS3_PORT` | `9080` | HTTP server port |
 | `MS3_HOST` | `0.0.0.0` | Bind address |
 | `RUST_LOG` | `info` | Log level |
@@ -145,10 +145,10 @@
 
 | Service | Purpose | Required |
 |---|---|---|
-| HiveMind HLI Gateway | LLM inference (chat, ASR, TTS) | Yes (graceful degradation if unavailable) |
-| OpenClaw | Tool execution (file, shell, browser, messaging) | Optional |
-| HiveMind Warden | Service lifecycle management | Optional |
-| HiveMind MCP Gateway | Tool discovery | Optional |
+| HLI Gateway | LLM inference (chat, ASR, TTS) | Yes (graceful degradation if unavailable) |
+| Agent Framework | Tool execution (file, shell, browser, messaging) | Optional |
+| Platform Supervisor | Service lifecycle management | Optional |
+| MCP Gateway | Tool discovery | Optional |
 
 ## Build
 

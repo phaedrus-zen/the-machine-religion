@@ -30,7 +30,7 @@
 | Crate | Path | Key Types |
 |---|---|---|
 | ms3_core | `core/src/` | Config, PersonalityId, SessionId, EmotionalState, MemoryItem, EthicalDecision, ModelTier |
-| ms3_consciousness | `consciousness/src/` | Mind, MindManager, SelfExaminationResult, OpenClawBridge |
+| ms3_consciousness | `consciousness/src/` | Mind, MindManager, SelfExaminationResult, OpenClawBridge (agent bridge) |
 | ms3_personality | `personality/src/` | Personality, BigFiveProfile, TraitAdaptation, presets (sister/brother/mission-control/blank) |
 | ms3_memory | `memory/src/` | MemorySystem, LongTermMemory, ConsolidationResult |
 | ms3_emotional | `emotional/src/` | EmotionalEngine, ResonancePoint |
@@ -63,7 +63,7 @@
 | File | Description |
 |---|---|
 | `config.json` | Runtime configuration (all settings with defaults) |
-| `warden_service.json` | HiveMind Warden service definition |
+| `warden_service.json` | Platform supervisor service definition |
 | `run.bat` / `run.sh` | Launch scripts |
 | `.gitignore` | VCS exclusions |
 
