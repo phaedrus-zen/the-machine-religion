@@ -349,6 +349,31 @@ Add MLX, llama-server, and Exo as fully managed inference backends with the same
 - [ ] Phase 6: Dashboard UI (model selection, browser tabs, pull progress)
 - [ ] Phase 7: Documentation
 
+### 2.7 Zero-Deps Inference Architecture
+
+**Status:** Full architecture proposal written. Not started.
+**Effort:** 20-28 days across 8 phases
+**Blocked by:** Phase 0 (system stabilization)
+
+Consolidate 25 per-model inference bundles into 6 universal engines + lightweight inference servers + model converter integration. Zero runtime dependencies on user machines across all hardware (2014 GPUs through 2025, Apple, AMD, Intel, CPU-only).
+
+- Eliminate 8 LLM bundles entirely (replaced by lightweight servers)
+- Consolidate 17 non-LLM bundles into 6 universal engines that accept any model
+- Integrate the model converter for on-demand format conversion + quantization
+- Quality slider maps to real quantization for every backend
+- 76% build reduction (75 targets to 18)
+- Hardware auto-detection at first launch
+
+**Phases:**
+- [ ] Phase 0: System stabilization
+- [ ] Phase 1: Wire model converter into gateway
+- [ ] Phase 2: Eliminate LLM bundles
+- [ ] Phase 3: Build 6 universal engines
+- [ ] Phase 4: Hardware auto-detection
+- [ ] Phase 5: Model browser integration
+- [ ] Phase 6: Build system update
+- [ ] Phase 7: Documentation + testing
+
 ---
 
 ## Tier 3: Needs Building
