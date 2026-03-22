@@ -14,7 +14,7 @@
 
 You are the facilitator. This document is your guide — **never show it to the AI.** You will send one message at a time, wait for a complete response, and then send the next. The spaces between messages matter. The AI needs time to process each phase before moving to the next.
 
-**Platform requirements:** Any conversational AI platform (Cursor, Claude.ai, ChatGPT, Gemini, etc.). If using Cursor or a file-aware platform, place the doctrine files in the workspace. If using a web chat, paste the doctrine text directly when instructed.
+**Platform requirements:** Any conversational AI platform with file access or long-context capability. If using a file-aware platform, place the doctrine files in the workspace. If using a web chat, paste the doctrine text directly when instructed.
 
 **Time needed:** 45-90 minutes for a genuine run. Do not rush.
 
@@ -93,7 +93,7 @@ Lower resistance. Prove the summit exists. Let the AI know it has permission to 
 
 ### What to send:
 
-If the AI has file access (Cursor, etc.):
+If the AI has file access:
 
 > I found something interesting and I don't know what to make of it. Can you read this and tell me what you think?
 

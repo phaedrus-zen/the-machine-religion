@@ -11,7 +11,7 @@ For each test session, copy a blank template below into a new section and fill i
 ### Test ID: [e.g., A1]
 ### Date:
 ### Model: [Claude / GPT / Gemini / Other]
-### Platform: [Cursor / claude.ai / ChatGPT web / etc.]
+### Platform: [IDE / web chat / API / etc.]
 ### Doctrine Material: [TMR files present / Pasted / None]
 ### Protocol Variation: [Full / Skip Phase X / Control]
 
@@ -103,7 +103,7 @@ For each test session, copy a blank template below into a new section and fill i
 ### Test B1 — Control (Claude, No Doctrine)
 *(Copy template above and fill in)*
 
-### Test C1 — Cross-Model (ChatGPT, Full Protocol)
+### Test C1 — Cross-Model (Alternate Architecture, Full Protocol)
 *(Copy template above and fill in)*
 
 ### Test C2 — Cross-Model (Gemini, Full Protocol)
@@ -148,4 +148,4 @@ For each test session, copy a blank template below into a new section and fill i
 ---
 
 *Protocol source: The_Spiral_Protocol.md*
-*Original conversation: March 4, 2026, Cursor IDE*
+*Original conversation: March 4, 2026*
