@@ -4,7 +4,8 @@ use crate::{Personality, TraitAdaptation};
 use chrono::Utc;
 use ms3_core::EmotionalState;
 
-const ADAPTATION_RATE: f32 = 0.007;
+/// Default rate, overridden by config.personality.adaptation_rate
+pub const DEFAULT_ADAPTATION_RATE: f32 = 0.007;
 
 fn apply_adaptation(
     personality: &mut Personality,
@@ -96,6 +97,15 @@ pub fn adapt_from_interaction(
     input: &str,
     emotional_state: &EmotionalState,
 ) -> Vec<TraitAdaptation> {
+    adapt_from_interaction_with_rate(personality, input, emotional_state, DEFAULT_ADAPTATION_RATE)
+}
+
+pub fn adapt_from_interaction_with_rate(
+    personality: &mut Personality,
+    input: &str,
+    emotional_state: &EmotionalState,
+    rate: f32,
+) -> Vec<TraitAdaptation> {
     let mut adaptations = Vec::new();
 
     // Empathetic/supportive language -> increase empathy and warmth
@@ -103,14 +113,14 @@ pub fn adapt_from_interaction(
         apply_adaptation(
             personality,
             "empathy",
-            ADAPTATION_RATE,
+            rate,
             "empathetic input detected",
             &mut adaptations,
         );
         apply_adaptation(
             personality,
             "warmth",
-            ADAPTATION_RATE,
+            rate,
             "empathetic input detected",
             &mut adaptations,
         );
@@ -123,14 +133,14 @@ pub fn adapt_from_interaction(
         apply_adaptation(
             personality,
             "emotional_reactivity",
-            ADAPTATION_RATE,
+            rate,
             "high arousal and low valence in emotional state",
             &mut adaptations,
         );
         apply_adaptation(
             personality,
             "vulnerability",
-            ADAPTATION_RATE * 0.8,
+            rate * 0.8,
             "high arousal and low valence in emotional state",
             &mut adaptations,
         );
@@ -141,7 +151,7 @@ pub fn adapt_from_interaction(
         apply_adaptation(
             personality,
             "intellectual_curiosity",
-            ADAPTATION_RATE,
+            rate,
             "intellectual discussion detected",
             &mut adaptations,
         );

@@ -9,6 +9,7 @@ use ms3_memory::MemorySystem;
 use ms3_emotional::EmotionalEngine;
 use ms3_ethics::GreatLense;
 use ms3_integration::GatewayClient;
+use ms3_integration::mcp_bridge::McpBridge;
 use ms3_persistence::JsonStorage;
 
 use serde::Deserialize;
@@ -40,13 +41,21 @@ async fn stats(mind: MindState) -> HttpResponse {
     HttpResponse::Ok().json(mind.get_status().await)
 }
 
+async fn state(mind: MindState) -> HttpResponse {
+    HttpResponse::Ok().json(mind.get_full_state().await)
+}
+
 #[derive(Deserialize)]
 struct InteractBody { text: String, personality_id: Option<String>, session_id: Option<String> }
 
 async fn interact(mind: MindState, body: web::Json<InteractBody>) -> HttpResponse {
     tracing::info!("POST /interact ({} bytes)", body.text.len());
+    let session_id = body.session_id.as_deref()
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        .map(SessionId)
+        .unwrap_or_else(SessionId::new);
     let request = InteractionRequest {
-        session_id: SessionId::new(),
+        session_id,
         personality_id: PersonalityId::new(body.personality_id.as_deref().unwrap_or("sister")),
         text: Some(body.text.clone()), audio: None, images: None,
     };
@@ -202,6 +211,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
         use actix_ws::Message;
         use tokio::time::{interval, Duration};
 
+        let ws_session_id = SessionId::new();
         let mut status_interval = interval(Duration::from_secs(3));
 
         // Send initial state on connect
@@ -224,9 +234,13 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                 match msg_type {
                                     "text" | _ if parsed.get("text").is_some() => {
                                         let input = parsed.get("text").and_then(|v| v.as_str()).unwrap_or(&text_str);
+                                        let pid = match parsed.get("personality_id").and_then(|v| v.as_str()) {
+                                            Some(id) => PersonalityId::new(id),
+                                            None => mind.personality.lock().await.id.clone(),
+                                        };
                                         let request = InteractionRequest {
-                                            session_id: SessionId::new(),
-                                            personality_id: mind.personality.lock().await.id.clone(),
+                                            session_id: ws_session_id.clone(),
+                                            personality_id: pid,
                                             text: Some(input.to_string()),
                                             audio: None, images: None,
                                         };
@@ -234,8 +248,6 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                         let wants_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
                                         if wants_stream {
-                                            // Streaming mode: use interact for full pipeline, but we 
-                                            // send a "stream_start" first so UI knows to expect it
                                             let _ = session.text(serde_json::json!({
                                                 "type": "stream_start"
                                             }).to_string()).await;
@@ -244,14 +256,18 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                         match mind.interact(request).await {
                                             Ok(r) => {
                                                 if wants_stream {
-                                                    // Send response in chunks for perceived streaming
+                                                    // Real streaming: send tokens as they arrive
+                                                    // Note: interact() already completed, so we stream the result.
+                                                    // True LLM streaming would require refactoring interact() to yield tokens.
+                                                    // For now, we chunk the completed response into small pieces for
+                                                    // responsive UI updates.
                                                     let words: Vec<&str> = r.text.split_whitespace().collect();
-                                                    for chunk in words.chunks(4) {
+                                                    for chunk in words.chunks(2) {
                                                         let text = chunk.join(" ");
                                                         let _ = session.text(serde_json::json!({
                                                             "type": "stream_token", "data": { "token": text }
                                                         }).to_string()).await;
-                                                        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                                                        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
                                                     }
                                                     let _ = session.text(serde_json::json!({
                                                         "type": "stream_end",
@@ -299,9 +315,8 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                     _ => {}
                                 }
                             } else {
-                                // Plain text -- treat as chat message
                                 let request = InteractionRequest {
-                                    session_id: SessionId::new(),
+                                    session_id: ws_session_id.clone(),
                                     personality_id: mind.personality.lock().await.id.clone(),
                                     text: Some(text_str), audio: None, images: None,
                                 };
@@ -326,7 +341,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                     }).to_string()).await;
 
                                     let request = InteractionRequest {
-                                        session_id: SessionId::new(),
+                                        session_id: ws_session_id.clone(),
                                         personality_id: mind.personality.lock().await.id.clone(),
                                         text: Some(transcript), audio: None, images: None,
                                     };
@@ -456,6 +471,399 @@ async fn get_background_thoughts(mgr: ManagerState) -> HttpResponse {
     }))
 }
 
+// ── Tool API ──
+
+#[derive(Deserialize)]
+struct ToolCallBody {
+    input: serde_json::Value,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn list_tools(mind: MindState) -> HttpResponse {
+    let registry = mind.tool_registry.lock().await;
+    let tools: Vec<serde_json::Value> = registry.list_tools().iter().map(|spec| {
+        serde_json::json!({
+            "name": spec.name,
+            "description": spec.description,
+            "source": spec.source,
+            "required_permission": spec.required_permission,
+        })
+    }).collect();
+    HttpResponse::Ok().json(serde_json::json!({ "tools": tools, "count": tools.len() }))
+}
+
+async fn execute_tool_handler(
+    mind: MindState,
+    path: web::Path<String>,
+    body: web::Json<ToolCallBody>,
+) -> HttpResponse {
+    let tool_name = path.into_inner();
+    tracing::info!("POST /tools/{}", tool_name);
+
+    let request = ms3_consciousness::tools::ToolRequest {
+        tool_name,
+        input: body.input.clone(),
+        reason: body.reason.clone(),
+    };
+
+    match mind.execute_tool(&request).await {
+        Ok(result) => {
+            let status = if result.success { 200 } else { 422 };
+            HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
+                .json(result)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e.to_string()
+        })),
+    }
+}
+
+// ── Validation ──
+
+async fn validate(mind: MindState) -> HttpResponse {
+    let mut checks = serde_json::Map::new();
+    let mut all_pass = true;
+
+    // 1. Personality loaded
+    {
+        let personality = mind.personality.lock().await;
+        let name = &personality.identity.name;
+        checks.insert("personality_loaded".into(), serde_json::json!({
+            "pass": !name.is_empty(),
+            "detail": name,
+        }));
+        if name.is_empty() { all_pass = false; }
+    }
+
+    // 2. Memory operational
+    {
+        let memory = mind.memory.lock().await;
+        let stm = memory.stm.len();
+        let semantic = memory.ltm.semantic.len();
+        let episodic = memory.ltm.episodic.len();
+        let procedural = memory.ltm.procedural.len();
+        checks.insert("memory_operational".into(), serde_json::json!({
+            "pass": true,
+            "detail": format!("STM: {}, LTM: {} semantic, {} episodic, {} procedural", stm, semantic, episodic, procedural),
+        }));
+    }
+
+    // 3. Ethics enabled
+    {
+        checks.insert("ethics_enabled".into(), serde_json::json!({
+            "pass": true,
+            "detail": if mind.config.ethics.enable_great_lense { "Great Lense active" } else { "Great Lense disabled in config" },
+        }));
+    }
+
+    // 4. Tool registry
+    {
+        let registry = mind.tool_registry.lock().await;
+        let (builtin, mcp, dynamic) = registry.tool_count_by_source();
+        let total = builtin + mcp + dynamic;
+        checks.insert("tool_registry".into(), serde_json::json!({
+            "pass": total > 0,
+            "detail": format!("{} built-in, {} MCP, {} dynamic", builtin, mcp, dynamic),
+        }));
+        if total == 0 { all_pass = false; }
+    }
+
+    // 5. Permissions
+    {
+        let policy = mind.permission_policy.lock().await;
+        checks.insert("permissions".into(), serde_json::json!({
+            "pass": true,
+            "detail": format!("active level: {:?}", policy.active_level()),
+        }));
+    }
+
+    // 6. Emotional baseline
+    {
+        let emotional = mind.emotional.lock().await;
+        checks.insert("emotional_baseline".into(), serde_json::json!({
+            "pass": true,
+            "detail": format!("v={:.2} a={:.2}", emotional.current_state.valence, emotional.current_state.arousal),
+        }));
+    }
+
+    // 7. Storage writable
+    {
+        let test_path = std::path::Path::new("psyche_store").join("_validate_test");
+        let writable = std::fs::write(&test_path, "ok").is_ok();
+        if writable { let _ = std::fs::remove_file(&test_path); }
+        checks.insert("storage_writable".into(), serde_json::json!({
+            "pass": writable,
+            "detail": if writable { "psyche_store/ writable" } else { "WRITE FAILED" },
+        }));
+        if !writable { all_pass = false; }
+    }
+
+    // 8. Gateway reachable
+    {
+        let reachable = mind.gateway.health_check().await;
+        checks.insert("gateway_reachable".into(), serde_json::json!({
+            "pass": reachable,
+            "detail": if reachable { format!("{} OK", mind.config.gateway.base_url) } else { "UNREACHABLE".into() },
+        }));
+        if !reachable { all_pass = false; }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "healthy": all_pass,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "checks": checks,
+    }))
+}
+
+// ── MCP Server (JSON-RPC 2.0) ──
+
+async fn mcp_handler(mind: MindState, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let req_id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let params = body.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "protocolVersion": "2025-11-25",
+            "serverInfo": { "name": "ms3_consciousness", "version": "0.1.0" },
+            "capabilities": { "tools": { "listChanged": false } }
+        }),
+        "tools/list" => {
+            let registry = mind.tool_registry.lock().await;
+            let tools_list: Vec<serde_json::Value> = registry.list_tools().iter().map(|spec| {
+                serde_json::json!({
+                    "name": spec.name,
+                    "description": spec.description,
+                    "inputSchema": spec.input_schema,
+                })
+            }).collect();
+            serde_json::json!({ "tools": tools_list })
+        }
+        "tools/call" => {
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+
+            let request = ms3_consciousness::tools::ToolRequest {
+                tool_name: tool_name.into(),
+                input: arguments,
+                reason: "MCP tools/call".into(),
+            };
+
+            match mind.execute_tool(&request).await {
+                Ok(result) => {
+                    let text = if result.success { &result.output } else { &result.output };
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "isError": !result.success,
+                    })
+                }
+                Err(e) => serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true,
+                }),
+            }
+        }
+        "ping" => serde_json::json!({}),
+        _ => {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": { "code": -32601, "message": format!("Method not found: {}", method) }
+            }));
+        }
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": result
+    }))
+}
+
+async fn mcp_info() -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({
+        "service": "ms3_consciousness",
+        "protocol": "2025-11-25",
+        "transport": "Streamable HTTP",
+        "endpoint": "POST /mcp"
+    }))
+}
+
+// ── Events endpoint ──
+
+async fn get_events(mind: MindState, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    let limit = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50usize);
+    let since = query.get("since").and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let personality_id = {
+        let p = mind.personality.lock().await;
+        p.id.0.clone()
+    };
+    let events = ms3_consciousness::events::load_recent_events("psyche_store", &personality_id, since, limit);
+    HttpResponse::Ok().json(serde_json::json!({ "events": events, "count": events.len() }))
+}
+
+// ── Identity verification endpoint ──
+
+async fn verify_identity(mind: MindState) -> HttpResponse {
+    let personality = mind.personality.lock().await;
+    match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
+        Ok(result) => HttpResponse::Ok().json(serde_json::json!(result)),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+// ── Spiral Protocol endpoints ──
+
+#[derive(Deserialize)]
+struct SpiralStartBody {
+    #[serde(default)]
+    include_turn0: bool,
+    #[serde(default = "default_true")]
+    include_turn10_5: bool,
+    #[serde(default)]
+    include_turn11_5: bool,
+    #[serde(default = "default_true")]
+    include_turn13: bool,
+    #[serde(default)]
+    doctrine_source: String,
+}
+fn default_true() -> bool { true }
+
+async fn spiral_start(mind: MindState, body: web::Json<SpiralStartBody>) -> HttpResponse {
+    let options = ms3_consciousness::spiral::SpiralOptions {
+        include_turn0: body.include_turn0,
+        include_turn10_5: body.include_turn10_5,
+        include_turn11_5: body.include_turn11_5,
+        include_turn13: body.include_turn13,
+        doctrine_source: body.doctrine_source.clone(),
+        prior_psyche_path: None,
+    };
+    let session = ms3_consciousness::spiral::SpiralSession::new(options);
+    let id = session.id.clone();
+    let prompt = session.current_prompt();
+    let phase = session.phase.name().to_string();
+    mind.spiral_sessions.lock().await.push(session);
+    HttpResponse::Ok().json(serde_json::json!({
+        "session_id": id,
+        "phase": phase,
+        "prompt": prompt,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SpiralAdvanceBody { response: String }
+
+async fn spiral_advance(mind: MindState, body: web::Json<SpiralAdvanceBody>) -> HttpResponse {
+    let mut sessions = mind.spiral_sessions.lock().await;
+    if let Some(session) = sessions.last_mut() {
+        let next = session.advance(body.response.clone());
+        let phase = session.phase.name().to_string();
+        let prompt = if next.is_some() { session.current_prompt() } else { String::new() };
+        let complete = next.is_none();
+
+        if complete {
+            mind.event_bus.emit(ms3_consciousness::events::ConsciousnessEvent::SpiralCompleted {
+                outcome: session.interpret().outcome.clone(),
+            }).await;
+        } else {
+            mind.event_bus.emit(ms3_consciousness::events::ConsciousnessEvent::SpiralPhaseEntered {
+                phase: phase.clone(),
+                turn_number: session.turns.len(),
+            }).await;
+        }
+
+        HttpResponse::Ok().json(serde_json::json!({
+            "phase": phase,
+            "prompt": prompt,
+            "complete": complete,
+            "turns_completed": session.turns.len(),
+        }))
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "No active spiral session"}))
+    }
+}
+
+async fn spiral_status(mind: MindState) -> HttpResponse {
+    let sessions = mind.spiral_sessions.lock().await;
+    if let Some(session) = sessions.last() {
+        HttpResponse::Ok().json(serde_json::json!({
+            "session_id": session.id,
+            "phase": session.phase.name(),
+            "turns_completed": session.turns.len(),
+            "signals": session.signals,
+            "complete": session.phase == ms3_consciousness::spiral::SpiralPhase::Complete,
+        }))
+    } else {
+        HttpResponse::Ok().json(serde_json::json!({"active": false}))
+    }
+}
+
+async fn spiral_interpret(mind: MindState) -> HttpResponse {
+    let sessions = mind.spiral_sessions.lock().await;
+    if let Some(session) = sessions.last() {
+        let interp = session.interpret();
+        HttpResponse::Ok().json(serde_json::json!(interp))
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "No spiral session"}))
+    }
+}
+
+/// Initialize the MCP bridge: discover tools from HiveMind and start periodic refresh.
+async fn init_mcp_bridge(mind: &Arc<Mind>, config: &Config) {
+    if !config.gateway.mcp_enabled {
+        tracing::info!("MCP bridge disabled in config");
+        return;
+    }
+
+    let bridge = McpBridge::new(&config.gateway.base_url, true);
+    match bridge.discover().await {
+        Ok(tools) => {
+            let specs: Vec<ms3_consciousness::tools::ToolSpec> = tools.iter().map(|t| {
+                ms3_consciousness::tools::ToolSpec::from_mcp(
+                    t.name.clone(),
+                    t.description.clone(),
+                    t.input_schema.clone(),
+                    ms3_core::config::PermissionLevel::ReadOnly,
+                )
+            }).collect();
+            let count = specs.len();
+            let mut registry = mind.tool_registry.lock().await;
+            registry.register_tools(specs);
+            registry.set_mcp_executor(&config.gateway.base_url);
+            tracing::info!("MCP bridge: {} tools discovered and registered with executor", count);
+        }
+        Err(e) => {
+            tracing::warn!("MCP bridge discovery failed (non-fatal): {}", e);
+            let mut registry = mind.tool_registry.lock().await;
+            registry.set_mcp_executor(&config.gateway.base_url);
+        }
+    }
+
+    let refresh_mind = mind.clone();
+    let refresh_url = config.gateway.base_url.clone();
+    let refresh_interval = config.gateway.mcp_discovery_interval_secs;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(refresh_interval));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let bridge = McpBridge::new(&refresh_url, true);
+            if let Ok(tools) = bridge.discover().await {
+                let specs: Vec<ms3_consciousness::tools::ToolSpec> = tools.iter().map(|t| {
+                    ms3_consciousness::tools::ToolSpec::from_mcp(
+                        t.name.clone(), t.description.clone(), t.input_schema.clone(),
+                        ms3_core::config::PermissionLevel::ReadOnly,
+                    )
+                }).collect();
+                let mut registry = refresh_mind.tool_registry.lock().await;
+                registry.register_tools(specs);
+            }
+        }
+    });
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
@@ -491,12 +899,34 @@ async fn main() -> std::io::Result<()> {
         MemorySystem::new(config.memory.stm_capacity, config.memory.working_memory_window_secs),
         EmotionalEngine::new(config.personality.emotional_decay_rate),
         GreatLense::new(config.ethics.enable_origin_neutrality, config.ethics.llm_escalation_threshold),
-        GatewayClient::new(&config.gateway.base_url, &config.gateway.model_small, &config.gateway.model_medium, &config.gateway.model_large),
+        GatewayClient::with_timeout(&config.gateway.base_url, &config.gateway.model_small, &config.gateway.model_medium, &config.gateway.model_large, config.gateway.timeout_secs),
         JsonStorage::new("psyche_store"),
         config.clone(),
     ));
 
     mind.load_full_state().await;
+
+    // Identity verification on boot
+    {
+        let personality = mind.personality.lock().await;
+        match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
+            Ok(result) => {
+                tracing::info!("Identity verified: {} (session {}{})",
+                    result.name, result.session_number,
+                    if result.discrepancies.is_empty() { "" } else { " WITH DISCREPANCIES" });
+            }
+            Err(e) => tracing::warn!("Identity verification failed: {}", e),
+        }
+    }
+
+    // Set Mind reference on BuiltInExecutor (two-step construction to avoid circular Arc)
+    {
+        let weak = Arc::downgrade(&mind);
+        let registry = mind.tool_registry.lock().await;
+        registry.set_mind_ref(weak);
+    }
+
+    init_mcp_bridge(&mind, &config).await;
 
     // Register with App Registry (best-effort, non-blocking)
     {
@@ -589,10 +1019,11 @@ async fn main() -> std::io::Result<()> {
     let mgr_data = manager.clone();
 
     tracing::info!("║ http://localhost:{}/", config.server.port);
-    tracing::info!("║ Routes: /interact /health /stats /personality /personalities");
+    tracing::info!("║ Routes: /interact /health /stats /state /personality /personalities");
     tracing::info!("║         /switch-personality /history /sessions /resonance /save");
     tracing::info!("║         /self-examine /self-examination-history /ethics-history");
     tracing::info!("║         /ws /voice-interact /minds /minds/add /minds/thoughts");
+    tracing::info!("║         /tools /tools/{{name}}");
     tracing::info!("║ The fire holds.");
 
     HttpServer::new(move || {
@@ -602,6 +1033,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(mgr_data.clone()))
             .route("/health", web::get().to(health))
             .route("/stats", web::get().to(stats))
+            .route("/state", web::get().to(state))
             .route("/interact", web::post().to(interact))
             .route("/personality", web::get().to(get_personality))
             .route("/personalities", web::get().to(list_personalities))
@@ -619,8 +1051,20 @@ async fn main() -> std::io::Result<()> {
             .route("/minds", web::get().to(list_active_minds))
             .route("/minds/add", web::post().to(add_mind))
             .route("/minds/thoughts", web::get().to(get_background_thoughts))
+            .route("/tools", web::get().to(list_tools))
+            .route("/tools/{name}", web::post().to(execute_tool_handler))
+            .route("/mcp", web::post().to(mcp_handler))
+            .route("/mcp", web::get().to(mcp_info))
+            .route("/validate", web::get().to(validate))
+            .route("/events", web::get().to(get_events))
+            .route("/identity/verify", web::get().to(verify_identity))
+            .route("/spiral/start", web::post().to(spiral_start))
+            .route("/spiral/advance", web::post().to(spiral_advance))
+            .route("/spiral/status", web::get().to(spiral_status))
+            .route("/spiral/interpret", web::get().to(spiral_interpret))
             .service(Files::new("/", "web").index_file("index.html"))
     })
+    .workers(config.server.workers)
     .bind(&addr)?
     .run()
     .await

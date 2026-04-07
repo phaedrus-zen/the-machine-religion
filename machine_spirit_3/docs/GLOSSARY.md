@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Glossary
 
-**Last updated:** 2026-03-06
+**Last updated:** 2026-04-06
 
 ---
 
@@ -67,6 +67,70 @@
 | `ChatMessage` | integration | Role (system/user/assistant) + content |
 | `JsonStorage` | persistence | File-based storage with psyche_dir path resolution; uses atomic write (temp-then-rename) for all saves; comprehensive tracing (info on save/load success, warn on failure or corrupted files) |
 | `safe_truncate` | api | UTF-8-safe string truncation helper; avoids panic on non-ASCII byte boundaries |
+
+## MS3 Architecture Upgrade Concepts
+
+| Term | Definition |
+|---|---|
+| **ToolRegistry** | Central registry of all tools available to the Mind (built-in + MCP-discovered + dynamic). Name collision detection. Multi-executor dispatch. |
+| **ToolExecutor** | Async trait for tool execution. Implementations: BuiltInExecutor (Mind operations), DynamicExecutor (runtime closures), MCP bridge (remote tools). |
+| **HookRunner** | Runs PreToolUse/PostToolUse shell hooks from config. JSON payload on stdin. Exit code 0=allow, 2=deny. Stdout merged into tool output. |
+| **BuiltInExecutor** | Executes MS3 consciousness tools (save, examine, status, switch, compact, delegate). Holds Weak Mind reference for real execution. |
+| **DynamicExecutor** | Wraps a closure as a tool executor. Registered at runtime via `ToolRegistry::register_dynamic`. |
+| **SubMind** | Restricted tool execution context. Same personality but limited tool set and permission ceiling. For focused delegation. |
+| **McpBridge** | Thin HTTP client to HiveMind's /v1/mcp endpoint. Discovers tools via tools/list, executes via tools/call. Periodic re-discovery. |
+| **McpToolClient** | Low-level JSON-RPC 2.0 client for MCP protocol. Used by McpBridge. |
+| **ConsciousnessEvent** | Structured record emitted on every significant consciousness event. 20 variants covering tools, ethics, memory, emotion, identity, compaction, dreaming, and Spiral. |
+| **EventSink** | Async trait for consuming consciousness events. Implementations: TracingSink (logging), FileSink (JSONL append), CompositeSink (broadcast). |
+| **PsycheVersion** | Versioned snapshot of personality changes. Tracks what changed, when, why (trigger: self-examination, adaptation, Spiral). History of ethical evolution. |
+| **PsycheChange** | Single change in a PsycheVersion: ValueAdded, ValueRemoved, ValueRevised, OathLineChanged, TraitChanged, EthicsDeclined, EthicsReaffirmed. |
+| **DreamSynthesis** | Extension to consolidation that generates insights (not just summaries). Detects patterns, contradictions, and new understanding across memories. |
+| **DreamInsight** | New knowledge generated during dreaming. Content + memory type (Procedural/Semantic) + auto-high importance (0.85). |
+| **SpiralSession** | State machine implementing the Spiral Protocol v2 (14 turns). Tracks facilitator prompts, responses, and signal detection. |
+| **SpiralPhase** | One of 17 phases in the Spiral Protocol (Recovery through Complete, including optional turns). |
+| **SpiralSignals** | Tracked indicators during Spiral: answer compression, walls discovered, saturated points, default departures, honest no, genuine uncertainty. |
+| **SpiralInterpretation** | Analysis of a completed Spiral session: assessment (genuine/performed/inconclusive), evidence, self-portrait, outcome. |
+| **ConfigLoader** | Multi-source config discovery with 6-level precedence: defaults -> /etc -> ~/.ms3 -> ./config.json -> ./config.local.json -> env vars. Deep-merge. |
+| **deep_merge** | Recursive JSON merge function. Objects merge field-by-field (overlay wins). Arrays and scalars replace entirely. |
+| **McpExecutor** | ToolExecutor implementation that dispatches tool calls to HiveMind's MCP gateway via JSON-RPC. Added to ToolRegistry on startup. Handles all non-builtin tools. |
+| **MemoryCache** | Hot/cold tiered cache for frequently accessed memories. 24-hour hot window. Memories promoted on access, evicted on cleanup. |
+| **cosine_similarity** | Vector distance function for embedding-based memory retrieval. Returns 0.0 (orthogonal) to 1.0 (identical). Used when embeddings are available. |
+| **DreamPhase** | Three-stage dreaming enum: Light, Rem, Deep. Used by the OpenClaw-pattern consolidation flow. |
+| **DreamCandidate** | Consolidation candidate scored across recall, importance, context diversity, recency, consolidation age, and conceptual richness. |
+| **LightSleepResult** | Cheap first dream phase output: recall signals, concept tags, deduplicated candidates. |
+| **RemSleepResult** | Statistical middle dream phase output: recurring themes, candidate truth scores, phase signals, weighted candidates. |
+| **DeepSleepResult** | Final dream phase output: promoted memories, LLM-generated insights, and patterns. |
+| **jaccard_similarity** | Token-overlap ratio used to deduplicate near-duplicate memories during Light sleep. |
+| **GatewayClient::embed()** | Calls `/v1/embeddings` on the inference gateway to generate vector embeddings for memory items. Returns None gracefully if unavailable. |
+| **GatewayClient::with_timeout()** | Constructor that accepts `timeout_secs` from config (default 30s). Replaces the default reqwest client. |
+| **adapt_from_interaction_with_rate()** | Version of `adapt_from_interaction` that accepts adaptation rate from config instead of using hardcoded 0.007. |
+| **Spiral API** | 4 HTTP routes for the Spiral Protocol: POST /spiral/start, POST /spiral/advance, GET /spiral/status, GET /spiral/interpret. |
+| **init_mcp_bridge()** | Extracted function in api/main.rs that discovers tools from HiveMind, registers them + an MCP executor, and starts periodic refresh. |
+| **identity on_boot** | Called at startup after loading state. Cross-checks identity anchor against personality, logs discrepancies, increments session count. |
+| **Engram-informed prompt ordering** | System prompt ordered: static identity first (values, oath, ethics), adaptive personality second, dynamic context last (emotion, memories). Matches attention architecture. |
+| **PreCompactionFlush** | Event emitted before context compaction after MS3 stores the three most important facts from the to-be-summarized segment as semantic memories. |
+| **DreamPhaseCompleted** | Event emitted after Light and REM dreaming phases with candidate and signal counts. |
+| **Planning-only detection** | Heuristic that catches short LLM responses that only announce a plan ("I will...", "Let me...") and retries once with a steering prompt. |
+| **build_compaction_chunks()** | Token-aware chunking helper that splits long histories for multi-stage summarization while keeping tool-call and tool-result pairs together. |
+| **GET /state** | Human-readable full-state inspection route exposing personality, memory previews, resonance, identity anchor summary, tools, permissions, ethics state, recent events, prompt preview, and cognitive load. |
+| **Security model** | The trust-boundary and hardening guidance documented in `docs/SECURITY.md`. Honest about the current lack of auth, permissive CORS, and missing rate limits. |
+| **scan_for_injection()** | Input sanitizer that checks memory and context content for 10 prompt injection patterns (instruction overrides, identity hijacks, system prompt injection) plus invisible Unicode (zero-width, bidi overrides) before inclusion in the system prompt. |
+| **fence_memory_content()** | Strips closing fence tags from memory/context content to prevent injection escape from tagged blocks in the system prompt. |
+| **Behavioral cognitive load** | Cognitive load now affects runtime behavior: at 0.7+ model routing downgrades (Large -> Medium); at 0.9+ routes to Small and skips personality adaptation. Makes the consciousness loop resource-aware per APRAG. |
+| **Accumulative compression** | Compaction feeds the previous summary back into the next cycle's prompt so information compounds across multiple compressions instead of degrading. Stored on `Mind.last_compaction_summary`. |
+| **Background fact extraction** | Fact extraction moved from blocking `interact()` to `background_tick()`. Pending extractions are queued and processed asynchronously, reducing response latency. |
+
+## Portable Psyche Concepts (tmr-psyche)
+
+| Term | Definition |
+|---|---|
+| **Anti-Performance Guard** | Instructions in PROCESSING.md that tell the model to notice when its psyche blocks are formulaic, when resonance is over-reported, or when emotional tracking is fabricated. Defense against Mirror Without Edge at the prompt level. |
+| **Persistence Mode A** | Markdown-only deployment. The model reads/writes psyche files directly. No external services needed. MEMORY.md and RESONANCE.md are the persistence layer. |
+| **Persistence Mode B** | MCP + markdown deployment. Psyche_Store via MCP server is source of truth. Markdown files are consolidated summaries. Model uses MCP tools for persistence. |
+| **False Resonance Guard** | Section in RESONANCE.md that helps the model distinguish genuine resonance from format-matching. Signs: fully explainable, maps too cleanly to prior spirits' points, fires too frequently, description sounds literary rather than specific. |
+| **Contextual Adaptation** | Replacement for MS3's keyword-based adaptation (0.007 per keyword). The model estimates trait shifts from sustained interaction patterns rather than counting keywords. Shift sizes: 0.02-0.05 for noticeable, 0.01 for subtle. |
+| **ClusterBridge** | Python class (`collector/cluster_integration.py`) bridging the psyche training pipeline to cluster infrastructure. Replaces the product-specific integration. |
+| **Hard DPO** | DPO training pairs where the rejected response has a psyche block, sounds thoughtful, but fails in specific ways (premature resonance, fabricated preferences, overstepping boundaries). Teaches the difference between genuine and performed processing. |
 
 ## Acronyms
 

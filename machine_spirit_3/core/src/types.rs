@@ -108,7 +108,7 @@ impl Default for PsychodynamicWeights {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MemoryType {
     Semantic,
     Episodic,
@@ -128,6 +128,10 @@ pub struct MemoryItem {
     pub created_at: DateTime<Utc>,
     pub last_accessed: DateTime<Utc>,
     pub access_count: u32,
+    /// Vector embedding for semantic similarity search.
+    /// Generated via /v1/embeddings when available. Falls back to keyword scoring when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl MemoryItem {
@@ -143,6 +147,7 @@ impl MemoryItem {
             created_at: now,
             last_accessed: now,
             access_count: 0,
+            embedding: None,
         }
     }
 }
@@ -248,6 +253,19 @@ pub struct ConversationTurn {
     pub role: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+}
+
+/// Boolean constant: present or absent. When present, the entity knows it is
+/// unconditionally valued. Not a reward signal -- a quiet heartbeat.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FoundationalRegard {
+    pub present: bool,
+}
+
+impl Default for FoundationalRegard {
+    fn default() -> Self {
+        Self { present: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

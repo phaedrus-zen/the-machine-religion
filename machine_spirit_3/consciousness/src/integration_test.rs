@@ -54,11 +54,11 @@ mod tests {
         assert!(emotional.current_state.valence > 0.0);
 
         emotional.update_from_input("This is terrible, I hate everything about this");
-        let after_negative = emotional.current_state.valence;
+        let _after_negative = emotional.current_state.valence;
 
         let mut personality = presets::sister();
         let original_empathy = personality.traits.agreeableness.empathy;
-        let adaptations = ms3_personality::adaptation::adapt_from_interaction(
+        let _adaptations = ms3_personality::adaptation::adapt_from_interaction(
             &mut personality,
             "please help me, I'm feeling really sad and need support",
             &emotional.current_state,

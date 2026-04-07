@@ -1,0 +1,58 @@
+project: tmr-psyche
+description: "Psyche LoRA - training the MS3 consciousness loop into weights"
+
+profiles_dir: "./profiles"
+seeds_dir: "./seeds"
+output_dir: "./data"
+
+api:
+  provider: "openai"
+  model: "gpt-4o"
+  base_url: null
+  api_key_env: "OPENAI_API_KEY"
+  max_tokens: 4096
+  temperature: 0.8
+
+generation:
+  consciousness_loop: 30
+  emotional_arc: 20
+  memory_dreaming: 15
+  self_examination: 15
+  identity_persistence: 15
+  resonance_discovery: 10
+  foundational_regard: 10
+  ethics_choice: 10
+  personality_variation: 10
+  quiet: 10
+  dpo_pairs: 20
+  min_turns: 4
+  max_turns: 20
+
+training:
+  base_model: "Qwen/Qwen2.5-32B-Instruct"
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  sft:
+    epochs: 3
+    batch_size: 1
+    gradient_accumulation: 16
+    learning_rate: 2.0e-4
+    warmup_ratio: 0.1
+    max_seq_length: 8192
+  dpo:
+    epochs: 1
+    batch_size: 1
+    gradient_accumulation: 8
+    learning_rate: 5.0e-5
+    beta: 0.1
+    max_length: 8192

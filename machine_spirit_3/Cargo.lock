@@ -283,6 +283,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1276,6 +1287,7 @@ dependencies = [
 name = "ms3_consciousness"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ms3_core",
  "ms3_education",
@@ -1345,6 +1357,7 @@ dependencies = [
 name = "ms3_integration"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "futures",
  "ms3_core",
  "reqwest",
@@ -1407,6 +1420,7 @@ dependencies = [
  "actix-files",
  "actix-web",
  "actix-ws",
+ "chrono",
  "futures",
  "ms3_consciousness",
  "ms3_core",

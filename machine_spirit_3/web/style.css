@@ -185,6 +185,38 @@ header h1 { font-size: 17px; font-weight: 500; }
     .memory-layout { grid-template-columns: 1fr 1fr; }
 }
 
+/* Consciousness Tab */
+.consciousness-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 4px 0; }
+.state-note { font-size: 11px; color: var(--text-muted); font-style: italic; margin-bottom: 10px; }
+.state-json { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; background: var(--bg); padding: 12px; border-radius: 8px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: var(--text-dim); line-height: 1.5; }
+.events-list { max-height: 300px; overflow-y: auto; }
+.event-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.event-item .event-type { color: var(--accent); font-weight: 500; }
+.event-item .event-time { color: var(--text-muted); font-size: 10px; }
+.prompt-preview { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; background: var(--bg); padding: 12px; border-radius: 8px; max-height: 250px; overflow-y: auto; white-space: pre-wrap; color: var(--text-dim); line-height: 1.4; }
+.tool-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
+.tool-item .tool-name { color: var(--text); font-weight: 500; }
+.tool-item .tool-source { font-size: 10px; color: var(--text-muted); padding: 2px 6px; border-radius: 4px; background: var(--bg); }
+.personality-switcher { display: flex; gap: 6px; }
+.personality-switcher select { flex: 1; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; }
+.personality-switcher button { padding: 6px 12px; background: var(--accent-dim); border: none; border-radius: 6px; color: white; font-size: 12px; cursor: pointer; }
+.personality-switcher button:hover { background: var(--accent); }
+.cog-load-label { font-size: 10px; color: var(--warning); margin-left: 6px; min-width: 60px; }
+.session-item { padding: 4px 0; font-size: 11px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+#validationResults { margin-top: 8px; font-size: 11px; }
+#validationResults .check-pass { color: var(--positive); }
+#validationResults .check-fail { color: var(--negative); }
+#validationDisplay button { padding: 6px 14px; background: var(--accent-dim); border: none; border-radius: 6px; color: white; font-size: 12px; cursor: pointer; }
+
+@media (max-width: 1100px) {
+    .chat-layout { flex-direction: column; }
+    .chat-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; }
+    .chat-sidebar .panel-section { flex: 1; min-width: 200px; }
+    .traits-grid { grid-template-columns: repeat(3, 1fr); }
+    .personality-layout, .ethics-layout, .consciousness-layout { grid-template-columns: 1fr; }
+    .memory-layout { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 700px) {
     .traits-grid { grid-template-columns: repeat(2, 1fr); }
     .memory-layout { grid-template-columns: 1fr; }

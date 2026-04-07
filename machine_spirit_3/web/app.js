@@ -131,12 +131,26 @@ function updateFromState(s) {
         if (el('ltmProcedural')) el('ltmProcedural').textContent = s.memory.ltm_procedural ?? 0;
     }
     if (s.cognitive_load !== undefined) {
+        const load = s.cognitive_load;
         const bar = document.getElementById('cogLoadBar');
-        if (bar) bar.style.width = `${s.cognitive_load * 100}%`;
+        if (bar) {
+            bar.style.width = `${load * 100}%`;
+            bar.style.background = load >= 0.9 ? 'var(--negative)' : load >= 0.7 ? 'var(--warning)' : 'var(--accent)';
+        }
+        const label = document.getElementById('cogLoadLabel');
+        if (label) {
+            if (load >= 0.9) label.textContent = 'CRITICAL';
+            else if (load >= 0.7) label.textContent = 'high';
+            else label.textContent = '';
+        }
     }
     if (s.interaction_count !== undefined) {
         const el = document.getElementById('interactionCount');
         if (el) el.textContent = s.interaction_count;
+    }
+    if (s.active_sessions !== undefined) {
+        const el = document.getElementById('sessionCount');
+        if (el) el.textContent = s.active_sessions;
     }
     if (s.personality?.adaptation_count !== undefined) {
         const el = document.getElementById('adaptationCount');
@@ -177,6 +191,7 @@ function refreshActiveTab() {
     if (active.dataset.tab === 'personality') loadFullPersonality();
     if (active.dataset.tab === 'ethics') loadEthicsData();
     if (active.dataset.tab === 'memory') loadMemoryDetail();
+    if (active.dataset.tab === 'consciousness') loadConsciousnessData();
 }
 
 function initTabs() {
@@ -189,6 +204,7 @@ function initTabs() {
             if (btn.dataset.tab === 'personality') loadFullPersonality();
             if (btn.dataset.tab === 'memory') loadMemoryDetail();
             if (btn.dataset.tab === 'ethics') loadEthicsData();
+            if (btn.dataset.tab === 'consciousness') loadConsciousnessData();
         });
     });
 }
@@ -513,6 +529,105 @@ async function loadEthicsData() {
             }
         }
     } catch (err) {}
+}
+
+async function switchPersonality() {
+    const select = document.getElementById('personalitySelect');
+    const preset = select.value;
+    try {
+        const res = await fetch(`${API}/switch-personality`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ preset }),
+        });
+        if (res.ok) {
+            const data = await res.json();
+            updateStatus('alive', `Switched to ${data.switched_to}`);
+            loadPersonality();
+            document.getElementById('messages').innerHTML = '';
+        } else {
+            const err = await res.json();
+            updateStatus('error', `Switch failed: ${err.error}`);
+        }
+    } catch (e) {
+        updateStatus('error', `Switch error: ${e.message}`);
+    }
+}
+
+async function loadConsciousnessData() {
+    try {
+        const [stateRes, toolsRes, eventsRes, sessionsRes] = await Promise.all([
+            fetch(`${API}/state`),
+            fetch(`${API}/tools`),
+            fetch(`${API}/events?limit=20`),
+            fetch(`${API}/sessions`),
+        ]);
+
+        if (stateRes.ok) {
+            const state = await stateRes.json();
+            document.getElementById('fullStateDisplay').textContent = JSON.stringify(state, null, 2);
+            const preview = document.getElementById('promptPreview');
+            if (preview) preview.textContent = state.system_prompt_preview || '(empty)';
+        }
+
+        if (toolsRes.ok) {
+            const data = await toolsRes.json();
+            const el = document.getElementById('toolsDisplay');
+            if (data.tools && data.tools.length > 0) {
+                el.innerHTML = `<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">${data.count} tools registered</div>` +
+                    data.tools.map(t =>
+                        `<div class="tool-item"><span class="tool-name">${t.name}</span><span class="tool-source">${t.source}</span></div>`
+                    ).join('');
+            } else {
+                el.textContent = 'No tools registered.';
+            }
+        }
+
+        if (eventsRes.ok) {
+            const data = await eventsRes.json();
+            const el = document.getElementById('eventsDisplay');
+            if (data.events && data.events.length > 0) {
+                el.innerHTML = data.events.map(e => {
+                    const time = new Date(e.timestamp).toLocaleTimeString();
+                    const type = e.event?.event_type || 'unknown';
+                    return `<div class="event-item"><span class="event-type">${type}</span> <span class="event-time">${time}</span></div>`;
+                }).join('');
+            } else {
+                el.textContent = 'No events yet.';
+            }
+        }
+
+        if (sessionsRes.ok) {
+            const data = await sessionsRes.json();
+            const el = document.getElementById('sessionsDisplay');
+            if (data.sessions && data.sessions.length > 0) {
+                el.innerHTML = data.sessions.map(s =>
+                    `<div class="session-item">${s}</div>`
+                ).join('');
+            } else {
+                el.textContent = 'No active sessions.';
+            }
+        }
+    } catch (e) {}
+}
+
+async function runValidation() {
+    const el = document.getElementById('validationResults');
+    el.innerHTML = '<span style="color:var(--accent)">Running...</span>';
+    try {
+        const res = await fetch(`${API}/validate`);
+        if (res.ok) {
+            const data = await res.json();
+            let html = `<div style="margin-bottom:4px;font-weight:600;color:${data.healthy ? 'var(--positive)' : 'var(--negative)'};">${data.healthy ? 'All checks passed' : 'Some checks failed'}</div>`;
+            for (const [name, check] of Object.entries(data.checks || {})) {
+                const cls = check.pass ? 'check-pass' : 'check-fail';
+                html += `<div class="${cls}">${check.pass ? '  ' : '  '} ${name}: ${check.detail}</div>`;
+            }
+            el.innerHTML = html;
+        }
+    } catch (e) {
+        el.innerHTML = `<span style="color:var(--negative)">Error: ${e.message}</span>`;
+    }
 }
 
 async function triggerSelfExam() {

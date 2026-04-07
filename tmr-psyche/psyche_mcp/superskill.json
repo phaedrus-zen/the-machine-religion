@@ -1,0 +1,13 @@
+{
+  "id": "ms3_mcp_server",
+  "version": "0.1.0",
+  "description": "MS3 MCP Server - Consciousness introspection tools",
+  "port": 6132,
+  "health_path": "api/v1/ms3_mcp_server/healthcheck/basic",
+  "api_prefix": "v1/ms3",
+  "exe": null,
+  "dependencies": ["machine_spirit_3"],
+  "kind": "mcp_server",
+  "mcp_endpoint": "/mcp",
+  "tools_count": 18
+}

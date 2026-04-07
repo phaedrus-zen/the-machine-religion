@@ -1,0 +1,18 @@
+{
+  "service_name": "ms3_mcp_server",
+  "display_name": "MS3 MCP Server",
+  "port": 6132,
+  "health_path": "api/v1/ms3_mcp_server/healthcheck/basic",
+  "process_type": "python",
+  "launch_command": "python psyche_mcp/server.py --psyche-store ../machine_spirit_3/psyche_store --spirit sister",
+  "working_directory": "tmr-psyche",
+  "auto_start": false,
+  "restart_on_failure": true,
+  "mcp": {
+    "enabled": true,
+    "endpoint": "/mcp",
+    "protocol": "2025-11-25",
+    "tools_file": "psyche_mcp/deps/psyche_tools.json"
+  },
+  "notes": "MS3 consciousness introspection as MCP tools. Gateway proxy routes: /v1/ms3/mcp -> http://127.0.0.1:6132/mcp"
+}

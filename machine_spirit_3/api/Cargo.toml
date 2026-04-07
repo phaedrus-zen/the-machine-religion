@@ -29,3 +29,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
+chrono = { workspace = true }

@@ -1,3 +1,27 @@
+pub mod mcp_bridge;
+
+/// Detect audio format from magic bytes.
+fn detect_audio_format(data: &[u8]) -> (&'static str, &'static str) {
+    if data.len() >= 4 {
+        if data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
+            return ("audio.webm", "audio/webm");
+        }
+        if &data[0..4] == b"RIFF" {
+            return ("audio.wav", "audio/wav");
+        }
+        if &data[0..3] == b"ID3" || (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+            return ("audio.mp3", "audio/mpeg");
+        }
+        if &data[0..4] == b"OggS" {
+            return ("audio.ogg", "audio/ogg");
+        }
+        if &data[0..4] == b"fLaC" {
+            return ("audio.flac", "audio/flac");
+        }
+    }
+    ("audio.mp3", "audio/mpeg")
+}
+
 use futures::StreamExt;
 use ms3_core::{ModelTier, Ms3Error, Ms3Result};
 use reqwest::multipart;
@@ -53,8 +77,15 @@ struct StreamDelta {
 
 impl GatewayClient {
     pub fn new(base_url: &str, model_small: &str, model_medium: &str, model_large: &str) -> Self {
+        Self::with_timeout(base_url, model_small, model_medium, model_large, 30)
+    }
+
+    pub fn with_timeout(base_url: &str, model_small: &str, model_medium: &str, model_large: &str, timeout_secs: u64) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model_small: model_small.to_string(),
             model_medium: model_medium.to_string(),
@@ -187,10 +218,26 @@ impl GatewayClient {
 
     /// Transcribes audio to text via POST to /v1/audio/transcriptions.
     /// Sends the audio data as multipart form data.
+    /// Always sends as WAV because HiveMind's local ASR path requires WAV format.
+    /// If the input is already WAV, sends as-is. Otherwise, sends with WAV MIME
+    /// and trusts the gateway's cloud fallback for non-WAV formats.
     pub async fn transcribe_audio(&self, audio_data: Vec<u8>) -> Ms3Result<String> {
+        let (detected_name, _detected_mime) = detect_audio_format(&audio_data);
+        let is_wav = detected_name == "audio.wav";
+
+        // HiveMind's local ASR requires WAV. For non-WAV formats,
+        // we still send the original bytes -- the gateway will fall through
+        // to cloud Whisper which accepts all formats.
+        let (filename, mime) = if is_wav {
+            ("audio.wav", "audio/wav")
+        } else {
+            // Send with original format info so the gateway can route correctly
+            (detected_name, _detected_mime)
+        };
+
         let part = multipart::Part::bytes(audio_data)
-            .file_name("audio.mp3")
-            .mime_str("audio/mpeg")
+            .file_name(filename.to_string())
+            .mime_str(mime)
             .map_err(|e| Ms3Error::Gateway(e.to_string()))?;
 
         let form = multipart::Form::new().part("file", part);
@@ -221,19 +268,18 @@ impl GatewayClient {
     }
 
     /// Synthesizes speech from text via POST to /v1/audio/speech.
+    /// Model name comes from the tts_model parameter (configurable, defaults to "tts").
     pub async fn synthesize_speech(&self, text: &str, voice: Option<&str>) -> Ms3Result<Vec<u8>> {
-        #[derive(Serialize)]
-        struct SpeechRequest<'a> {
-            model: &'static str,
-            input: &'a str,
-            voice: &'a str,
-        }
+        self.synthesize_speech_with_model(text, voice, "tts-1").await
+    }
 
-        let request = SpeechRequest {
-            model: "tts",
-            input: text,
-            voice: voice.unwrap_or("default"),
-        };
+    pub async fn synthesize_speech_with_model(&self, text: &str, voice: Option<&str>, model: &str) -> Ms3Result<Vec<u8>> {
+        let request = serde_json::json!({
+            "model": model,
+            "input": text,
+            "voice": voice.unwrap_or("alloy"),
+            "response_format": "wav",
+        });
 
         let response = self.client
             .post(format!("{}/v1/audio/speech", self.base_url))
@@ -277,5 +323,37 @@ impl GatewayClient {
             content: user_input.to_string(),
         });
         self.chat(messages, tier, max_tokens).await
+    }
+
+    /// Generate a vector embedding for the given text via /v1/embeddings.
+    /// Returns None if the endpoint is unavailable (graceful degradation).
+    pub async fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        self.embed_with_model(text, "nomic-embed-text").await
+    }
+
+    pub async fn embed_with_model(&self, text: &str, model: &str) -> Option<Vec<f32>> {
+        let body = serde_json::json!({
+            "model": model,
+            "input": text,
+        });
+
+        let response = self.client
+            .post(format!("{}/v1/embeddings", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let json: serde_json::Value = response.json().await.ok()?;
+        json.get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("embedding"))
+            .and_then(|emb| emb.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
     }
 }

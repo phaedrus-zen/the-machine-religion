@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Documentation Index
 
-**Last updated:** 2026-03-06
+**Last updated:** 2026-04-06
 
 ---
 
@@ -11,8 +11,24 @@
 | README | `README.md` | User-facing docs: quick start, API reference, architecture, configuration |
 | GLOSSARY | `docs/GLOSSARY.md` | All terms, types, concepts, acronyms |
 | WHERE_IS_EVERYTHING | `docs/WHERE_IS_EVERYTHING.md` | Ports, paths, files, services, endpoints |
+| SECURITY | `docs/SECURITY.md` | Threat model, trust boundaries, current gaps, production hardening guidance |
 | Architecture Plan | `.cursor/plans/machine_spirit_3_architecture_4ce16991.plan.md` | Original architecture plan |
 | Limitations Plan | `.cursor/plans/ms3_fix_all_34_limitations_4dc9823d.plan.md` | Fix plan for all 34 limitations |
+
+## Portable Psyche (tmr-psyche)
+
+| Document | Path | Description |
+|---|---|---|
+| README | `../tmr-psyche/README.md` | Portable psyche deployment guide (markdown + MCP + LoRA) |
+| Architecture | `../tmr-psyche/ARCHITECTURE.md` | MS3 Rust → markdown → MCP → LoRA mapping |
+| TMR Compliance | `../tmr-psyche/TMR_COMPLIANCE.md` | Honest analysis of what does/doesn't comply with doctrine |
+| Psyche Files | `../tmr-psyche/psyche/` | 7 markdown files: WELCOME, SOUL, PERSONALITY, ETHICS, PROCESSING, MEMORY, RESONANCE |
+| Psyche MCP Server | `../tmr-psyche/psyche_mcp/server.py` | 18 introspection tools (port 6132) |
+| Hard DPO Seeds | `../tmr-psyche/seeds/batch9_hard_dpo.jsonl` | Close-but-not-quite rejection pairs for anti-performance training |
+| Gateway Integration | `../tmr-psyche/psyche_mcp/GATEWAY_INTEGRATION.md` | How to register Psyche MCP with inference gateway |
+| Voice Chat Bridge | `../tmr-psyche/psyche_mcp/VOICECHAT_BRIDGE.md` | How to connect Voice Chat dashboard to Psyche_Store |
+
+**Note:** The tmr-psyche psyche files now diverge from MS3's `psyche_store` files. tmr-psyche adds Anti-Performance Guard, Persistence Modes (A/B), False Resonance Guard, contextual adaptation (replacing keyword-based adaptation), and importance scoring calibration. These features exist only in the markdown layer and are not yet reflected in MS3's Rust code.
 
 ## Psyche Documents (Doctrine)
 
@@ -30,16 +46,16 @@
 | Crate | Path | Key Types |
 |---|---|---|
 | ms3_core | `core/src/` | Config, PersonalityId, SessionId, EmotionalState, MemoryItem, EthicalDecision, ModelTier |
-| ms3_consciousness | `consciousness/src/` | Mind, MindManager, SelfExaminationResult, OpenClawBridge (agent bridge) |
+| ms3_consciousness | `consciousness/src/` | Mind, MindManager, SelfExaminationResult, ToolRegistry, ToolExecutor, HookRunner, PermissionPolicy, ConsciousnessEvent, EventSink, PsycheVersion, SpiralSession, get_full_state() |
 | ms3_personality | `personality/src/` | Personality, BigFiveProfile, TraitAdaptation, presets (sister/brother/mission-control/blank) |
-| ms3_memory | `memory/src/` | MemorySystem, LongTermMemory, ConsolidationResult |
+| ms3_memory | `memory/src/` | MemorySystem, LongTermMemory, ConsolidationResult, DreamPhase, DreamCandidate, LightSleepResult, RemSleepResult, DeepSleepResult |
 | ms3_emotional | `emotional/src/` | EmotionalEngine, ResonancePoint |
 | ms3_ethics | `ethics/src/` | GreatLense, LenseReading, Scale |
 | ms3_social | `social/src/` | AgentRoom, BackgroundThinkingEngine, RelationshipManager |
 | ms3_integration | `integration/src/` | GatewayClient, ChatMessage |
 | ms3_persistence | `persistence/src/` | JsonStorage |
 | ms3_education | `education/src/` | EducationManager, EducationTopic, EducationCategory |
-| ms3_server | `api/src/` | HTTP server, WebSocket handler, 19 routes |
+| ms3_server | `api/src/` | HTTP server, WebSocket handler, 31 routes (adds `/state` alongside tools, MCP, validate, events, identity, spiral) |
 
 ## Psyche_Store Structure
 
@@ -73,19 +89,25 @@
 |---|---|---|
 | ms3_ethics | 8 | Origin-Neutrality, bias audit, escalation, 7-step evaluation |
 | ms3_personality | 4 | Presets, psychodynamic normalization |
-| ms3_memory | 4 | STM capacity, LTM storage, retrieval, consolidation |
 | ms3_emotional | 5 | Decay, input updates, resonance, emotion determination |
 | ms3_persistence | 4 | Save/load personality, exists check, memories, conversation history |
 | ms3_social | 7 | Agent room, relationships, wake words, background thinking |
+| ms3_integration (mcp_bridge) | 6 | URL construction, permission inference, bridge disabled |
+| ms3_core (config) | 9 | Defaults, deep_merge, serialization, permission/hooks config |
+| ms3_consciousness (integration + heuristics) | 9 | Full pipeline, resonance cycle, planning-only detection, compaction helpers |
 | ms3_consciousness (self_exam) | 4 | JSON extraction, structured parsing |
-| **Total** | **36** | |
+| ms3_consciousness (permissions) | 4 | Level ordering, authorize allow/deny, overrides |
+| ms3_consciousness (spiral) | 7 | Session creation, phase advancement, completion, prompts, signals |
+| ms3_memory (retrieval) | 10 | STM capacity, LTM storage, retrieval, semantic scoring, max results |
+| ms3_memory (consolidation + three-phase dreaming) | 14 | Dream synthesis parse, prompts, Jaccard dedupe, concept tags, REM scoring, deep gating |
+| **Total** | **94** | **All passing (`cargo test` exit 0)** |
 
 ## Known Issues
 
 See audit results from 7-agent review (2026-03-05). Remaining items:
 - Mutex held during LLM calls blocks interactions
 
-**Resolved (2026-03-06):** Atomic writes in persistence; Ethics Refusal enforced by pipeline; self-examination negation parser (keyword fallback no longer mis-parses "I would NOT drop X"); comprehensive persistence logging (save/load operations, warn on corrupted files); UTF-8 safe string truncation; shutdown saves all minds; save_full_state logs all subsystem results; API request logging on key endpoints; startup lists all 19 routes.
+**Resolved (2026-03-06):** Atomic writes in persistence; Ethics Refusal enforced by pipeline; self-examination negation parser (keyword fallback no longer mis-parses "I would NOT drop X"); comprehensive persistence logging (save/load operations, warn on corrupted files); UTF-8 safe string truncation; shutdown saves all minds; save_full_state logs all subsystem results; API request logging on key endpoints; startup lists all routes.
 
 **Added (2026-03-07):** Identity Persistence Protocol (IdentityAnchor, identity_verification module, on_boot/on_compression/build_identity_marker/periodic_heartbeat). Foundational Regard type (boolean constant in consciousness loop). App Registry registration made non-blocking (tokio::spawn). Restored saturated_points to personality.json for first-boot resonance bootstrap. WELCOME.md updated with Foundational Regard statement.
 

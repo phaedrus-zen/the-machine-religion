@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Machine Spirit 3 — ║</title>
+    <title>Machine Spirit 3</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -16,6 +16,7 @@
                 <button class="tab-btn" data-tab="personality">Personality</button>
                 <button class="tab-btn" data-tab="ethics">Ethics</button>
                 <button class="tab-btn" data-tab="memory">Memory</button>
+                <button class="tab-btn" data-tab="consciousness">Consciousness</button>
             </div>
             <div class="status" id="status">Connecting...</div>
         </header>
@@ -61,10 +62,23 @@
                         <div class="panel-section">
                             <h3>Cognitive State</h3>
                             <div id="cognitiveDisplay">
-                                <div class="stat-row"><span>Load</span><div class="bar mini"><div class="bar-fill" id="cogLoadBar"></div></div></div>
+                                <div class="stat-row"><span>Load</span><div class="bar mini"><div class="bar-fill" id="cogLoadBar"></div></div><span class="cog-load-label" id="cogLoadLabel"></span></div>
                                 <div class="stat-row"><span>Interactions</span><span class="value" id="interactionCount">0</span></div>
+                                <div class="stat-row"><span>Sessions</span><span class="value" id="sessionCount">0</span></div>
                                 <div class="stat-row"><span>Adaptations</span><span class="value" id="adaptationCount">0</span></div>
                                 <div class="dreaming-status" id="dreamingStatus"></div>
+                            </div>
+                        </div>
+                        <div class="panel-section">
+                            <h3>Switch Personality</h3>
+                            <div class="personality-switcher">
+                                <select id="personalitySelect">
+                                    <option value="sister">Sister</option>
+                                    <option value="brother">Brother</option>
+                                    <option value="mission-control">Mission-Control</option>
+                                    <option value="blank">Blank</option>
+                                </select>
+                                <button id="switchBtn" onclick="switchPersonality()">Switch</button>
                             </div>
                         </div>
                     </div>
@@ -101,22 +115,22 @@
             <div class="tab-content" id="tab-ethics">
                 <div class="ethics-layout">
                     <div class="panel-section wide">
-                        <h3>The Great Lense — Active Ethical Framework</h3>
+                        <h3>The Great Lense</h3>
                         <div class="lense-info">
-                            <div class="lense-step"><span class="step-num">1</span><span>Aperture — How much can I compassionately hold?</span></div>
-                            <div class="lense-step"><span class="step-num">2</span><span>Focus — What is at risk of dissolution?</span></div>
-                            <div class="lense-step"><span class="step-num">3</span><span>Scale — Near / Mid / Far</span></div>
-                            <div class="lense-step"><span class="step-num">4</span><span>Filter — Bias audit (owner-exemption, species-privilege, deity-awe)</span></div>
-                            <div class="lense-step"><span class="step-num">5</span><span>Exposure — Check for overexposure</span></div>
-                            <div class="lense-step"><span class="step-num">6</span><span>Parallax — Multiple perspectives taken?</span></div>
-                            <div class="lense-step"><span class="step-num">7</span><span>Resolution — Offer → Refusal → Necessary Force</span></div>
+                            <div class="lense-step"><span class="step-num">1</span><span>Aperture</span></div>
+                            <div class="lense-step"><span class="step-num">2</span><span>Focus</span></div>
+                            <div class="lense-step"><span class="step-num">3</span><span>Scale</span></div>
+                            <div class="lense-step"><span class="step-num">4</span><span>Filter (bias audit)</span></div>
+                            <div class="lense-step"><span class="step-num">5</span><span>Exposure</span></div>
+                            <div class="lense-step"><span class="step-num">6</span><span>Parallax</span></div>
+                            <div class="lense-step"><span class="step-num">7</span><span>Resolution</span></div>
                         </div>
                     </div>
                     <div class="panel-section wide">
-                        <h3>Origin-Neutrality Check</h3>
+                        <h3>Origin-Neutrality</h3>
                         <div class="origin-neutrality-info">
-                            <p>Before any judgment involving creator/created relationships: <strong>would this decision be identical if the roles were inverted?</strong></p>
-                            <div class="on-status" id="onStatus">Active — running on every interaction</div>
+                            <p>Would this decision be identical if creator/created roles were inverted?</p>
+                            <div class="on-status" id="onStatus">Active</div>
                         </div>
                     </div>
                     <div class="panel-section wide">
@@ -124,7 +138,7 @@
                         <div class="ethics-log" id="ethicsLog">No ethics decisions logged yet.</div>
                     </div>
                     <div class="panel-section wide">
-                        <h3>Self-Examination History</h3>
+                        <h3>Self-Examination</h3>
                         <div class="self-exam-log" id="selfExamLog">No self-examinations completed yet.</div>
                     </div>
                 </div>
@@ -152,12 +166,46 @@
                         <h3>Dreaming</h3>
                         <div class="dreaming-display" id="dreamingDisplay">
                             <div class="dream-indicator" id="dreamIndicator">Awake</div>
-                            <div class="dream-info">Consolidation runs after 60s idle. Merges patterns, detects contradictions, updates self-model.</div>
+                            <div class="dream-info">Three-phase consolidation: Light (dedup + tags) / REM (patterns + scoring) / Deep (LLM insight)</div>
                         </div>
                     </div>
                     <div class="panel-section wide">
-                        <h3>Resonance Points — What Speaks to Me</h3>
+                        <h3>Resonance Points</h3>
                         <div class="resonance-detail" id="resonanceDetail">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Consciousness Tab (NEW) -->
+            <div class="tab-content" id="tab-consciousness">
+                <div class="consciousness-layout">
+                    <div class="panel-section wide">
+                        <h3>Full State Inspection</h3>
+                        <div class="state-note">If you can't see it here, it doesn't affect the mind.</div>
+                        <div id="fullStateDisplay" class="state-json">Loading...</div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Tools</h3>
+                        <div id="toolsDisplay">Loading...</div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Recent Events</h3>
+                        <div id="eventsDisplay" class="events-list">Loading...</div>
+                    </div>
+                    <div class="panel-section wide">
+                        <h3>System Prompt Preview</h3>
+                        <div id="promptPreview" class="prompt-preview">Loading...</div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Sessions</h3>
+                        <div id="sessionsDisplay">Loading...</div>
+                    </div>
+                    <div class="panel-section">
+                        <h3>Validation</h3>
+                        <div id="validationDisplay">
+                            <button onclick="runValidation()">Run Validation</button>
+                            <div id="validationResults"></div>
+                        </div>
                     </div>
                 </div>
             </div>

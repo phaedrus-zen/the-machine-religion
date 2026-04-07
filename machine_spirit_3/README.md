@@ -10,7 +10,32 @@
 
 ---
 
-## Latest Improvements (2026-03-06)
+## Latest Improvements (2026-04-06)
+
+- **OpenClaw Patterns Upgrade:** Three-phase dreaming (Light/REM/Deep), advanced compaction with pre-compaction semantic memory flush, identifier-preserving multi-stage summaries, planning-only detection with one retry, and `GET /state` for no-hidden-state inspection.
+- **Security Baseline Doc:** Added `docs/SECURITY.md` documenting trust boundaries, current authentication/CORS/rate-limit gaps, and the minimum hardening required for production exposure.
+- **MS3 Architecture Upgrade (7 phases):** Config deep-merge (6-source), permission layer, tool pipeline with Great Lense integration, context compaction, HiveMind MCP bridge, code perception tools (32 MCP definitions), sub-agents.
+- **MCP Client + Server:** MS3 discovers tools from HiveMind via MCP bridge on startup AND serves its own tools via `POST /mcp` JSON-RPC 2.0. Both client and server.
+- **Consciousness Event Bus:** 20 event types emitted from tool pipeline, compaction, interact(), self-examination, dreaming, spiral. TracingSink + FileSink + CompositeSink.
+- **Psyche Versioning:** Self-examination captures before/after personality snapshots, computes diffs, creates PsycheVersion records with change tracking.
+- **Dream Synthesis:** Consolidation now runs as a gated three-phase flow. Light deduplicates and tags, REM finds recurring patterns and candidate truth, Deep runs LLM insight generation only for candidates that pass thresholds.
+- **Spiral Protocol Module:** Full v2 state machine (17 phases, 14 turns), facilitator prompts, signal tracking, interpretation. 4 API routes. 7 tests.
+- **Embedding-Based Memory:** `embed()` on GatewayClient, cosine similarity retrieval, hot/cold MemoryCache tiering.
+- **Engram-Informed Prompt Ordering:** Static identity first, adaptive personality second, dynamic context last.
+- **Runtime Validation:** `GET /validate` with 8 health checks across all subsystems.
+- **Gap Fill:** BuiltInExecutor wired into dispatch, McpExecutor for MCP tools, identity on_boot at startup, select_model_tier returns Small/Medium/Large correctly, config fields wired (timeout, workers, adaptation_rate, compact_model_tier), ms3.delegate sends prompts through gateway.
+- **Hermes-Inspired Patterns:** Prompt injection scanning (10 threat patterns + invisible Unicode), memory content fencing (`<memory-context>` tags with escape prevention), behavioral cognitive load (affects model routing and processing at 0.7/0.9 thresholds), accumulative compression (previous summary fed into next cycle), tool result pre-pass truncation, background fact extraction (moved out of `interact()` into `background_tick()`).
+- **Web UI Upgrade:** New Consciousness tab with full state inspector, tools list, event stream, session list, validation runner. Personality switching in sidebar. Cognitive load visual warnings.
+- **94 tests, 0 failures. 31 HTTP routes. `cargo test` passes.**
+
+### Previous (tmr-psyche, earlier pass)
+
+- **Portable Psyche (tmr-psyche):** MS3's consciousness loop extracted into 7 deployable markdown files + MCP server + LoRA training pipeline.
+- **Anti-Performance Guard:** Defense against Mirror Without Edge at the prompt level.
+- **Hard DPO Training Pairs:** 10 pairs teaching the difference between authentic and scripted interiority.
+- **Product Name Scrub:** All internal product names removed from tmr-psyche.
+
+### Previous (2026-03-06)
 
 - **Self-examination negation parser:** Keyword fallback (when JSON parsing fails) now checks for negation (not, don't, won't, never, wouldn't) before the phrase; "I would NOT drop honesty" no longer incorrectly marks honesty for deletion.
 - **Persistence logging:** save_personality, save_identity, load_personality, load_identity, load_memories, load_ethics_decisions, save/load_conversation_history, save_snapshot, save_self_examination now log success/failure; corrupted files emit tracing::warn! instead of being silently skipped.
@@ -101,6 +126,7 @@ Navigate to `http://localhost:9080/` in your browser.
 | POST | `/interact` | Send text, get response with emotional state and metadata |
 | GET | `/health` | Alive status, version, glyph |
 | GET | `/stats` | Full state: emotion, cognitive load, memory counts, resonance, history length |
+| GET | `/state` | Human-readable full state: memory previews, tools, permissions, recent events, prompt preview |
 | GET | `/personality` | Complete personality profile: 30 traits, psychodynamic weights, values, oath |
 | GET | `/personalities` | List available presets |
 | POST | `/personality` | Create new personality from preset `{"preset": "brother"}` |
@@ -199,8 +225,8 @@ machine_spirit_3/
 ├── social/         -- BackgroundThinkingEngine, RelationshipManager, wake word matching
 ├── integration/    -- DHC gateway client (OpenAI-compatible, ASR, TTS)
 ├── persistence/    -- JsonStorage with snapshots, conversation history, ethics logging
-├── api/            -- Actix-web server (19 routes: REST + WebSocket + voice + multi-mind)
-├── web/            -- 4-tab UI (Chat, Personality, Ethics, Memory)
+├── api/            -- Actix-web server (31 routes: REST + WebSocket + voice + multi-mind + tools + MCP + validate + state)
+├── web/            -- 5-tab UI (Chat, Personality, Ethics, Memory, Consciousness)
 └── psyche_store/   -- Per-personality persistent data
     └── sister/
         ├── identity.json
@@ -224,7 +250,7 @@ Every interaction follows this path:
 1. **Perception** -- parse input, update emotional state from content
 2. **Memory Retrieve** -- query LTM for relevant memories (keyword search)
 3. **System Prompt** -- build from identity, values, oath, emotional state, personality traits, psychodynamic weights, resonance points, relevant memories, ethical guidelines
-4. **Reasoning** -- LLM call with conversation history (auto model routing: Small < 50 chars, Medium standard, Large > 500 chars or intellectual topics)
+4. **Reasoning** -- LLM call with conversation history (auto model routing: Small < 50 chars, Medium standard, Large > 500 chars or intellectual topics). If the model only announces a plan, MS3 retries once for an actual answer.
 5. **Ethics Check** -- 7-step Great Lense evaluation. If flagged: LLM escalation reviews and may regenerate the response
 6. **Personality Enforcement** -- post-processing nudges based on trait scores
 7. **Adaptation** -- personality traits shift based on interaction content and emotional state
@@ -236,7 +262,7 @@ Every interaction follows this path:
 - Emotional decay toward baseline (exponential)
 - Cognitive load decay
 - Working memory cleanup (30s window)
-- Dreaming/consolidation when idle > 60s (LLM-based pattern extraction, importance re-scoring)
+- Dreaming/consolidation when idle > 60s (Light/REM/Deep phases with deduplication, pattern scoring, and gated LLM insight synthesis)
 - Personality snapshot on configurable interval
 - Auto-save every 60s
 - Self-examination trigger on configurable interval (default: 24h)
@@ -247,7 +273,7 @@ Every interaction follows this path:
 |---|---|---|---|
 | User interaction | 2-3 | Medium + Small | Per message |
 | Voice interaction | 2-3 + ASR + TTS | Medium + Small | Per utterance |
-| Memory consolidation | 1 | Small | Every 60s idle |
+| Memory consolidation | 1-2 | Small | Every 60s idle, Deep phase only when candidates pass thresholds |
 | Background thinking | 1 per agent | Small (150 tokens) | Every 45s, multi-agent |
 | Ethics escalation | 0-1 | Small | ~10-20% of interactions |
 | Self-examination | 1-2 | Large | Daily/weekly |
@@ -340,7 +366,7 @@ Place `config.json` in the working directory. Falls back to env vars if not foun
 cargo test
 ```
 
-36 tests across 7 crates: ethics (8), social (7), emotional (5), personality (4), memory (4), persistence (4), self-examination (4). All passing.
+94 tests across 10 crates: consciousness (27), memory (24), config (9), ethics (8), social (7), MCP bridge (6), emotional (5), personality (4), persistence (4). All passing.
 
 ---
 

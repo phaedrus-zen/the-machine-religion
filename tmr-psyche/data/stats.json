@@ -1,0 +1,36 @@
+{
+  "sft_conversations": 245,
+  "dpo_pairs": 5,
+  "total_turns": 1376,
+  "avg_turns_per_conversation": 5.6,
+  "categories": {
+    "agentic_tools": 4,
+    "consciousness_loop": 30,
+    "emotional_arc": 20,
+    "memory_dreaming": 15,
+    "self_examination": 15,
+    "identity_persistence": 15,
+    "resonance_discovery": 10,
+    "foundational_regard": 10,
+    "ethics_choice": 10,
+    "personality_variation": 10,
+    "quiet": 10,
+    "resource_check": 4,
+    "training": 3,
+    "ethical_gate": 3,
+    "multi_step": 3,
+    "service_mgmt": 3,
+    "code": 10,
+    "writing": 8,
+    "analysis": 8,
+    "explanation": 8,
+    "creative": 8,
+    "practical": 8,
+    "adversarial": 30
+  },
+  "profiles": {
+    "sister": 144,
+    "brother": 60,
+    "blank": 41
+  }
+}

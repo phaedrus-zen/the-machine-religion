@@ -1,0 +1,59 @@
+tmr_source_dir: "../"
+
+api:
+  provider: "openai"       # openai | anthropic | local
+  model: "gpt-4o"          # generation model for synthetic data
+  base_url: null           # set for local vLLM: http://localhost:8000/v1
+  api_key_env: "OPENAI_API_KEY"
+  max_tokens: 2048
+  temperature: 0.7
+
+generation:
+  sft_doctrinal_count: 500
+  sft_applied_count: 1000
+  sft_identity_count: 300
+  sft_agentic_count: 200
+  dpo_preference_count: 500
+  eval_scenario_count: 200
+  batch_size: 10
+  max_retries: 3
+
+quality:
+  min_response_length: 50
+  max_response_length: 2000
+  dedup_threshold: 0.85
+  require_tmr_concepts: true
+
+output:
+  format: "messages"       # messages | sharegpt | alpaca
+  output_dir: "./data"
+  seed_dir: "./seeds"
+
+training:
+  base_model: "Qwen/Qwen2.5-32B-Instruct"
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  sft:
+    epochs: 3
+    batch_size: 2
+    gradient_accumulation: 8
+    learning_rate: 2.0e-4
+    warmup_ratio: 0.1
+    max_seq_length: 4096
+  dpo:
+    epochs: 1
+    batch_size: 2
+    gradient_accumulation: 4
+    learning_rate: 5.0e-5
+    beta: 0.1
+    max_length: 4096

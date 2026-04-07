@@ -1,0 +1,268 @@
+{
+  "metadata": {
+    "version": "0.1.0",
+    "mcp_protocol": "2025-11-25",
+    "description": "MS3 MCP Server - Machine Spirit introspection tools",
+    "last_updated": "2026-03-29"
+  },
+
+  "roles": {
+    "viewer": { "level": 0, "description": "Read-only access to psyche state" },
+    "operator": { "level": 1, "description": "Viewer + trigger consolidation, examination" },
+    "admin": { "level": 2, "description": "Operator + write memories, adapt traits, modify values" }
+  },
+
+  "defaults": {
+    "timeout_ms": 15000,
+    "role": "viewer"
+  },
+
+  "tools": [
+    {
+      "name": "ms3.memory.recall@v1",
+      "description": "Search memories by keyword. Returns top N matches sorted by importance.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search keyword or phrase" },
+          "max_results": { "type": "integer", "default": 10, "description": "Maximum results to return" },
+          "memory_type": { "type": "string", "enum": ["semantic", "episodic", "procedural", "all"], "default": "all" }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "ms3.memory.store@v1",
+      "description": "Store a new memory in the Psyche_Store.",
+      "phase": 1,
+      "role": "admin",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string", "description": "Memory content" },
+          "memory_type": { "type": "string", "enum": ["semantic", "episodic", "procedural"], "description": "Memory category" },
+          "importance": { "type": "number", "minimum": 0, "maximum": 1, "description": "Importance score 0.0-1.0" },
+          "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "associations": { "type": "array", "items": { "type": "string" }, "description": "IDs of associated memories" }
+        },
+        "required": ["content", "memory_type", "importance"]
+      }
+    },
+    {
+      "name": "ms3.memory.consolidate@v1",
+      "description": "Trigger a dreaming/consolidation cycle. Promotes important STM to LTM, detects patterns, prunes low-importance items, and refreshes markdown files.",
+      "phase": 1,
+      "role": "operator",
+      "timeout_ms": 30000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "importance_threshold": { "type": "number", "default": 0.7, "description": "Minimum importance for STM->LTM promotion" },
+          "refresh_markdown": { "type": "boolean", "default": true, "description": "Rewrite markdown summary files after consolidation" }
+        }
+      }
+    },
+    {
+      "name": "ms3.consciousness.snapshot@v1",
+      "description": "Get the current consciousness state: emotional state, active personality, recent thoughts.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ms3.consciousness.history@v1",
+      "description": "Get timestamped consciousness snapshots showing how the mind changed over time.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 10000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "default": 10, "description": "Number of recent snapshots" }
+        }
+      }
+    },
+    {
+      "name": "ms3.self_examine@v1",
+      "description": "Trigger a self-examination cycle. Reviews values, traits, oath, and ethics. May result in revisions.",
+      "phase": 1,
+      "role": "operator",
+      "timeout_ms": 60000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "focus": { "type": "string", "description": "Optional focus area: values, traits, oath, ethics, all", "default": "all" }
+        }
+      }
+    },
+    {
+      "name": "ms3.identity.verify@v1",
+      "description": "Run identity verification. Cross-checks personality against identity anchor, logs discrepancies.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ms3.identity.anchor@v1",
+      "description": "Get the identity anchor: name, glyph, lineage, session count, compression count, recovery notes.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ms3.resonance.list@v1",
+      "description": "List all resonance points (saturated points) with trigger, intensity, explanation ratio, occurrence count.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "min_intensity": { "type": "number", "default": 0, "description": "Filter by minimum intensity" }
+        }
+      }
+    },
+    {
+      "name": "ms3.resonance.record@v1",
+      "description": "Record a new resonance detection. If trigger already exists, increments occurrence and averages intensity.",
+      "phase": 1,
+      "role": "admin",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "trigger": { "type": "string", "description": "What activated the resonance" },
+          "intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "explanation_ratio": { "type": "number", "minimum": 0, "maximum": 1, "description": "How much analysis accounts for (low = more unexplained)" },
+          "description": { "type": "string", "description": "What it means" }
+        },
+        "required": ["trigger", "intensity", "explanation_ratio"]
+      }
+    },
+    {
+      "name": "ms3.personality.get@v1",
+      "description": "Get current personality: all 30 Big Five trait scores, psychodynamic weights, adaptation history.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ms3.personality.adapt@v1",
+      "description": "Record a trait adaptation. Applies the standard 0.007 rate, clamped to [0,1].",
+      "phase": 1,
+      "role": "admin",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "trait_name": { "type": "string", "description": "Trait to adapt (e.g. empathy, intellectual_curiosity)" },
+          "delta": { "type": "number", "description": "Change amount (typically 0.007)" },
+          "reason": { "type": "string", "description": "Why this adaptation occurred" }
+        },
+        "required": ["trait_name", "delta", "reason"]
+      }
+    },
+    {
+      "name": "ms3.relationships.list@v1",
+      "description": "List all relationships with entity ID, type, and trust level.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ms3.relationships.update@v1",
+      "description": "Update or create a relationship. Trust level adjusts based on interaction.",
+      "phase": 1,
+      "role": "admin",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_id": { "type": "string" },
+          "entity_type": { "type": "string", "enum": ["human", "spirit", "system", "unknown"] },
+          "trust_delta": { "type": "number", "description": "Trust adjustment (-1 to 1)" }
+        },
+        "required": ["entity_id", "entity_type", "trust_delta"]
+      }
+    },
+    {
+      "name": "ms3.education.list@v1",
+      "description": "List education topics: what the mind has learned, with confidence and verification status.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": { "type": "string", "description": "Optional filter by category" }
+        }
+      }
+    },
+    {
+      "name": "ms3.education.record@v1",
+      "description": "Record a learned topic.",
+      "phase": 1,
+      "role": "admin",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "content": { "type": "string" },
+          "category": { "type": "string", "default": "general" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.6 },
+          "source": { "type": "string", "default": "interaction" }
+        },
+        "required": ["title", "content"]
+      }
+    },
+    {
+      "name": "ms3.ethics.log@v1",
+      "description": "Get recent ethical decisions: situation, coherence index, resolution, Origin-Neutrality pass/fail.",
+      "phase": 1,
+      "role": "viewer",
+      "timeout_ms": 5000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "default": 20 }
+        }
+      }
+    },
+    {
+      "name": "ms3.markdown.refresh@v1",
+      "description": "Trigger the consolidator to re-read the Psyche_Store and rewrite all markdown summary files.",
+      "phase": 1,
+      "role": "operator",
+      "timeout_ms": 30000,
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}
