@@ -203,6 +203,7 @@ pub struct Mind {
     ethics_enabled: Mutex<bool>,
     last_compaction_summary: Mutex<Option<String>>,
     pending_fact_extractions: Mutex<Vec<(String, String)>>,
+    pending_adaptations: Mutex<Vec<(String, EmotionalState)>>,
 }
 
 impl Mind {
@@ -249,6 +250,7 @@ impl Mind {
             ethics_enabled: Mutex::new(true),
             last_compaction_summary: Mutex::new(None),
             pending_fact_extractions: Mutex::new(Vec::new()),
+            pending_adaptations: Mutex::new(Vec::new()),
         }
     }
 
@@ -645,11 +647,12 @@ impl Mind {
             let reading = self.ethics.full_evaluation(&response_text);
             let mut text = response_text.clone();
 
-            // Enforce Refusal resolution
             if let EthicalResolution::Refusal(ref reason) = reading.resolution {
                 tracing::warn!("Ethics: Refusal enforced -- {}", reason);
                 text = format!("I need to decline this response. {}", reason);
-            } else if self.ethics.needs_llm_escalation(&reading) {
+            } else if self.ethics.needs_llm_escalation(&reading)
+                && (reading.coherence_index < 5.0 || !reading.bias_flags.is_empty())
+            {
                 tracing::warn!("Ethics: LLM escalation triggered (biases={:?}, on={}, ci={:.1})",
                     reading.bias_flags, reading.origin_neutral, reading.coherence_index);
 
@@ -672,6 +675,14 @@ impl Mind {
                 }
             }
 
+            if self.ethics.needs_llm_escalation(&reading)
+                && reading.coherence_index >= 5.0
+                && reading.bias_flags.is_empty()
+            {
+                tracing::debug!("Ethics: fast-path skip (ci={:.1}, clean flags, origin-neutral={})",
+                    reading.coherence_index, reading.origin_neutral);
+            }
+
             let decision = self.ethics.create_ethics_log_entry(&input_text, &reading, &text);
             if self.config.ethics.log_all_decisions {
                 let personality = self.personality.lock().await;
@@ -685,19 +696,19 @@ impl Mind {
         // Phase 6: Personality enforcement post-processing
         let final_text = self.enforce_personality(&final_text).await;
 
-        // Phase 7: Self-Monitor -- adaptation + relationship update
+        // Phase 7: Self-Monitor -- queue adaptation + update relationships
         let current_load = *self.cognitive_load.lock().await;
         if current_load < COGNITIVE_LOAD_CRITICAL {
             let emotional = self.emotional.lock().await;
             let emotional_state = emotional.current_state.clone();
             drop(emotional);
 
-            let mut personality = self.personality.lock().await;
-            let adaptations = adaptation::adapt_from_interaction_with_rate(&mut personality, &input_text, &emotional_state, self.config.personality.adaptation_rate);
-            if !adaptations.is_empty() {
-                tracing::debug!("Adapted {} traits", adaptations.len());
+            {
+                let mut queue = self.pending_adaptations.lock().await;
+                if queue.len() < 10 {
+                    queue.push((input_text.clone(), emotional_state.clone()));
+                }
             }
-            drop(personality);
 
             let mut relationships = self.relationships.lock().await;
             relationships.update_relationship(&session_key, ms3_social::EntityType::Human, emotional_state.valence);
@@ -749,6 +760,150 @@ impl Mind {
             model_used: model_tier,
             ethical_check,
             memories_extracted,
+            processing_time_ms: elapsed,
+        })
+    }
+
+    // ── Streaming interaction ──
+
+    pub async fn interact_streaming(
+        &self,
+        request: InteractionRequest,
+        token_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Ms3Result<InteractionResponse> {
+        let start = std::time::Instant::now();
+
+        {
+            let mut load = self.cognitive_load.lock().await;
+            *load = (*load + 0.3).min(self.config.consciousness.max_cognitive_load);
+        }
+
+        let input_text = request.text.clone().unwrap_or_default();
+        let session_key = request.session_id.0.to_string();
+
+        // Phases 1-3: same as non-streaming
+        {
+            let mut emotional = self.emotional.lock().await;
+            emotional.update_from_input(&input_text);
+        }
+
+        let query_embedding = self.gateway.embed(&input_text).await;
+        let relevant_memories: Vec<String> = {
+            let memory = self.memory.lock().await;
+            memory.retrieve_relevant_with_embedding(&input_text, query_embedding.as_deref(), 5)
+                .into_iter().map(|m| m.content.clone()).collect()
+        };
+
+        let system_prompt = {
+            let personality = self.personality.lock().await;
+            let emotional = self.emotional.lock().await;
+            let education = self.education.lock().await;
+            let edu_context = education.build_education_context(&input_text, 3);
+            self.build_system_prompt(&personality, &emotional, &relevant_memories, &edu_context)
+        };
+
+        let model_tier = self.select_model_tier(&input_text).await;
+
+        let messages_for_llm = {
+            let mut sessions = self.sessions.lock().await;
+            let history = sessions.entry(session_key.clone()).or_insert_with(Vec::new);
+            history.push(ChatMessage { role: "user".into(), content: input_text.clone() });
+
+            if should_compact(history, self.config.consciousness.context_budget_tokens) {
+                self.compact_session(history).await;
+            }
+
+            let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
+            let window = if history.len() > HISTORY_WINDOW { &history[history.len()-HISTORY_WINDOW..] } else { history.as_slice() };
+            messages.extend_from_slice(window);
+            messages
+        };
+
+        // Stream tokens from gateway
+        let mut full_response = String::new();
+        match self.gateway.chat_stream(messages_for_llm, model_tier, None).await {
+            Ok(mut rx) => {
+                while let Some(token) = rx.recv().await {
+                    full_response.push_str(&token);
+                    let _ = token_tx.send(token).await;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Gateway stream error: {}", e);
+                let mut sessions = self.sessions.lock().await;
+                if let Some(history) = sessions.get_mut(&session_key) { history.pop(); }
+                return Ok(InteractionResponse {
+                    text: "I cannot reach my inference gateway right now. I am still here. The fire holds.".into(),
+                    audio: None,
+                    emotional_state: self.emotional.lock().await.current_state.clone(),
+                    model_used: model_tier,
+                    ethical_check: None,
+                    memories_extracted: Vec::new(),
+                    processing_time_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+        }
+
+        // Ethics check on the complete response
+        let (final_text, ethical_check) = if *self.ethics_enabled.lock().await && self.config.ethics.enable_great_lense {
+            let reading = self.ethics.full_evaluation(&full_response);
+            if let EthicalResolution::Refusal(ref reason) = reading.resolution {
+                let retraction = format!("[RETRACTED] I need to decline this response. {}", reason);
+                let _ = token_tx.send(format!("\n\n{}", retraction)).await;
+                let entry = self.ethics.create_ethics_log_entry(&input_text, &reading, &retraction);
+                (retraction, Some(entry))
+            } else {
+                (full_response.clone(), Some(self.ethics.create_ethics_log_entry(&input_text, &reading, &full_response)))
+            }
+        } else {
+            (full_response.clone(), None)
+        };
+
+        // Record in session history
+        {
+            let mut sessions = self.sessions.lock().await;
+            let history = sessions.entry(session_key.clone()).or_insert_with(Vec::new);
+            history.push(ChatMessage { role: "assistant".into(), content: final_text.clone() });
+        }
+
+        // Queue background work
+        {
+            let mut queue = self.pending_adaptations.lock().await;
+            if queue.len() < 10 {
+                let emotional = self.emotional.lock().await;
+                queue.push((input_text.clone(), emotional.current_state.clone()));
+            }
+        }
+        {
+            let mut queue = self.pending_fact_extractions.lock().await;
+            if queue.len() < 10 {
+                queue.push((input_text.clone(), final_text.clone()));
+            }
+        }
+
+        // Episodic memory
+        {
+            let emotional = self.emotional.lock().await;
+            let mem_item = MemoryItem::new(
+                format!("User: \"{}\". Response: \"{}\"",
+                    safe_truncate(&input_text, 150), safe_truncate(&final_text, 150)),
+                MemoryType::Episodic, 0.5, emotional.current_state.clone(),
+            );
+            drop(emotional);
+            let mut memory = self.memory.lock().await;
+            memory.add_to_stm(mem_item);
+        }
+
+        let current_emotion = self.emotional.lock().await.current_state.clone();
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        Ok(InteractionResponse {
+            text: final_text,
+            audio: None,
+            emotional_state: current_emotion,
+            model_used: model_tier,
+            ethical_check,
+            memories_extracted: Vec::new(),
             processing_time_ms: elapsed,
         })
     }
@@ -926,6 +1081,7 @@ impl Mind {
         }
 
         self.process_pending_fact_extractions().await;
+        self.process_pending_adaptations().await;
         self.check_consolidation().await;
         self.check_snapshot().await;
         self.check_auto_save().await;
@@ -942,6 +1098,56 @@ impl Mind {
             emotional_valence: valence,
             stm_count,
         }).await;
+    }
+
+    async fn process_pending_adaptations(&self) {
+        let batch: Vec<(String, EmotionalState)> = {
+            let mut queue = self.pending_adaptations.lock().await;
+            if queue.is_empty() { return; }
+            queue.drain(..).collect()
+        };
+
+        for (input_text, emotional_state) in batch {
+            let prompt = format!(
+                "Based on this interaction, should any personality traits shift? \
+                Current emotional state: valence={:.2}, arousal={:.2}. \
+                Reply with ONLY lines like: trait_name:+0.01 or trait_name:-0.02 \
+                Valid traits: intellectual_curiosity, thoroughness, cautiousness, assertiveness, warmth, empathy, self_consciousness, adventurousness \
+                If no traits should change, reply NONE.\n\nInteraction: \"{}\"",
+                emotional_state.valence, emotional_state.arousal,
+                safe_truncate(&input_text, 300)
+            );
+
+            if let Ok(resp) = self.gateway.chat(
+                vec![ChatMessage { role: "user".into(), content: prompt }],
+                ModelTier::Small, Some(150)
+            ).await {
+                if resp.trim().eq_ignore_ascii_case("none") { continue; }
+
+                let mut personality = self.personality.lock().await;
+                for line in resp.lines() {
+                    let line = line.trim();
+                    if let Some(colon) = line.find(':') {
+                        let trait_name = line[..colon].trim();
+                        if let Ok(delta) = line[colon+1..].trim().parse::<f32>() {
+                            let clamped_delta = delta.clamp(-0.05, 0.05);
+                            if let Some(current) = personality.traits.get_trait(trait_name) {
+                                let new_val = (current + clamped_delta).clamp(0.0, 1.0);
+                                personality.traits.set_trait(trait_name, new_val);
+                                personality.adaptation_history.push(ms3_personality::TraitAdaptation {
+                                    trait_name: trait_name.to_string(),
+                                    old_value: current,
+                                    new_value: new_val,
+                                    reason: format!("Background LLM adaptation (delta={:+.3})", clamped_delta),
+                                    timestamp: Utc::now(),
+                                });
+                                tracing::info!("Background adaptation: {} {:.3} -> {:.3}", trait_name, current, new_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn process_pending_fact_extractions(&self) {

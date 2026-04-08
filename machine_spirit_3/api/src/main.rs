@@ -15,9 +15,87 @@ use ms3_persistence::JsonStorage;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use actix_web::dev::{ServiceRequest, ServiceResponse, Transform, Service};
+use actix_web::Error;
+use std::future::{Ready, ready};
 
 type MindState = web::Data<Arc<Mind>>;
 type ManagerState = web::Data<Arc<Mutex<MindManager>>>;
+
+// ── Bearer Token Auth Middleware ──
+
+#[derive(Clone)]
+pub struct BearerAuth {
+    token: Option<String>,
+}
+
+impl BearerAuth {
+    pub fn new(token: Option<String>) -> Self { Self { token } }
+}
+
+impl<S, B> Transform<S, ServiceRequest> for BearerAuth
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type Transform = BearerAuthMiddleware<S>;
+    type InitError = ();
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ready(Ok(BearerAuthMiddleware {
+            service: std::rc::Rc::new(std::cell::RefCell::new(service)),
+            token: self.token.clone(),
+        }))
+    }
+}
+
+pub struct BearerAuthMiddleware<S> {
+    service: std::rc::Rc<std::cell::RefCell<S>>,
+    token: Option<String>,
+}
+
+impl<S, B> Service<ServiceRequest> for BearerAuthMiddleware<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.service.borrow_mut().poll_ready(cx)
+    }
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let token = self.token.clone();
+        let svc = self.service.clone();
+
+        Box::pin(async move {
+            if let Some(ref expected) = token {
+                let method = req.method().clone();
+                let is_mutating = method == actix_web::http::Method::POST
+                    || method == actix_web::http::Method::PUT
+                    || method == actix_web::http::Method::DELETE;
+
+                if is_mutating {
+                    let auth_header = req.headers().get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+
+                    let provided = auth_header.strip_prefix("Bearer ").unwrap_or("");
+                    if provided != expected.as_str() {
+                        return Err(actix_web::error::ErrorUnauthorized("Invalid or missing bearer token"));
+                    }
+                }
+            }
+            svc.borrow_mut().call(req).await
+        })
+    }
+}
 
 fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -251,24 +329,22 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                             let _ = session.text(serde_json::json!({
                                                 "type": "stream_start"
                                             }).to_string()).await;
-                                        }
 
-                                        match mind.interact(request).await {
-                                            Ok(r) => {
-                                                if wants_stream {
-                                                    // Real streaming: send tokens as they arrive
-                                                    // Note: interact() already completed, so we stream the result.
-                                                    // True LLM streaming would require refactoring interact() to yield tokens.
-                                                    // For now, we chunk the completed response into small pieces for
-                                                    // responsive UI updates.
-                                                    let words: Vec<&str> = r.text.split_whitespace().collect();
-                                                    for chunk in words.chunks(2) {
-                                                        let text = chunk.join(" ");
-                                                        let _ = session.text(serde_json::json!({
-                                                            "type": "stream_token", "data": { "token": text }
-                                                        }).to_string()).await;
-                                                        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
-                                                    }
+                                            let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<String>(100);
+                                            let mind_clone = mind.clone();
+                                            let request_clone = request.clone();
+                                            let result_handle = tokio::spawn(async move {
+                                                mind_clone.interact_streaming(request_clone, token_tx).await
+                                            });
+
+                                            while let Some(token) = token_rx.recv().await {
+                                                let _ = session.text(serde_json::json!({
+                                                    "type": "stream_token", "data": { "token": token }
+                                                }).to_string()).await;
+                                            }
+
+                                            match result_handle.await {
+                                                Ok(Ok(r)) => {
                                                     let _ = session.text(serde_json::json!({
                                                         "type": "stream_end",
                                                         "data": {
@@ -278,10 +354,23 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                                 "primary": format!("{:?}", r.emotional_state.primary),
                                                             },
                                                             "processing_time_ms": r.processing_time_ms,
-                                                            "memories_extracted": r.memories_extracted,
                                                         }
                                                     }).to_string()).await;
-                                                } else {
+                                                }
+                                                Ok(Err(e)) => {
+                                                    let _ = session.text(serde_json::json!({
+                                                        "type": "error", "data": { "message": e.to_string() }
+                                                    }).to_string()).await;
+                                                }
+                                                Err(e) => {
+                                                    let _ = session.text(serde_json::json!({
+                                                        "type": "error", "data": { "message": e.to_string() }
+                                                    }).to_string()).await;
+                                                }
+                                            }
+                                        } else {
+                                        match mind.interact(request).await {
+                                            Ok(r) => {
                                                     let _ = session.text(serde_json::json!({
                                                         "type": "response",
                                                         "data": {
@@ -298,7 +387,6 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                             "memories_extracted": r.memories_extracted,
                                                         }
                                                     }).to_string()).await;
-                                                }
                                             }
                                             Err(e) => {
                                                 let _ = session.text(serde_json::json!({
@@ -306,6 +394,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                 }).to_string()).await;
                                             }
                                         }
+                                        } // close else (non-streaming)
                                     }
                                     "ping" => {
                                         let _ = session.text(serde_json::json!({
@@ -1017,6 +1106,10 @@ async fn main() -> std::io::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let data = mind.clone();
     let mgr_data = manager.clone();
+    let auth_token = config.server.auth_token.clone();
+    if auth_token.is_some() {
+        tracing::info!("║ Auth: bearer token required for mutating endpoints");
+    }
 
     tracing::info!("║ http://localhost:{}/", config.server.port);
     tracing::info!("║ Routes: /interact /health /stats /state /personality /personalities");
@@ -1028,6 +1121,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            .wrap(BearerAuth::new(auth_token.clone()))
             .wrap(Cors::permissive())
             .app_data(web::Data::new(data.clone()))
             .app_data(web::Data::new(mgr_data.clone()))

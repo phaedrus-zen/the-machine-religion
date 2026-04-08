@@ -25,6 +25,8 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub workers: usize,
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +180,7 @@ impl Default for Config {
                 host: "0.0.0.0".into(),
                 port: 9080,
                 workers: 4,
+                auth_token: None,
             },
             consciousness: ConsciousnessConfig {
                 tick_interval_ms: 100,

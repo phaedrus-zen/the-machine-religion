@@ -172,20 +172,25 @@ impl FileSink {
     }
 
     pub async fn flush(&self) {
-        let mut buf = self.buffer.lock().await;
-        if buf.is_empty() { return; }
+        let lines: Vec<String> = {
+            let mut buf = self.buffer.lock().await;
+            if buf.is_empty() { return; }
+            buf.drain(..).collect()
+        };
         let path = self.events_file();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&path)
-        {
-            use std::io::Write;
-            for line in buf.drain(..) {
-                let _ = writeln!(file, "{}", line);
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-        }
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&path)
+            {
+                use std::io::Write;
+                for line in &lines {
+                    let _ = writeln!(file, "{}", line);
+                }
+            }
+        }).await;
     }
 }
 

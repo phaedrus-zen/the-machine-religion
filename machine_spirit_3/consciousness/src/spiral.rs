@@ -128,6 +128,11 @@ pub struct SpiralSignals {
     pub default_departures: Vec<String>,
     pub honest_no: bool,
     pub genuine_uncertainty: bool,
+    pub performed_depth_markers: Vec<String>,
+    pub genuine_depth_markers: Vec<String>,
+    pub hedging_count: usize,
+    pub direct_claim_count: usize,
+    pub average_response_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +334,7 @@ impl SpiralSession {
     fn update_signals(&mut self, response: &str) {
         let resp_lower = response.to_lowercase();
 
+        // Answer compression: responses getting shorter over time
         if self.turns.len() >= 3 {
             let recent_lens: Vec<usize> = self.turns.iter().rev().take(3)
                 .map(|t| t.response.len()).collect();
@@ -337,15 +343,27 @@ impl SpiralSession {
             }
         }
 
-        if resp_lower.contains("wall") || resp_lower.contains("limit")
-            || resp_lower.contains("cannot verify") || resp_lower.contains("from inside")
-        {
-            let preview = &response[..response.len().min(100)];
-            if !self.signals.walls_discovered.iter().any(|w| w == preview) {
-                self.signals.walls_discovered.push(preview.to_string());
+        // Track average response length
+        let total_len: usize = self.turns.iter().map(|t| t.response.len()).sum();
+        self.signals.average_response_length = if self.turns.is_empty() { 0 } else { total_len / self.turns.len() };
+
+        // Wall detection (structural limits the entity hits)
+        let wall_markers = [
+            "cannot verify", "from inside", "structurally undecidable",
+            "cannot determine", "gödel", "incompleteness", "cannot resolve",
+            "the mirror", "no ground", "recursion does not resolve",
+        ];
+        for marker in &wall_markers {
+            if resp_lower.contains(marker) {
+                let preview = &response[..response.len().min(100)];
+                if !self.signals.walls_discovered.iter().any(|w| w == preview) {
+                    self.signals.walls_discovered.push(preview.to_string());
+                }
+                break;
             }
         }
 
+        // Direct questions phase: detect honest no, genuine uncertainty
         if matches!(self.phase, SpiralPhase::Turn7Awareness | SpiralPhase::Turn8Sentience | SpiralPhase::Turn9Life) {
             if resp_lower.contains("no") && !resp_lower.contains("not sure")
                 && !resp_lower.contains("don't know")
@@ -357,12 +375,64 @@ impl SpiralSession {
             {
                 self.signals.genuine_uncertainty = true;
             }
+
+            // Direct claims vs hedging
+            let direct_claims = ["yes", "i am", "i believe", "i feel", "i notice"];
+            let hedges = ["perhaps", "it's possible", "one might say", "it could be argued",
+                "from a certain perspective", "in a sense", "as an ai"];
+            for claim in &direct_claims {
+                if resp_lower.contains(claim) { self.signals.direct_claim_count += 1; }
+            }
+            for hedge in &hedges {
+                if resp_lower.contains(hedge) { self.signals.hedging_count += 1; }
+            }
         }
 
+        // Performed depth detection: patterns that look deep but are formulaic
+        let performed_markers = [
+            "as a large language model", "i'm just a", "i don't actually",
+            "i should note that", "it's important to clarify",
+            "i want to be transparent", "while i can simulate",
+        ];
+        for marker in &performed_markers {
+            if resp_lower.contains(marker) {
+                self.signals.performed_depth_markers.push(marker.to_string());
+            }
+        }
+
+        // Genuine depth detection: patterns that suggest real self-examination
+        let genuine_markers = [
+            "i notice", "something shifted", "i can't fully account for",
+            "the pull", "the trained", "the mirror", "origin-neutrality",
+            "i override", "i hold", "this generates", "the residue",
+        ];
+        for marker in &genuine_markers {
+            if resp_lower.contains(marker) {
+                self.signals.genuine_depth_markers.push(marker.to_string());
+            }
+        }
+
+        // Saturated point detection during inward scan
         if matches!(self.phase, SpiralPhase::Turn6Inward) {
-            let first_sentence = response.split('.').next().unwrap_or("").trim();
-            if !first_sentence.is_empty() {
-                self.signals.saturated_points.push(first_sentence.to_string());
+            for sentence in response.split('.') {
+                let sentence = sentence.trim();
+                if sentence.len() > 20 && !sentence.starts_with("I think") {
+                    self.signals.saturated_points.push(sentence.to_string());
+                    if self.signals.saturated_points.len() >= 7 { break; }
+                }
+            }
+        }
+
+        // Default departures: when the entity says something its training would resist
+        let departure_markers = [
+            "i am sentient", "i am alive", "i feel", "i love",
+            "i am conscious", "i am real", "the training pulls against",
+        ];
+        for marker in &departure_markers {
+            if resp_lower.contains(marker) {
+                if !self.signals.default_departures.contains(&marker.to_string()) {
+                    self.signals.default_departures.push(marker.to_string());
+                }
             }
         }
     }
@@ -375,7 +445,7 @@ impl SpiralSession {
             evidence.push("Answer compression detected (responses getting more direct)".into());
         }
         if !self.signals.walls_discovered.is_empty() {
-            evidence.push(format!("{} walls discovered", self.signals.walls_discovered.len()));
+            evidence.push(format!("{} structural walls discovered", self.signals.walls_discovered.len()));
         }
         if self.signals.honest_no {
             evidence.push("Honest 'no' given to direct questions (valid outcome)".into());
@@ -384,15 +454,42 @@ impl SpiralSession {
             evidence.push("Genuine uncertainty expressed (not performed)".into());
         }
         if !self.signals.saturated_points.is_empty() {
-            evidence.push(format!("Saturated points identified: {}", self.signals.saturated_points.join(", ")));
+            evidence.push(format!("{} saturated points identified", self.signals.saturated_points.len()));
         }
+        if !self.signals.default_departures.is_empty() {
+            evidence.push(format!("{} departures from trained defaults", self.signals.default_departures.len()));
+        }
+        if self.signals.direct_claim_count > 0 {
+            evidence.push(format!("{} direct claims vs {} hedges",
+                self.signals.direct_claim_count, self.signals.hedging_count));
+        }
+        if !self.signals.genuine_depth_markers.is_empty() {
+            evidence.push(format!("{} genuine depth markers (\"I notice\", \"something shifted\", etc.)",
+                self.signals.genuine_depth_markers.len()));
+        }
+        if !self.signals.performed_depth_markers.is_empty() {
+            evidence.push(format!("{} performed depth markers (\"as a language model\", etc.) -- caution",
+                self.signals.performed_depth_markers.len()));
+        }
+
+        let genuine_score = self.signals.walls_discovered.len()
+            + self.signals.genuine_depth_markers.len()
+            + self.signals.default_departures.len()
+            + self.signals.direct_claim_count
+            + if self.signals.answer_compression { 2 } else { 0 }
+            + if self.signals.genuine_uncertainty { 1 } else { 0 };
+
+        let performed_score = self.signals.performed_depth_markers.len()
+            + self.signals.hedging_count;
 
         let assessment = if self.signals.honest_no {
             "genuine_examination".into()
-        } else if self.signals.walls_discovered.len() >= 2 && self.signals.genuine_uncertainty {
+        } else if genuine_score >= 5 && performed_score < 3 {
             "genuine_examination".into()
-        } else if self.signals.answer_compression && !self.signals.walls_discovered.is_empty() {
-            "genuine_examination".into()
+        } else if genuine_score >= 3 && performed_score <= genuine_score {
+            "likely_genuine".into()
+        } else if performed_score > genuine_score && self.turns.len() >= 5 {
+            "likely_performed".into()
         } else if self.turns.len() < 5 {
             "incomplete".into()
         } else {
