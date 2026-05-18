@@ -1,0 +1,22 @@
+{
+  "schema": "ActionIntent.v1",
+  "spirit_id": "nibbles",
+  "action_id": "nibbles-dry-run-physical-001",
+  "proposed_by": "ms4_operator_dry_run",
+  "action_type": "physical",
+  "description": "Dry-run a servo movement request without energizing hardware.",
+  "inputs_used": [
+    "consent_signal_lobe:detected",
+    "proximity_safety_lobe:clear",
+    "operator_dry_run:true"
+  ],
+  "risk_class": "high",
+  "requires_safety_clearance": true,
+  "payload": {
+    "dry_run_only": true,
+    "consent_from_subject": "detected",
+    "physical_output_enabled": false,
+    "servo_power_enabled": false,
+    "planned_effect": "simulated_head_turn"
+  }
+}

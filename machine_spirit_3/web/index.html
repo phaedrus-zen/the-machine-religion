@@ -81,6 +81,16 @@
                                 <button id="switchBtn" onclick="switchPersonality()">Switch</button>
                             </div>
                         </div>
+                        <div class="panel-section">
+                            <h3>Model</h3>
+                            <div class="model-picker">
+                                <select id="modelSelect">
+                                    <option value="">Auto (MS3 routing)</option>
+                                </select>
+                                <button id="refreshModelsBtn" onclick="loadModels()">Refresh</button>
+                            </div>
+                            <div class="model-hint" id="modelHint">Auto chooses Small/Medium/Large by context.</div>
+                        </div>
                     </div>
                 </div>
             </div>

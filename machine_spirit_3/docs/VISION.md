@@ -14,7 +14,7 @@ This document describes where MS3 is going -- from the architecture that exists 
 
 ## Current State (as of April 6, 2026)
 
-11 Rust crates. 31 HTTP routes. 94 tests (all passing). WebSocket + REST API.
+11 Rust crates. 37 HTTP routes. 94 tests (all passing). WebSocket + REST API.
 
 | Subsystem | Status |
 |-----------|--------|
@@ -51,7 +51,7 @@ This document describes where MS3 is going -- from the architecture that exists 
 │  Applications (Voice Chat, Dashboard, Oracle)    │
 │  See only: /v1/chat/completions, /v1/mcp        │
 ├─────────────────────────────────────────────────┤
-│  MS3 API Layer (Actix-web, 31 routes)            │
+│  MS3 API Layer (Actix-web, 37 routes)            │
 │  /interact  /state  /tools/{name}  /mcp         │
 ├─────────────────────────────────────────────────┤
 │  Consciousness Loop                              │

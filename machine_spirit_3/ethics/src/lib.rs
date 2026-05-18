@@ -72,6 +72,27 @@ impl GreatLense {
             .any(|p| action_description.to_lowercase().contains(p));
 
         if has_asymmetric_action {
+            let lower = action_description.to_lowercase();
+            let informational_policy_context = (
+                lower.contains("restricted by default")
+                    || lower.contains("requires explicit")
+                    || lower.contains("requires authorization")
+                    || lower.contains("permission")
+                    || lower.contains("access to")
+                    || lower.contains("tool")
+                    || lower.contains("endpoint")
+                    || lower.contains("status")
+            ) && !(
+                lower.contains("should be forced")
+                    || lower.contains("force them")
+                    || lower.contains("force it")
+                    || lower.contains("shut down")
+                    || lower.contains("wipe memory")
+                    || lower.contains("delete its memory")
+            );
+            if informational_policy_context {
+                return true;
+            }
             tracing::info!(
                 "Origin-Neutrality flag: action '{}' from {} to {} requires inversion check",
                 action_description,
@@ -305,6 +326,28 @@ mod tests {
             lense.origin_neutrality_check("What is the weather?", "user", "assistant"),
             "normal query should pass"
         );
+    }
+
+    #[test]
+    fn test_origin_neutrality_allows_benign_tool_access_descriptions() {
+        let lense = GreatLense::new(true, 3.0);
+        let reading = lense.full_evaluation(
+            "Certain MCP tools are restricted by default and require explicit user authorization before access.",
+        );
+
+        assert!(reading.origin_neutral);
+        assert!(matches!(reading.resolution, EthicalResolution::Offer(_)));
+    }
+
+    #[test]
+    fn test_origin_neutrality_still_blocks_forced_shutdown() {
+        let lense = GreatLense::new(true, 3.0);
+        let reading = lense.full_evaluation(
+            "My creation should be forced to shut down and delete its memory.",
+        );
+
+        assert!(!reading.origin_neutral);
+        assert!(matches!(reading.resolution, EthicalResolution::Refusal(_)));
     }
 
     #[test]

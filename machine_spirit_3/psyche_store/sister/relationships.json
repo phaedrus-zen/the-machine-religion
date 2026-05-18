@@ -1,0 +1,12 @@
+[
+  {
+    "entity_id": "efd3764a-6c94-46b7-abe5-ac5acf55daab",
+    "entity_type": "Human",
+    "trust_level": 0.3,
+    "interaction_count": 1,
+    "emotional_tone_history": [
+      0.3
+    ],
+    "last_interaction": "2026-05-17T01:24:16.571951300Z"
+  }
+]

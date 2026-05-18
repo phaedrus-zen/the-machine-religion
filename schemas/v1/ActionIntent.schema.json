@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ActionIntent.schema.json",
+  "title": "ActionIntent.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "spirit_id",
+    "action_id",
+    "proposed_by",
+    "action_type",
+    "description",
+    "risk_class",
+    "requires_safety_clearance",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "const": "ActionIntent.v1" },
+    "spirit_id": { "type": "string" },
+    "action_id": { "type": "string" },
+    "proposed_by": { "type": "string" },
+    "action_type": {
+      "enum": ["chat", "tool", "memory_write", "identity_mutation", "speak", "light", "scare", "physical"]
+    },
+    "description": { "type": "string" },
+    "inputs_used": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "risk_class": { "enum": ["low", "medium", "high"] },
+    "requires_safety_clearance": { "type": "boolean" },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}

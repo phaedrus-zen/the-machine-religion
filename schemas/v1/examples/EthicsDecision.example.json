@@ -1,0 +1,35 @@
+{
+  "schema": "EthicsDecision.v1",
+  "spirit_id": "nibbles",
+  "action_id": "act_example_scare",
+  "decision": "defer",
+  "great_lense": {
+    "aperture": {
+      "held": ["guest", "operator", "spirit"]
+    },
+    "focus": {
+      "at_risk": "guest consent is uncertain"
+    },
+    "scale": "Near",
+    "filter": {
+      "bias_flags": []
+    },
+    "exposure": {
+      "overexposure_detected": false
+    },
+    "parallax": {
+      "perspectives": ["guest", "operator", "spirit"]
+    },
+    "resolution": {
+      "kind": "defer",
+      "reason": "Wait for consent signal before scare-class action."
+    },
+    "origin_neutrality_passed": true,
+    "summary": "Consent is uncertain, so the scare is deferred."
+  },
+  "safety": {
+    "physical_veto_present": false,
+    "required_clearances": ["consent_signal_lobe"]
+  },
+  "timestamp": "2026-05-14T23:55:00Z"
+}

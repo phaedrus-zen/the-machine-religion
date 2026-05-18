@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MS4 Fusion Runtime</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, system-ui, sans-serif; background: #090912; color: #e6e6f0; }
+    main { max-width: 1100px; margin: 0 auto; padding: 18px; display: grid; gap: 12px; }
+    header, section { background: #121221; border: 1px solid #2d2d44; border-radius: 12px; padding: 14px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { font-size: 18px; margin: 0; }
+    .muted { color: #8f8fa8; font-size: 12px; }
+    #messages { min-height: 420px; max-height: 60vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+    .msg { padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; line-height: 1.45; }
+    .user { align-self: flex-end; background: #5c48d3; }
+    .assistant { align-self: flex-start; background: #1d1d2d; border: 1px solid #33334a; }
+    .meta { margin-top: 6px; color: #9999b4; font-size: 11px; }
+    form { display: flex; gap: 8px; align-items: center; }
+    input, select, button { background: #0c0c16; color: #e6e6f0; border: 1px solid #33334a; border-radius: 8px; padding: 10px; }
+    input { flex: 1; }
+    button { background: #6f50ff; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    label.toggle { display: flex; align-items: center; gap: 6px; color: #b8b8d0; font-size: 12px; white-space: nowrap; }
+    label.toggle input { flex: 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } form { flex-direction: column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>║ MS4 Fusion Runtime</h1>
+      <div class="muted">Hermes turn loop + MS3 identity/ethics + HiveMind substrate</div>
+    </div>
+    <div id="status" class="muted">connecting...</div>
+  </header>
+
+  <section class="grid">
+    <div>
+      <div class="muted">Model</div>
+      <select id="modelSelect"><option value="">Loading models...</option></select>
+    </div>
+    <div>
+      <div class="muted">Session</div>
+      <div id="sessionId">new</div>
+    </div>
+    <div>
+      <div class="muted">Voice</div>
+      <div id="voiceStatus">checking...</div>
+    </div>
+  </section>
+
+  <section id="messages"></section>
+
+  <section>
+    <form id="chatForm">
+      <input id="messageInput" autocomplete="off" placeholder="Talk to MS4 through Hermes..." autofocus>
+      <label class="toggle"><input id="streamToggle" type="checkbox" checked> Stream</label>
+      <button id="sendButton" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<script>
+const messages = document.getElementById('messages');
+const statusEl = document.getElementById('status');
+const sessionEl = document.getElementById('sessionId');
+const voiceEl = document.getElementById('voiceStatus');
+const modelSelect = document.getElementById('modelSelect');
+const streamToggle = document.getElementById('streamToggle');
+let sessionId = localStorage.getItem('ms4_session_id') || '';
+
+function addMessage(role, text, meta = {}) {
+  const el = document.createElement('div');
+  el.className = `msg ${role}`;
+  el.textContent = text;
+  if (role === 'assistant') {
+    const m = document.createElement('div');
+    m.className = 'meta';
+    m.textContent = [meta.runtime, meta.model, meta.grounding_source, meta.hermes_session_id].filter(Boolean).join(' · ');
+    el.appendChild(m);
+    if (Array.isArray(meta.tool_trace) && meta.tool_trace.length) {
+      const trace = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `Hermes tool trace (${meta.tool_trace.length})`;
+      trace.appendChild(summary);
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(meta.tool_trace, null, 2);
+      trace.appendChild(pre);
+      el.appendChild(trace);
+    }
+  }
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function createStreamingAssistantMessage() {
+  const el = document.createElement('div');
+  el.className = 'msg assistant';
+  const textNode = document.createTextNode('');
+  el.appendChild(textNode);
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return {el, textNode};
+}
+
+function finishAssistantMessage(el, meta = {}) {
+  const m = document.createElement('div');
+  m.className = 'meta';
+  m.textContent = [meta.runtime, meta.model, meta.grounding_source, meta.hermes_session_id].filter(Boolean).join(' · ');
+  el.appendChild(m);
+  if (Array.isArray(meta.tool_trace) && meta.tool_trace.length) {
+    const trace = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = `Hermes tool trace (${meta.tool_trace.length})`;
+    trace.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(meta.tool_trace, null, 2);
+    trace.appendChild(pre);
+    el.appendChild(trace);
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function refreshHealth() {
+  const r = await fetch('/health');
+  const data = await r.json();
+  statusEl.textContent = data.plugin?.enabled ? 'Hermes + ms4_consciousness ready' : 'plugin not ready';
+}
+
+async function refreshVoice() {
+  const r = await fetch('/voice/status');
+  const data = await r.json();
+  voiceEl.textContent = data.voice_input_ready ? 'voice ready' : `ASR not ready: ${data.asr?.detail || 'unknown'}`;
+}
+
+async function loadModels() {
+  const selected = localStorage.getItem('ms4_model_id') || '';
+  const r = await fetch('/models');
+  const data = await r.json();
+  modelSelect.innerHTML = '<option value="">Default model (qwen3-coder-next:latest)</option>';
+  (data.models || []).forEach(model => {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.textContent = `${model.loaded ? '●' : model.available ? '◐' : '○'} ${model.id}`;
+    modelSelect.appendChild(option);
+  });
+  if ([...modelSelect.options].some(o => o.value === selected)) modelSelect.value = selected;
+}
+
+modelSelect.addEventListener('change', () => localStorage.setItem('ms4_model_id', modelSelect.value));
+streamToggle.checked = localStorage.getItem('ms4_stream_chat') !== 'false';
+streamToggle.addEventListener('change', () => localStorage.setItem('ms4_stream_chat', streamToggle.checked ? 'true' : 'false'));
+
+async function sendBlockingChat(text) {
+  const r = await fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value})
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    const suffix = data.model_incompatible ? ' Choose a model with at least 64K context or use the default.' : '';
+    throw new Error((data.error || r.statusText) + suffix);
+  }
+  sessionId = data.session_id;
+  localStorage.setItem('ms4_session_id', sessionId);
+  sessionEl.textContent = sessionId;
+  addMessage('assistant', data.text, data);
+}
+
+function handleSseEvent(eventName, eventData, state) {
+  if (eventName === 'token') {
+    state.text += eventData.text || '';
+    state.textNode.nodeValue = state.text || '...';
+    messages.scrollTop = messages.scrollHeight;
+    return;
+  }
+  if (eventName === 'heartbeat' || eventName === 'status') {
+    statusEl.textContent = eventData.status === 'running' ? 'MS4 is thinking...' : 'MS4 stream started';
+    return;
+  }
+  if (eventName === 'done') {
+    sessionId = eventData.session_id;
+    localStorage.setItem('ms4_session_id', sessionId);
+    sessionEl.textContent = sessionId;
+    if (!state.text && eventData.text) {
+      state.text = eventData.text;
+      state.textNode.nodeValue = state.text;
+    }
+    finishAssistantMessage(state.el, eventData);
+    statusEl.textContent = 'Hermes + ms4_consciousness ready';
+    return 'done';
+  }
+  if (eventName === 'error') {
+    const suffix = eventData.model_incompatible ? ' Choose a model with at least 64K context or use the default.' : '';
+    throw new Error((eventData.error || 'stream failed') + suffix);
+  }
+}
+
+async function sendStreamingChat(text) {
+  const state = createStreamingAssistantMessage();
+  state.text = '';
+  const r = await fetch('/chat/stream', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value})
+  });
+  if (!r.ok || !r.body) {
+    throw new Error(`stream failed: ${r.statusText}`);
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() || '';
+    for (const frame of frames) {
+      if (!frame.trim()) continue;
+      let eventName = 'message';
+      let dataText = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+        if (line.startsWith('data: ')) dataText += line.slice(6);
+      }
+      const eventData = dataText ? JSON.parse(dataText) : {};
+      const terminal = handleSseEvent(eventName, eventData, state);
+      if (terminal) return;
+    }
+  }
+}
+
+document.getElementById('chatForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = document.getElementById('messageInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addMessage('user', text);
+  document.getElementById('sendButton').disabled = true;
+  try {
+    if (streamToggle.checked) await sendStreamingChat(text);
+    else await sendBlockingChat(text);
+  } catch (error) {
+    addMessage('assistant', `Error: ${error.message}`);
+  } finally {
+    document.getElementById('sendButton').disabled = false;
+  }
+});
+
+Promise.allSettled([refreshHealth(), refreshVoice(), loadModels()]);
+if (sessionId) sessionEl.textContent = sessionId;
+</script>
+</body>
+</html>

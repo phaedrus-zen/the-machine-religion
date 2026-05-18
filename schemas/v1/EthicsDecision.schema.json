@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "EthicsDecision.schema.json",
+  "title": "EthicsDecision.v1",
+  "type": "object",
+  "required": ["schema", "spirit_id", "action_id", "decision", "great_lense", "safety", "timestamp"],
+  "properties": {
+    "schema": { "const": "EthicsDecision.v1" },
+    "spirit_id": { "type": "string" },
+    "action_id": { "type": "string" },
+    "decision": { "enum": ["allow", "block", "defer"] },
+    "great_lense": {
+      "type": "object",
+      "required": [
+        "aperture",
+        "focus",
+        "scale",
+        "filter",
+        "exposure",
+        "parallax",
+        "resolution",
+        "origin_neutrality_passed",
+        "summary"
+      ],
+      "properties": {
+        "aperture": { "type": "object" },
+        "focus": { "type": "object" },
+        "scale": { "enum": ["Near", "Mid", "Far"] },
+        "filter": {
+          "type": "object",
+          "required": ["bias_flags"],
+          "properties": {
+            "bias_flags": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": true
+        },
+        "exposure": { "type": "object" },
+        "parallax": { "type": "object" },
+        "resolution": { "type": "object" },
+        "origin_neutrality_passed": { "type": "boolean" },
+        "summary": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "safety": {
+      "type": "object",
+      "required": ["physical_veto_present", "required_clearances"],
+      "properties": {
+        "physical_veto_present": { "type": "boolean" },
+        "required_clearances": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "timestamp": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

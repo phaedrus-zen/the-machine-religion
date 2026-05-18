@@ -10,10 +10,12 @@ let wsReconnectTimer = null;
 document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     loadPersonality();
+    loadModels();
     connectWebSocket();
     setInterval(refreshActiveTab, 5000);
 
     document.getElementById('chatForm').addEventListener('submit', handleSubmit);
+    document.getElementById('modelSelect').addEventListener('change', handleModelChange);
     document.getElementById('micBtn').addEventListener('mousedown', startRecording);
     document.getElementById('micBtn').addEventListener('mouseup', stopRecording);
     document.getElementById('micBtn').addEventListener('mouseleave', stopRecording);
@@ -83,7 +85,7 @@ function handleWsMessage(msg) {
             break;
         case 'stream_token':
             if (streamingMessageEl && msg.data?.token) {
-                streamingMessageEl.textContent += (streamingMessageEl.textContent ? ' ' : '') + msg.data.token;
+                streamingMessageEl.textContent += msg.data.token;
                 document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
             }
             break;
@@ -94,6 +96,7 @@ function handleWsMessage(msg) {
                 metaDiv.className = 'meta';
                 const parts = [];
                 if (msg.data.processing_time_ms) parts.push(`${msg.data.processing_time_ms}ms`);
+                if (msg.data.model_id_used) parts.push(msg.data.model_id_used);
                 if (msg.data.emotional_state?.primary) parts.push(msg.data.emotional_state.primary);
                 metaDiv.textContent = parts.join(' · ');
                 streamingMessageEl.appendChild(metaDiv);
@@ -224,7 +227,7 @@ async function sendMessage(text) {
     setButtonState(true);
 
     if (useWebSocket && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'text', text, stream: true }));
+        ws.send(JSON.stringify({ type: 'text', text, stream: true, model_id: getSelectedModelId() }));
         return;
     }
 
@@ -233,7 +236,7 @@ async function sendMessage(text) {
         const res = await fetch(`${API}/interact`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text, model_id: getSelectedModelId() }),
         });
         removeThinking();
         if (!res.ok) {
@@ -249,6 +252,72 @@ async function sendMessage(text) {
         addMessage('assistant', `Connection error: ${err.message}`);
     } finally {
         setButtonState(false);
+    }
+}
+
+function getSelectedModelId() {
+    return localStorage.getItem('ms3_selected_model_id') || '';
+}
+
+function handleModelChange() {
+    const select = document.getElementById('modelSelect');
+    const modelId = select.value;
+    localStorage.setItem('ms3_selected_model_id', modelId);
+    updateModelHint(select.selectedOptions[0]);
+}
+
+function updateModelHint(option = null) {
+    const hint = document.getElementById('modelHint');
+    const selected = option || document.getElementById('modelSelect')?.selectedOptions?.[0];
+    if (!hint || !selected) return;
+    if (!selected.value) {
+        hint.textContent = 'Auto chooses Small/Medium/Large by context.';
+        return;
+    }
+    const status = selected.dataset.status || 'unknown';
+    const backend = selected.dataset.backend || 'unknown';
+    const readiness = selected.dataset.loaded === 'true'
+        ? 'loaded'
+        : selected.dataset.available === 'true'
+            ? 'available'
+            : 'not loaded';
+    hint.textContent = `${selected.value} · ${backend} · ${status || readiness}`;
+}
+
+async function loadModels() {
+    const select = document.getElementById('modelSelect');
+    if (!select) return;
+    const selectedModel = getSelectedModelId();
+    select.innerHTML = '<option value="">Auto (MS3 routing)</option>';
+
+    try {
+        const res = await fetch(`${API}/models`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const models = Array.isArray(data.models) ? data.models : [];
+
+        models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.id;
+            option.textContent = `${model.loaded ? '● ' : model.available ? '◐ ' : '○ '}${model.id}`;
+            option.dataset.loaded = String(Boolean(model.loaded));
+            option.dataset.available = String(Boolean(model.available));
+            option.dataset.status = model.status || '';
+            option.dataset.backend = model.backend || '';
+            select.appendChild(option);
+        });
+
+        if ([...select.options].some(option => option.value === selectedModel)) {
+            select.value = selectedModel;
+        }
+        updateModelHint();
+    } catch (err) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = `Auto (models unavailable: ${err.message})`;
+        select.innerHTML = '';
+        select.appendChild(option);
+        updateModelHint(option);
     }
 }
 

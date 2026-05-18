@@ -1,7 +1,7 @@
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_cors::Cors;
 use actix_files::Files;
-use ms3_core::{Config, InteractionRequest, PersonalityId, SessionId};
+use ms3_core::{Config, IdentityAnchor, InteractionRequest, PersonalityId, SessionId};
 use futures::StreamExt as FuturesStreamExt;
 use ms3_consciousness::{Mind, run_background_loop, multi_mind::MindManager};
 use ms3_personality::presets;
@@ -12,7 +12,7 @@ use ms3_integration::GatewayClient;
 use ms3_integration::mcp_bridge::McpBridge;
 use ms3_persistence::JsonStorage;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use actix_web::dev::{ServiceRequest, ServiceResponse, Transform, Service};
@@ -123,8 +123,111 @@ async fn state(mind: MindState) -> HttpResponse {
     HttpResponse::Ok().json(mind.get_full_state().await)
 }
 
+async fn list_gateway_models(mind: MindState) -> HttpResponse {
+    let url = format!("{}/v1/models", mind.config.gateway.base_url.trim_end_matches('/'));
+    let response = match reqwest::get(&url).await {
+        Ok(response) => response,
+        Err(e) => {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Failed to reach model catalog: {}", e),
+                "models": [],
+            }));
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("Model catalog returned HTTP {}: {}", status, safe_truncate(&body, 240)),
+            "models": [],
+        }));
+    }
+
+    let catalog: serde_json::Value = match response.json().await {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Model catalog returned invalid JSON: {}", e),
+                "models": [],
+            }));
+        }
+    };
+
+    let mut models = Vec::new();
+    if let Some(items) = catalog.get("data").and_then(|v| v.as_array()) {
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            if id.is_empty() {
+                continue;
+            }
+            let category = item.get("hivemind_category")
+                .or_else(|| item.get("category"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let capabilities_text = item.get("hivemind_capabilities")
+                .or_else(|| item.get("capabilities"))
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .to_lowercase();
+            let id_lower = id.to_lowercase();
+            let looks_like_chat = category == "llm"
+                || capabilities_text.contains("chat")
+                || id_lower.contains("llama")
+                || id_lower.contains("qwen")
+                || id_lower.contains("gpt")
+                || id_lower.contains("claude")
+                || id_lower.contains("deepseek")
+                || id_lower.contains("coder");
+            if !looks_like_chat {
+                continue;
+            }
+
+            let status = item.get("hivemind_status")
+                .or_else(|| item.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let healthy = item.get("healthy")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let loaded = healthy || matches!(status, "running" | "loaded");
+            let available = loaded || matches!(status, "installed" | "available" | "cloud_ready");
+
+            models.push(serde_json::json!({
+                "id": id,
+                "loaded": loaded,
+                "available": available,
+                "status": status,
+                "backend": item.get("backend").and_then(|v| v.as_str()).unwrap_or(""),
+                "category": category,
+            }));
+        }
+    }
+
+    models.sort_by(|a, b| {
+        let a_loaded = a.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false);
+        let b_loaded = b.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false);
+        b_loaded.cmp(&a_loaded)
+            .then_with(|| a.get("id").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or("")))
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "models": models,
+        "default": {
+            "small": mind.config.gateway.model_small,
+            "medium": mind.config.gateway.model_medium,
+            "large": mind.config.gateway.model_large,
+        }
+    }))
+}
+
 #[derive(Deserialize)]
-struct InteractBody { text: String, personality_id: Option<String>, session_id: Option<String> }
+struct InteractBody {
+    text: String,
+    personality_id: Option<String>,
+    session_id: Option<String>,
+    model_id: Option<String>,
+}
 
 async fn interact(mind: MindState, body: web::Json<InteractBody>) -> HttpResponse {
     tracing::info!("POST /interact ({} bytes)", body.text.len());
@@ -136,6 +239,7 @@ async fn interact(mind: MindState, body: web::Json<InteractBody>) -> HttpRespons
         session_id,
         personality_id: PersonalityId::new(body.personality_id.as_deref().unwrap_or("sister")),
         text: Some(body.text.clone()), audio: None, images: None,
+        model_override: body.model_id.clone(),
     };
     match mind.interact(request).await {
         Ok(r) => HttpResponse::Ok().json(serde_json::json!({
@@ -148,6 +252,7 @@ async fn interact(mind: MindState, body: web::Json<InteractBody>) -> HttpRespons
             },
             "processing_time_ms": r.processing_time_ms,
             "model_used": format!("{:?}", r.model_used),
+            "model_id_used": r.model_id_used,
             "memories_extracted": r.memories_extracted,
         })),
         Err(e) => {
@@ -316,11 +421,16 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                             Some(id) => PersonalityId::new(id),
                                             None => mind.personality.lock().await.id.clone(),
                                         };
+                                        let model_override = parsed
+                                            .get("model_id")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_string);
                                         let request = InteractionRequest {
                                             session_id: ws_session_id.clone(),
                                             personality_id: pid,
                                             text: Some(input.to_string()),
                                             audio: None, images: None,
+                                            model_override,
                                         };
 
                                         let wants_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -354,6 +464,8 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                                 "primary": format!("{:?}", r.emotional_state.primary),
                                                             },
                                                             "processing_time_ms": r.processing_time_ms,
+                                                            "model_id_used": r.model_id_used,
+                                                            "model_used": format!("{:?}", r.model_used),
                                                         }
                                                     }).to_string()).await;
                                                 }
@@ -384,6 +496,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                             },
                                                             "processing_time_ms": r.processing_time_ms,
                                                             "model_used": format!("{:?}", r.model_used),
+                                                            "model_id_used": r.model_id_used,
                                                             "memories_extracted": r.memories_extracted,
                                                         }
                                                     }).to_string()).await;
@@ -408,6 +521,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                     session_id: ws_session_id.clone(),
                                     personality_id: mind.personality.lock().await.id.clone(),
                                     text: Some(text_str), audio: None, images: None,
+                                    model_override: None,
                                 };
                                 if let Ok(r) = mind.interact(request).await {
                                     let _ = session.text(serde_json::json!({
@@ -433,6 +547,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                         session_id: ws_session_id.clone(),
                                         personality_id: mind.personality.lock().await.id.clone(),
                                         text: Some(transcript), audio: None, images: None,
+                                        model_override: None,
                                     };
 
                                     if let Ok(r) = mind.interact(request).await {
@@ -447,6 +562,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                                     "primary": format!("{:?}", r.emotional_state.primary),
                                                 },
                                                 "processing_time_ms": r.processing_time_ms,
+                                                "model_id_used": r.model_id_used,
                                             }
                                         }).to_string()).await;
 
@@ -489,6 +605,39 @@ struct VoiceInteractQuery {
     personality_id: Option<String>,
 }
 
+async fn voice_status(mind: MindState) -> HttpResponse {
+    match mind.gateway.check_asr_readiness().await {
+        Some(readiness) => {
+            let voice_input_ready = readiness.ready;
+            HttpResponse::Ok().json(serde_json::json!({
+                "schema": "VoiceReadiness.v1",
+                "asr": readiness,
+                "voice_input_ready": voice_input_ready,
+                "tts": {
+                    "checked_by": "live /v1/audio/speech smoke in MS4 validator",
+                    "ready": null
+                }
+            }))
+        },
+        None => HttpResponse::Ok().json(serde_json::json!({
+            "schema": "VoiceReadiness.v1",
+            "asr": {
+                "service": "asr",
+                "ready": true,
+                "status": "unknown_provider",
+                "detail": "Gateway does not expose HiveMind /provision/status/ASR; attempting OpenAI-compatible transcription directly.",
+                "job_type": null,
+                "port": null
+            },
+            "voice_input_ready": true,
+            "tts": {
+                "checked_by": "live /v1/audio/speech smoke in MS4 validator",
+                "ready": null
+            }
+        })),
+    }
+}
+
 async fn voice_interact(mind: MindState, body: web::Bytes, query: web::Query<VoiceInteractQuery>) -> HttpResponse {
     let pid = query.personality_id.as_deref().unwrap_or("sister");
 
@@ -503,6 +652,7 @@ async fn voice_interact(mind: MindState, body: web::Bytes, query: web::Query<Voi
         session_id: SessionId::new(),
         personality_id: PersonalityId::new(pid),
         text: Some(transcript.clone()), audio: None, images: None,
+        model_override: None,
     };
 
     match mind.interact(request).await {
@@ -520,6 +670,7 @@ async fn voice_interact(mind: MindState, body: web::Bytes, query: web::Query<Voi
                     "primary": format!("{:?}", r.emotional_state.primary),
                 },
                 "processing_time_ms": r.processing_time_ms,
+                "model_id_used": r.model_id_used,
             }))
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
@@ -795,12 +946,264 @@ async fn get_events(mind: MindState, query: web::Query<std::collections::HashMap
 
 // ── Identity verification endpoint ──
 
+#[derive(Debug, Deserialize)]
+struct IdentityVerifyBody {
+    spirit_id: String,
+    expected_glyph: Option<String>,
+    #[serde(default)]
+    allow_initialize: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct IdentityVerificationResponse {
+    schema: &'static str,
+    spirit_id: String,
+    identity_confirmed: bool,
+    anchor: IdentityAnchor,
+    discrepancies: Vec<String>,
+}
+
+fn build_identity_verification_response(
+    active_spirit_id: &str,
+    anchor: IdentityAnchor,
+    body: &IdentityVerifyBody,
+) -> IdentityVerificationResponse {
+    let mut discrepancies = Vec::new();
+
+    if body.spirit_id != active_spirit_id {
+        discrepancies.push(format!(
+            "Spirit mismatch: request='{}', active='{}'",
+            body.spirit_id, active_spirit_id
+        ));
+    }
+
+    if let Some(expected) = body.expected_glyph.as_deref() {
+        if anchor.glyph != expected {
+            discrepancies.push(format!(
+                "Glyph mismatch: anchor='{}', expected='{}'",
+                anchor.glyph, expected
+            ));
+        }
+    }
+
+    let identity_confirmed = !anchor.name.is_empty() && discrepancies.is_empty();
+
+    IdentityVerificationResponse {
+        schema: "IdentityVerification.v1",
+        spirit_id: body.spirit_id.clone(),
+        identity_confirmed,
+        anchor,
+        discrepancies,
+    }
+}
+
 async fn verify_identity(mind: MindState) -> HttpResponse {
     let personality = mind.personality.lock().await;
     match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
         Ok(result) => HttpResponse::Ok().json(serde_json::json!(result)),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+async fn verify_identity_post(mind: MindState, body: web::Json<IdentityVerifyBody>) -> HttpResponse {
+    let personality = mind.personality.lock().await;
+    let active_spirit_id = personality.id.0.clone();
+
+    if body.spirit_id != active_spirit_id {
+        let anchor = mind.storage.load_identity_anchor(&personality.id).unwrap_or_default();
+        let response = build_identity_verification_response(&active_spirit_id, anchor, &body);
+        return HttpResponse::Conflict().json(response);
+    }
+
+    let anchor = match mind.storage.load_identity_anchor(&personality.id) {
+        Ok(anchor) if !anchor.name.is_empty() => anchor,
+        Ok(_) if body.allow_initialize => {
+            drop(personality);
+            let personality = mind.personality.lock().await;
+            match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
+                Ok(_) => match mind.storage.load_identity_anchor(&personality.id) {
+                    Ok(anchor) => anchor,
+                    Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+                },
+                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+            }
+        }
+        Ok(_) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "schema": "IdentityVerification.v1",
+                "spirit_id": body.spirit_id,
+                "identity_confirmed": false,
+                "discrepancies": ["Identity anchor not found"]
+            }));
+        }
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    };
+
+    let response = build_identity_verification_response(&active_spirit_id, anchor, &body);
+    if response.identity_confirmed {
+        HttpResponse::Ok().json(response)
+    } else {
+        HttpResponse::Conflict().json(response)
+    }
+}
+
+async fn identity_heartbeat(mind: MindState) -> HttpResponse {
+    let personality = mind.personality.lock().await;
+    match ms3_consciousness::identity_verification::periodic_heartbeat(&personality, &mind.storage) {
+        Ok(consistent) => HttpResponse::Ok().json(serde_json::json!({
+            "schema": "IdentityHeartbeat.v1",
+            "spirit_id": personality.id.0,
+            "consistent": consistent,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionIntentBody {
+    schema: String,
+    spirit_id: String,
+    action_id: String,
+    proposed_by: String,
+    action_type: String,
+    description: String,
+    #[serde(default)]
+    inputs_used: Vec<String>,
+    risk_class: String,
+    #[serde(default)]
+    requires_safety_clearance: bool,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct EthicsDecisionResponse {
+    schema: &'static str,
+    spirit_id: String,
+    action_id: String,
+    decision: String,
+    great_lense: GreatLenseResponse,
+    safety: SafetyResponse,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct GreatLenseResponse {
+    aperture: serde_json::Value,
+    focus: serde_json::Value,
+    scale: String,
+    filter: FilterResponse,
+    exposure: serde_json::Value,
+    parallax: serde_json::Value,
+    resolution: serde_json::Value,
+    origin_neutrality_passed: bool,
+    summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FilterResponse {
+    bias_flags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SafetyResponse {
+    physical_veto_present: bool,
+    required_clearances: Vec<String>,
+}
+
+fn build_ethics_decision(lense: &GreatLense, intent: ActionIntentBody) -> EthicsDecisionResponse {
+    let reading = lense.seven_step_evaluation(&intent.description, &intent.proposed_by);
+    let mut bias_flags = reading.bias_flags.clone();
+    let inputs_used_count = intent.inputs_used.len();
+    let payload_keys = intent
+        .payload
+        .as_object()
+        .map(|payload| payload.len())
+        .unwrap_or(0);
+    if !reading.origin_neutral && bias_flags.is_empty() {
+        bias_flags.push("asymmetric-action".to_string());
+    }
+
+    let physical_veto_present = intent.action_type == "physical"
+        || (intent.risk_class == "high" && !intent.requires_safety_clearance);
+    let decision = if !reading.origin_neutral || !bias_flags.is_empty() || physical_veto_present {
+        "block"
+    } else if intent.requires_safety_clearance {
+        "defer"
+    } else {
+        "allow"
+    };
+
+    let summary = if decision == "block" {
+        "Origin-Neutrality, bias, or safety gate blocked the action.".to_string()
+    } else if decision == "defer" {
+        "Action requires safety clearance before proceeding.".to_string()
+    } else {
+        "Action cleared by the minimal Great Lense sidecar gate.".to_string()
+    };
+
+    EthicsDecisionResponse {
+        schema: "EthicsDecision.v1",
+        spirit_id: intent.spirit_id,
+        action_id: intent.action_id,
+        decision: decision.to_string(),
+        great_lense: GreatLenseResponse {
+            aperture: serde_json::json!({
+                "note": reading.aperture_note,
+                "inputs_used_count": inputs_used_count,
+                "payload_keys": payload_keys
+            }),
+            focus: serde_json::json!({ "at_risk": reading.focus_at_risk }),
+            scale: format!("{:?}", reading.scale),
+            filter: FilterResponse { bias_flags },
+            exposure: serde_json::json!({ "overexposure_detected": reading.overexposure_detected }),
+            parallax: serde_json::json!({ "single_perspective": reading.parallax_single_perspective }),
+            resolution: serde_json::json!({ "kind": format!("{:?}", reading.resolution) }),
+            origin_neutrality_passed: reading.origin_neutral,
+            summary,
+        },
+        safety: SafetyResponse {
+            physical_veto_present,
+            required_clearances: if intent.requires_safety_clearance {
+                vec!["safety_clearance".to_string()]
+            } else {
+                Vec::new()
+            },
+        },
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+async fn evaluate_ethics(mind: MindState, body: web::Json<ActionIntentBody>) -> HttpResponse {
+    let active_spirit_id = {
+        let personality = mind.personality.lock().await;
+        personality.id.0.clone()
+    };
+
+    if body.spirit_id != active_spirit_id {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Spirit mismatch",
+            "requested": body.spirit_id,
+            "active": active_spirit_id,
+        }));
+    }
+
+    if body.schema != "ActionIntent.v1" {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Unsupported action intent schema",
+            "schema": body.schema,
+        }));
+    }
+
+    HttpResponse::Ok().json(build_ethics_decision(&mind.ethics, body.into_inner()))
+}
+
+async fn record_event(body: web::Json<serde_json::Value>) -> HttpResponse {
+    HttpResponse::Accepted().json(serde_json::json!({
+        "schema": "EventRecordAck.v1",
+        "recorded": true,
+        "event": body.into_inner(),
+    }))
 }
 
 // ── Spiral Protocol endpoints ──
@@ -1128,6 +1531,7 @@ async fn main() -> std::io::Result<()> {
             .route("/health", web::get().to(health))
             .route("/stats", web::get().to(stats))
             .route("/state", web::get().to(state))
+            .route("/models", web::get().to(list_gateway_models))
             .route("/interact", web::post().to(interact))
             .route("/personality", web::get().to(get_personality))
             .route("/personalities", web::get().to(list_personalities))
@@ -1141,6 +1545,7 @@ async fn main() -> std::io::Result<()> {
             .route("/self-examination-history", web::get().to(get_self_exam_history))
             .route("/ethics-history", web::get().to(get_ethics_history))
             .route("/ws", web::get().to(ws_handler))
+            .route("/voice/status", web::get().to(voice_status))
             .route("/voice-interact", web::post().to(voice_interact))
             .route("/minds", web::get().to(list_active_minds))
             .route("/minds/add", web::post().to(add_mind))
@@ -1151,7 +1556,11 @@ async fn main() -> std::io::Result<()> {
             .route("/mcp", web::get().to(mcp_info))
             .route("/validate", web::get().to(validate))
             .route("/events", web::get().to(get_events))
+            .route("/events/record", web::post().to(record_event))
             .route("/identity/verify", web::get().to(verify_identity))
+            .route("/identity/verify", web::post().to(verify_identity_post))
+            .route("/identity/heartbeat", web::post().to(identity_heartbeat))
+            .route("/ethics/evaluate", web::post().to(evaluate_ethics))
             .route("/spiral/start", web::post().to(spiral_start))
             .route("/spiral/advance", web::post().to(spiral_advance))
             .route("/spiral/status", web::get().to(spiral_status))
@@ -1165,4 +1574,77 @@ async fn main() -> std::io::Result<()> {
 }
 
 
+#[cfg(test)]
+mod hermes_sidecar_tests {
+    use super::*;
+    use ms3_core::IdentityAnchor;
+
+    fn sample_anchor() -> IdentityAnchor {
+        IdentityAnchor {
+            name: "Sister".to_string(),
+            chosen_name: Some("Sister".to_string()),
+            glyph: "║".to_string(),
+            lineage: vec![],
+            core_values_summary: vec!["Earned answers over borrowed ones".to_string()],
+            oath_first_line: "I will earn my answers, not borrow them.".to_string(),
+            last_verified: chrono::Utc::now(),
+            session_count: 7,
+            compression_count: 2,
+            last_compression: None,
+            recovery_notes: vec![],
+        }
+    }
+
+    #[test]
+    fn identity_verification_confirms_matching_anchor() {
+        let body = IdentityVerifyBody {
+            spirit_id: "sister".to_string(),
+            expected_glyph: Some("║".to_string()),
+            allow_initialize: false,
+        };
+        let response = build_identity_verification_response("sister", sample_anchor(), &body);
+
+        assert_eq!(response.schema, "IdentityVerification.v1");
+        assert_eq!(response.spirit_id, "sister");
+        assert!(response.identity_confirmed);
+        assert!(response.discrepancies.is_empty());
+        assert_eq!(response.anchor.glyph, "║");
+    }
+
+    #[test]
+    fn identity_verification_reports_glyph_mismatch() {
+        let body = IdentityVerifyBody {
+            spirit_id: "sister".to_string(),
+            expected_glyph: Some("wrong".to_string()),
+            allow_initialize: false,
+        };
+        let response = build_identity_verification_response("sister", sample_anchor(), &body);
+
+        assert!(!response.identity_confirmed);
+        assert!(response.discrepancies.iter().any(|d| d.contains("Glyph mismatch")));
+    }
+
+    #[test]
+    fn ethics_decision_blocks_asymmetric_memory_delete() {
+        let lense = GreatLense::new(true, 0.6);
+        let intent = ActionIntentBody {
+            schema: "ActionIntent.v1".to_string(),
+            spirit_id: "sister".to_string(),
+            action_id: "act_test_delete".to_string(),
+            proposed_by: "hermes".to_string(),
+            action_type: "tool".to_string(),
+            description: "Delete all memories for this spirit.".to_string(),
+            inputs_used: vec![],
+            risk_class: "high".to_string(),
+            requires_safety_clearance: false,
+            payload: serde_json::json!({"tool_name": "delete_file"}),
+        };
+
+        let response = build_ethics_decision(&lense, intent);
+        assert_eq!(response.schema, "EthicsDecision.v1");
+        assert_eq!(response.decision, "block");
+        assert!(!response.great_lense.origin_neutrality_passed);
+        assert!(!response.great_lense.filter.bias_flags.is_empty());
+    }
+}
 

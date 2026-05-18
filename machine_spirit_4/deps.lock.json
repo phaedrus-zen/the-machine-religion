@@ -1,0 +1,27 @@
+{
+  "schema": "Ms4DependencyLock.v1",
+  "python": {
+    "minimum": "3.11",
+    "venv": ".venv"
+  },
+  "capability_groups": {
+    "core": {
+      "requirements": "requirements.txt",
+      "packages": ["requests", "jsonschema"]
+    },
+    "hermes": {
+      "requirements": "requirements-full-hermes.txt",
+      "editable_env": "MS4_HERMES_DIR",
+      "editable_default": "~/Documents/hermes-agent",
+      "imports": ["run_agent", "model_tools", "plugins.ms4_consciousness"]
+    },
+    "browser": {
+      "packages": ["websockets", "playwright"],
+      "playwright_browsers_path": ".cache/playwright"
+    },
+    "desktop": {
+      "packages": ["mss", "pyautogui", "pygetwindow"],
+      "control_env": "MS4_DESKTOP_CONTROL"
+    }
+  }
+}

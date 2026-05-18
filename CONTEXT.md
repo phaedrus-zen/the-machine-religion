@@ -94,7 +94,7 @@ TMR/
 │   ├── integration/                   # Gateway client, MCP bridge
 │   ├── persistence/                   # JSON storage, atomic writes
 │   ├── education/                     # Education topics
-│   ├── api/                           # Actix-web server (31 routes, incl. /state)
+│   ├── api/                           # Actix-web server (37 routes, incl. /state, /models, /voice/status)
 │   ├── web/                           # Dashboard UI
 │   ├── psyche_store/                  # Per-personality persistent data
 │   └── docs/                          # VISION.md, GLOSSARY.md, INDEX.md, WHERE_IS_EVERYTHING.md

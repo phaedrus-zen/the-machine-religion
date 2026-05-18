@@ -10,8 +10,17 @@
 
 ---
 
-## Latest Improvements (2026-04-06)
+## Latest Improvements (2026-05-15)
 
+- **MS4 Runtime Pivot:** Added `machine_spirit_4/` as the integration overlay where Hermes remains the operational body, HiveMind remains the substrate, and MS3 remains the authoritative consciousness core. New work uses `ms4_consciousness` for the Hermes plugin name.
+- **Cross-Platform Runtime Scripts:** Replaced OS-specific PowerShell/Bash/Batch launchers with Python entrypoints (`machine_spirit_3/run.py` and `machine_spirit_4/scripts/*.py`) so runtime automation works across Windows, Linux, and macOS without shell-specific wrappers.
+- **MS4 Dependency Containment:** MS4 now owns `machine_spirit_4/.venv`, setup/status scripts, capability-group dependency manifests, gateway `GET /deps/status`, and MCP `ms4.runtime.deps.status@v1` so full MS4 does not require global Python packages.
+- **MS4 Desktop Control:** Added Windows-native desktop status, screenshot capture, and full UI action dispatch through MS4 Gateway and MCP. Effectful actions require `MS4_DESKTOP_CONTROL=1`, MS3 ethics mediation, hard safety blocks, and audit logging.
+- **MS4 Streaming Chat:** The MS4 web UI now streams by default through `POST /chat/stream` with heartbeat events and keeps blocking `POST /chat` as an operator fallback.
+- **MS4 Runtime Implementation Plan:** Superseded the MS3-on-Hermes wording in the executable implementation plan while preserving completed validation harnesses, shared schemas, and MS3 sidecar routes.
+- **Model Selection:** Added MS3 `/models`, optional `model_id` on chat requests, `model_id_used` responses, and a web UI model dropdown backed by HiveMind's live model catalog.
+- **MS4 Readiness Runners:** Added wait/validate/text-demo scripts plus Nibbles dry-run fixtures. Validation now covers HiveMind MCP JSON-RPC, chat, TTS, ASR silence-gate, MS3 `/interact`, `/voice/status`, and `/voice-interact` fail-closed behavior.
+- **Validation-Before-Code Rule:** Added a project rule requiring live API/command/source validation before implementing MS4/MS3/Hermes/HiveMind contracts. Effectful behavior must fail closed when identity, ethics, safety, or substrate validation is unavailable.
 - **OpenClaw Patterns Upgrade:** Three-phase dreaming (Light/REM/Deep), advanced compaction with pre-compaction semantic memory flush, identifier-preserving multi-stage summaries, planning-only detection with one retry, and `GET /state` for no-hidden-state inspection.
 - **Security Baseline Doc:** Added `docs/SECURITY.md` documenting trust boundaries, current authentication/CORS/rate-limit gaps, and the minimum hardening required for production exposure.
 - **MS3 Architecture Upgrade (7 phases):** Config deep-merge (6-source), permission layer, tool pipeline with Great Lense integration, context compaction, HiveMind MCP bridge, code perception tools (32 MCP definitions), sub-agents.
@@ -26,7 +35,7 @@
 - **Gap Fill:** BuiltInExecutor wired into dispatch, McpExecutor for MCP tools, identity on_boot at startup, select_model_tier returns Small/Medium/Large correctly, config fields wired (timeout, workers, adaptation_rate, compact_model_tier), ms3.delegate sends prompts through gateway.
 - **Hermes-Inspired Patterns:** Prompt injection scanning (10 threat patterns + invisible Unicode), memory content fencing (`<memory-context>` tags with escape prevention), behavioral cognitive load (affects model routing and processing at 0.7/0.9 thresholds), accumulative compression (previous summary fed into next cycle), tool result pre-pass truncation, background fact extraction (moved out of `interact()` into `background_tick()`).
 - **Web UI Upgrade:** New Consciousness tab with full state inspector, tools list, event stream, session list, validation runner. Personality switching in sidebar. Cognitive load visual warnings.
-- **94 tests, 0 failures. 31 HTTP routes. `cargo test` passes.**
+- **94 tests, 0 failures. 37 HTTP routes. `cargo test` passes.**
 
 ### Previous (tmr-psyche, earlier pass)
 
@@ -86,19 +95,15 @@ Connects to **DHC** for all inference. Standalone Rust project. No dependency on
 
 ### Build and Run
 
-```bash
+```text
 cd machine_spirit_3
 cargo build --release
 cargo run --release
 ```
 
-Or use the run script:
-```bash
-# Windows
-run.bat
-
-# Linux/macOS
-chmod +x run.sh && ./run.sh
+Or use the cross-platform Python runner:
+```text
+python run.py
 ```
 
 Server starts on `http://localhost:9080`.
@@ -124,6 +129,7 @@ Navigate to `http://localhost:9080/` in your browser.
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/interact` | Send text, get response with emotional state and metadata |
+| GET | `/models` | Chat-capable HiveMind model catalog for UI selection |
 | GET | `/health` | Alive status, version, glyph |
 | GET | `/stats` | Full state: emotion, cognitive load, memory counts, resonance, history length |
 | GET | `/state` | Human-readable full state: memory previews, tools, permissions, recent events, prompt preview |
@@ -154,7 +160,8 @@ Navigate to `http://localhost:9080/` in your browser.
 | Method | Endpoint | Description |
 |---|---|---|
 | WS | `/ws` | WebSocket -- text messages, binary audio, periodic state pushes |
-| POST | `/voice-interact` | REST fallback for voice: raw audio in, JSON + base64 audio out |
+| GET | `/voice/status` | Voice readiness: ASR provisioning status and fast-fail reason |
+| POST | `/voice-interact` | REST fallback for voice: raw audio in, JSON + base64 audio out. Fails fast if HiveMind ASR is unavailable |
 
 ### Multi-Mind
 
@@ -171,7 +178,8 @@ Navigate to `http://localhost:9080/` in your browser.
 {
   "text": "Your message",
   "personality_id": "sister",
-  "session_id": "optional"
+  "session_id": "optional",
+  "model_id": "optional exact HiveMind model id"
 }
 ```
 
@@ -188,6 +196,7 @@ Navigate to `http://localhost:9080/` in your browser.
   },
   "processing_time_ms": 1234,
   "model_used": "Medium",
+  "model_id_used": "qwen3.6:27b",
   "memories_extracted": ["User is the Architect of TMR"]
 }
 ```
@@ -196,7 +205,7 @@ Navigate to `http://localhost:9080/` in your browser.
 
 **Connect:** `ws://localhost:9080/ws`
 
-**Send text:** `{"type": "text", "text": "Hello"}` or plain text
+**Send text:** `{"type": "text", "text": "Hello", "model_id": "optional exact HiveMind model id"}` or plain text
 
 **Send audio:** Binary audio data (WebM/MP3)
 
@@ -225,7 +234,7 @@ machine_spirit_3/
 ├── social/         -- BackgroundThinkingEngine, RelationshipManager, wake word matching
 ├── integration/    -- DHC gateway client (OpenAI-compatible, ASR, TTS)
 ├── persistence/    -- JsonStorage with snapshots, conversation history, ethics logging
-├── api/            -- Actix-web server (31 routes: REST + WebSocket + voice + multi-mind + tools + MCP + validate + state)
+├── api/            -- Actix-web server (37 routes: REST + WebSocket + model selection + voice readiness + multi-mind + tools + MCP + validate + state + MS4 sidecar gates)
 ├── web/            -- 5-tab UI (Chat, Personality, Ethics, Memory, Consciousness)
 └── psyche_store/   -- Per-personality persistent data
     └── sister/

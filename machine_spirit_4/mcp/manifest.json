@@ -1,0 +1,39 @@
+{
+  "schema": "Ms4McpManifest.v1",
+  "name": "ms4-mcp-server",
+  "protocol": "2025-11-25",
+  "transport": "streamable-http-jsonrpc",
+  "endpoint": "http://127.0.0.1:9181/mcp",
+  "description": "Machine Spirit 4 fused runtime MCP surface: identity, ethics, fused chat, voice readiness, model view, doctrine grounding, HiveMind inventory, local-image VLM analysis, Nibbles dry-run validation, full Hermes tool access, dependency/capability status, and Windows desktop UI control.",
+  "safety": {
+    "default_posture": "fail_closed",
+    "effectful_tools_in_v1": ["ms4.chat.send@v1", "ms4.hermes.tool.call@v1", "ms4.desktop.action@v1"],
+    "dry_run_only_tools": ["ms4.nibbles.dry_run@v1"],
+    "blocked_until_future_phases": [
+      "memory_mutation",
+      "identity_mutation",
+      "lobe_authority_changes",
+      "physical_action_execution",
+      "scare_action_execution"
+    ]
+  },
+  "tools": [
+    {"name": "ms4.identity.verify@v1", "kind": "read_only"},
+    {"name": "ms4.identity.state@v1", "kind": "read_only"},
+    {"name": "ms4.ethics.evaluate@v1", "kind": "read_only_evaluation"},
+    {"name": "ms4.voice.status@v1", "kind": "read_only"},
+    {"name": "ms4.sessions.list@v1", "kind": "read_only"},
+    {"name": "ms4.chat.send@v1", "kind": "runtime_action", "gated_by": ["ms4_consciousness", "MS3 ethics"]},
+    {"name": "ms4.models.list@v1", "kind": "read_only"},
+    {"name": "ms4.vision.analyze_local@v1", "kind": "read_only", "description": "Analyze a validated local image file through a HiveMind VLM."},
+    {"name": "ms4.doctrine.explain@v1", "kind": "read_only"},
+    {"name": "ms4.hivemind.inventory@v1", "kind": "read_only"},
+    {"name": "ms4.nibbles.dry_run@v1", "kind": "dry_run_only"},
+    {"name": "ms4.hermes.tools.list@v1", "kind": "read_only"},
+    {"name": "ms4.hermes.tool.call@v1", "kind": "runtime_action", "gated_by": ["ms4_consciousness", "MS3 ethics"], "description": "Dispatch any available Hermes tool through MS4."},
+    {"name": "ms4.runtime.deps.status@v1", "kind": "read_only", "description": "Report contained MS4 runtime dependency and capability status."},
+    {"name": "ms4.desktop.status@v1", "kind": "read_only", "description": "Report Windows desktop-control readiness and active screen/window context."},
+    {"name": "ms4.desktop.capture@v1", "kind": "read_only", "description": "Capture desktop screenshot metadata and optionally a base64 image."},
+    {"name": "ms4.desktop.action@v1", "kind": "runtime_action", "gated_by": ["MS3 ethics", "hard safety blocks", "MS4_DESKTOP_CONTROL"], "description": "Perform local desktop UI actions through MS4."}
+  ]
+}

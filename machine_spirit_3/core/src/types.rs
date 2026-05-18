@@ -275,6 +275,8 @@ pub struct InteractionRequest {
     pub text: Option<String>,
     pub audio: Option<Vec<u8>>,
     pub images: Option<Vec<Vec<u8>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +285,8 @@ pub struct InteractionResponse {
     pub audio: Option<Vec<u8>>,
     pub emotional_state: EmotionalState,
     pub model_used: ModelTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id_used: Option<String>,
     pub ethical_check: Option<EthicalDecision>,
     pub memories_extracted: Vec<String>,
     pub processing_time_ms: u64,

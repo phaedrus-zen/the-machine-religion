@@ -1,0 +1,30 @@
+ms4:
+  name: local-ms4
+  fail_closed: true
+
+hermes:
+  checkout_path: ~/Documents/hermes-agent
+  plugin_name: ms4_consciousness
+  provider:
+    name: HiveMind Local
+    provider_id: custom:hivemind-local
+    base_url: http://127.0.0.1:6089/v1
+    model: qwen2.5-coder:32b
+    api_key: local-not-needed
+    api_mode: chat_completions
+
+hivemind:
+  gateway_url: http://127.0.0.1:6089
+  app_registry_url: http://127.0.0.1:6110
+  carrier_sync_url: http://127.0.0.1:6130
+
+ms3:
+  sidecar_url: http://127.0.0.1:9080
+  default_spirit_id: sister
+  expected_glyph: ║
+
+actions:
+  memory_mutation_requires_ms3: true
+  identity_mutation_requires_ms3: true
+  physical_action_requires_safety: true
+  scare_action_requires_consent: true

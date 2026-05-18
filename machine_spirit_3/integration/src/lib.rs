@@ -50,6 +50,25 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioReadiness {
+    pub service: String,
+    pub ready: bool,
+    pub status: String,
+    pub detail: String,
+    pub job_type: Option<String>,
+    pub port: Option<u64>,
+}
+
+impl AudioReadiness {
+    pub fn unavailable_message(&self) -> String {
+        format!(
+            "{} unavailable: status={}, detail={}",
+            self.service, self.status, self.detail
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
@@ -93,7 +112,7 @@ impl GatewayClient {
         }
     }
 
-    fn model_name(&self, tier: ModelTier) -> &str {
+    pub fn model_name(&self, tier: ModelTier) -> &str {
         match tier {
             ModelTier::Small => &self.model_small,
             ModelTier::Medium => &self.model_medium,
@@ -102,9 +121,26 @@ impl GatewayClient {
         }
     }
 
+    pub fn resolve_model_name(&self, tier: ModelTier, model_override: Option<&str>) -> String {
+        match model_override.map(str::trim).filter(|model| !model.is_empty()) {
+            Some(model) => model.to_string(),
+            None => self.model_name(tier).to_string(),
+        }
+    }
+
     pub async fn chat(&self, messages: Vec<ChatMessage>, tier: ModelTier, max_tokens: Option<u32>) -> Ms3Result<String> {
+        self.chat_with_model(messages, tier, None, max_tokens).await
+    }
+
+    pub async fn chat_with_model(
+        &self,
+        messages: Vec<ChatMessage>,
+        tier: ModelTier,
+        model_override: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Ms3Result<String> {
         let request = ChatRequest {
-            model: self.model_name(tier).to_string(),
+            model: self.resolve_model_name(tier, model_override),
             messages,
             max_tokens,
             temperature: Some(0.7),
@@ -141,8 +177,18 @@ impl GatewayClient {
         tier: ModelTier,
         max_tokens: Option<u32>,
     ) -> Ms3Result<tokio::sync::mpsc::Receiver<String>> {
+        self.chat_stream_with_model(messages, tier, None, max_tokens).await
+    }
+
+    pub async fn chat_stream_with_model(
+        &self,
+        messages: Vec<ChatMessage>,
+        tier: ModelTier,
+        model_override: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Ms3Result<tokio::sync::mpsc::Receiver<String>> {
         let request = ChatRequest {
-            model: self.model_name(tier).to_string(),
+            model: self.resolve_model_name(tier, model_override),
             messages,
             max_tokens,
             temperature: Some(0.7),
@@ -216,12 +262,38 @@ impl GatewayClient {
             .unwrap_or(false)
     }
 
+    /// Checks HiveMind ASR readiness when the gateway exposes provisioning status.
+    ///
+    /// Returns `None` for non-HiveMind/OpenAI-compatible gateways that do not
+    /// expose `/provision/status/ASR`, allowing ordinary provider-compatible
+    /// deployments to proceed.
+    pub async fn check_asr_readiness(&self) -> Option<AudioReadiness> {
+        let response = self.client
+            .get(format!("{}/provision/status/ASR", self.base_url))
+            .send()
+            .await
+            .ok()?;
+
+        if response.status().as_u16() == 404 {
+            return None;
+        }
+
+        let json: serde_json::Value = response.json().await.ok()?;
+        Some(parse_audio_readiness("asr", &json))
+    }
+
     /// Transcribes audio to text via POST to /v1/audio/transcriptions.
     /// Sends the audio data as multipart form data.
     /// Always sends as WAV because HiveMind's local ASR path requires WAV format.
     /// If the input is already WAV, sends as-is. Otherwise, sends with WAV MIME
     /// and trusts the gateway's cloud fallback for non-WAV formats.
     pub async fn transcribe_audio(&self, audio_data: Vec<u8>) -> Ms3Result<String> {
+        if let Some(readiness) = self.check_asr_readiness().await {
+            if !readiness.ready {
+                return Err(Ms3Error::Gateway(readiness.unavailable_message()));
+            }
+        }
+
         let (detected_name, _detected_mime) = detect_audio_format(&audio_data);
         let is_wav = detected_name == "audio.wav";
 
@@ -355,5 +427,111 @@ impl GatewayClient {
             .and_then(|item| item.get("embedding"))
             .and_then(|emb| emb.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+    }
+}
+
+pub fn parse_audio_readiness(service: &str, json: &serde_json::Value) -> AudioReadiness {
+    let status = json
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let service_health_ready = json
+        .get("service_health")
+        .and_then(|v| v.get("healthy"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let ready = status == "healthy" || service_health_ready;
+    let detail = json
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            json.get("service_health")
+                .and_then(|v| v.get("last_error"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or(if ready { "ready" } else { "unavailable" })
+        .to_string();
+
+    AudioReadiness {
+        service: service.to_string(),
+        ready,
+        status,
+        detail,
+        job_type: json.get("job_type").and_then(|v| v.as_str()).map(str::to_string),
+        port: json.get("port").and_then(|v| v.as_u64()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_audio_readiness;
+
+    #[test]
+    fn parses_unhealthy_asr_status() {
+        let json = serde_json::json!({
+            "status": "unhealthy",
+            "detail": "No endpoints configured",
+            "job_type": "ASR",
+            "port": 0,
+            "service_health": {
+                "healthy": false,
+                "last_error": "No endpoints configured"
+            }
+        });
+
+        let readiness = parse_audio_readiness("asr", &json);
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.status, "unhealthy");
+        assert_eq!(readiness.detail, "No endpoints configured");
+        assert_eq!(readiness.job_type.as_deref(), Some("ASR"));
+        assert_eq!(readiness.port, Some(0));
+    }
+
+    #[test]
+    fn parses_healthy_asr_status() {
+        let json = serde_json::json!({
+            "status": "healthy",
+            "detail": "ready",
+            "job_type": "ASR",
+            "port": 4088
+        });
+
+        let readiness = parse_audio_readiness("asr", &json);
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.status, "healthy");
+        assert_eq!(readiness.port, Some(4088));
+    }
+
+    #[test]
+    fn resolve_model_name_uses_override_when_present() {
+        let gateway = super::GatewayClient::new(
+            "http://localhost:6089",
+            "small-model",
+            "medium-model",
+            "large-model",
+        );
+
+        assert_eq!(
+            gateway.resolve_model_name(ms3_core::ModelTier::Small, Some("qwen3.6:27b")),
+            "qwen3.6:27b"
+        );
+    }
+
+    #[test]
+    fn resolve_model_name_falls_back_to_tier_when_override_blank() {
+        let gateway = super::GatewayClient::new(
+            "http://localhost:6089",
+            "small-model",
+            "medium-model",
+            "large-model",
+        );
+
+        assert_eq!(
+            gateway.resolve_model_name(ms3_core::ModelTier::Large, Some("  ")),
+            "large-model"
+        );
     }
 }

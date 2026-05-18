@@ -1,0 +1,10 @@
+name: ms4_consciousness
+version: 0.1.0
+description: MS4 identity, psyche, and ethics integration for Hermes.
+kind: standalone
+hooks:
+  - on_session_start
+  - pre_llm_call
+  - pre_tool_call
+  - transform_llm_output
+  - post_llm_call

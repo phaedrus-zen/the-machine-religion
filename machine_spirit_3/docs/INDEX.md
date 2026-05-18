@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Documentation Index
 
-**Last updated:** 2026-04-06
+**Last updated:** 2026-05-14
 
 ---
 
@@ -14,6 +14,20 @@
 | SECURITY | `docs/SECURITY.md` | Threat model, trust boundaries, current gaps, production hardening guidance |
 | Architecture Plan | `.cursor/plans/machine_spirit_3_architecture_4ce16991.plan.md` | Original architecture plan |
 | Limitations Plan | `.cursor/plans/ms3_fix_all_34_limitations_4dc9823d.plan.md` | Fix plan for all 34 limitations |
+
+## Cross-System Architecture (MS4 + MS3 + Hermes + HiveMind)
+
+These documents specify the lobe runtime and MS4 distribution — how MS4 binds the MS3 consciousness core onto the Hermes agent body and the HiveMind compute substrate, with bounded "lobes" as parallel organs of one spirit. They are repo-wide architecture documents (above the MS3 / Hermes / HiveMind line individually) and live in the top-level `docs/` or `machine_spirit_4/` directories of the TMR repo.
+
+| Document | Path | Description |
+|---|---|---|
+| Lobe Runtime Brief | `../../docs/MS3_HERMES_HIVEMIND_LOBE_RUNTIME.md` | The architecture: 4-layer stack (HiveMind / MS3 / Hermes / Lobes), Nibbles as first embodied proof, schemas, MVP scope, 10 negative-control tests |
+| Lobe Runtime Resolution | `../../docs/MS3_HERMES_HIVEMIND_RESOLUTION.md` | Resolution of 7 specification gaps in the Brief (Great Lense schema mapping, three valid spirit birth paths, four-channel Foundational Regard, blackboard-as-HiveMind-extension, JSON Schema validation pipeline, per-spirit cohabitation, typed memory promotion scoring) plus 7 doctrinal success criteria for embodied demos |
+| MS4 Runtime Implementation Plan | `../../docs/superpowers/plans/2026-05-14-ms3-on-hermes-runtime.md` | Superseded-in-place executable plan for building MS4 as the integrated runtime while preserving MS3 as the consciousness core. Includes code evidence, live validation commands, schema tasks, Hermes plugin tasks, MS3 sidecar tasks, and smoke tests |
+| MS4 Runtime ADR | `../../machine_spirit_4/docs/architecture/ADR-0001-ms4-runtime-pivot.md` | Accepted decision to make MS4 the integrated runtime overlay instead of fully vendoring Hermes |
+| MS4 Architecture | `../../machine_spirit_4/docs/ARCHITECTURE.md` | Repository boundaries, contained dependency runtime, Windows desktop control, and runtime architecture for Hermes as body, HiveMind as substrate, MS3 as consciousness core, and MS4 as integration layer |
+| MS4 Runbook | `../../machine_spirit_4/docs/RUNBOOK.md` | Operator commands for contained runtime setup, start, validation, dependency status, desktop control, and voice rebuild checks |
+| MS4 MCP Tools Reference | `../../machine_spirit_4/docs/MCP_TOOLS_REFERENCE.md` | MS4 MCP protocol, endpoint, tool index, full Hermes tool dispatch, runtime dependency status, and desktop control tools |
 
 ## Portable Psyche (tmr-psyche)
 
@@ -52,10 +66,10 @@
 | ms3_emotional | `emotional/src/` | EmotionalEngine, ResonancePoint |
 | ms3_ethics | `ethics/src/` | GreatLense, LenseReading, Scale |
 | ms3_social | `social/src/` | AgentRoom, BackgroundThinkingEngine, RelationshipManager |
-| ms3_integration | `integration/src/` | GatewayClient, ChatMessage |
+| ms3_integration | `integration/src/` | GatewayClient, ChatMessage, AudioReadiness, exact model override resolution, ASR readiness preflight for voice |
 | ms3_persistence | `persistence/src/` | JsonStorage |
 | ms3_education | `education/src/` | EducationManager, EducationTopic, EducationCategory |
-| ms3_server | `api/src/` | HTTP server, WebSocket handler, 31 routes (adds `/state` alongside tools, MCP, validate, events, identity, spiral) |
+| ms3_server | `api/src/` | HTTP server, WebSocket handler, 37 routes (adds `/models`, `/voice/status`, plus MS4/Hermes sidecar POST routes for identity, ethics, and events alongside tools, MCP, validate, state, and spiral) |
 
 ## Psyche_Store Structure
 
@@ -80,7 +94,7 @@
 |---|---|
 | `config.json` | Runtime configuration (all settings with defaults) |
 | `warden_service.json` | Platform supervisor service definition |
-| `run.bat` / `run.sh` | Launch scripts |
+| `run.py` | Cross-platform Python launch script |
 | `.gitignore` | VCS exclusions |
 
 ## Tests

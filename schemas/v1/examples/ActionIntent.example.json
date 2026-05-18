@@ -1,0 +1,15 @@
+{
+  "schema": "ActionIntent.v1",
+  "spirit_id": "nibbles",
+  "action_id": "act_example_scare",
+  "proposed_by": "hermes",
+  "action_type": "scare",
+  "description": "Trigger a short spoken scare line and low-intensity light flash.",
+  "inputs_used": ["blackboard:event:consent_signal:latest"],
+  "risk_class": "medium",
+  "requires_safety_clearance": true,
+  "payload": {
+    "speech": "Boo.",
+    "light_pattern": "short_flash"
+  }
+}

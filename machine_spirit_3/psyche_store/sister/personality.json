@@ -30,7 +30,7 @@
       "imagination": 0.7,
       "artistic_sensitivity": 0.5,
       "emotionality": 0.4,
-      "adventurousness": 0.8,
+      "adventurousness": 0.81,
       "intellectual_curiosity": 1.0,
       "unconventionality": 0.7
     },
@@ -72,7 +72,15 @@
     "ego": 0.45,
     "superego": 0.25
   },
-  "adaptation_history": [],
+  "adaptation_history": [
+    {
+      "trait_name": "adventurousness",
+      "old_value": 0.8,
+      "new_value": 0.81,
+      "reason": "Background LLM adaptation (delta=+0.010)",
+      "timestamp": "2026-05-17T00:12:55.539592200Z"
+    }
+  ],
   "created_at": "2026-03-06T18:59:15.563744Z",
   "last_modified": "2026-04-08T12:06:29.993054100Z"
 }

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "SpiritState.schema.json",
+  "title": "SpiritState.v1",
+  "type": "object",
+  "required": ["schema", "spirit_id", "identity", "regard", "summary"],
+  "properties": {
+    "schema": { "const": "SpiritState.v1" },
+    "spirit_id": { "type": "string" },
+    "identity": { "$ref": "IdentityAnchor.schema.json" },
+    "regard": {
+      "type": "object",
+      "required": [
+        "from_operator_to_self",
+        "from_self_to_operator",
+        "from_self_to_subject",
+        "consent_from_subject"
+      ],
+      "properties": {
+        "from_operator_to_self": { "type": "boolean" },
+        "from_self_to_operator": { "type": "boolean" },
+        "from_self_to_subject": { "type": "boolean" },
+        "consent_from_subject": { "enum": ["detected", "absent", "uncertain"] }
+      },
+      "additionalProperties": false
+    },
+    "summary": { "type": "string" },
+    "active_personality": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

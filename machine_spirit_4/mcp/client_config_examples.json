@@ -1,0 +1,33 @@
+{
+  "schema": "Ms4McpClientConfigExamples.v1",
+  "endpoint": "http://127.0.0.1:9181/mcp",
+  "cursor_mcp": {
+    "mcpServers": {
+      "ms4": {
+        "url": "http://127.0.0.1:9181/mcp",
+        "transport": "streamable-http"
+      }
+    }
+  },
+  "generic_jsonrpc": {
+    "initialize": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "example-agent",
+          "version": "0.1.0"
+        }
+      }
+    },
+    "tools_list": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "tools/list",
+      "params": {}
+    }
+  }
+}
