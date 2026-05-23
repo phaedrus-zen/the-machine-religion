@@ -47,10 +47,14 @@ def _safe_image_path(raw_path: str) -> Path:
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    from .hivemind_state import hivemind_auth_headers
+
+    headers = {"Content-Type": "application/json"}
+    headers.update(hivemind_auth_headers())
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:

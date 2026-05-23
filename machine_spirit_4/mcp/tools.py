@@ -4,10 +4,19 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from machine_spirit_4 import hermes_admin
 from machine_spirit_4.deps_status import dependency_status
 from machine_spirit_4.desktop import DesktopSafetyError, desktop_controller
+from machine_spirit_4.double_agent import (
+    JobEnvelope,
+    RunnerError,
+    SchemaError as DoubleAgentSchemaError,
+    default_blackboard,
+    default_runner,
+)
 from machine_spirit_4.gateway.context import TMR_GROUNDING, format_inventory_answer
 from machine_spirit_4.gateway.vision import analyze_local_image
+from machine_spirit_4.hermes_admin import HermesUpgradeError
 from .schemas import ToolInputError, optional_string, require_object, require_string
 
 
@@ -200,6 +209,93 @@ def runtime_deps_status(runtime: Any, arguments: dict[str, Any]) -> Any:
     return dependency_status()
 
 
+def hermes_version(runtime: Any, arguments: dict[str, Any]) -> Any:
+    refresh = bool(arguments.get("refresh"))
+    return hermes_admin.version_info(force_refresh_latest=refresh)
+
+
+def hermes_releases(runtime: Any, arguments: dict[str, Any]) -> Any:
+    return {"releases": [r.__dict__ for r in hermes_admin.recent_releases(force_refresh=bool(arguments.get("refresh")))]}
+
+
+def hermes_update(runtime: Any, arguments: dict[str, Any]) -> Any:
+    target = optional_string(arguments, "target_version") or optional_string(arguments, "version")
+    requester = optional_string(arguments, "request_user") or "ms4-mcp"
+    try:
+        snap = hermes_admin.trigger_update(target_version=target, request_user=requester)
+    except HermesUpgradeError as exc:
+        raise ToolInputError(str(exc)) from exc
+    return snap.to_dict()
+
+
+def hermes_update_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    snap = hermes_admin.last_update()
+    return snap.to_dict() if snap else {"status": "idle", "phase": "none", "job_id": None}
+
+
+def double_agent_submit(runtime: Any, arguments: dict[str, Any]) -> Any:
+    try:
+        envelope = JobEnvelope.from_dict(dict(arguments))
+        return default_runner().submit(envelope)
+    except DoubleAgentSchemaError as exc:
+        raise ToolInputError(str(exc)) from exc
+    except RunnerError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def double_agent_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    job_id = require_string(arguments, "job_id")
+    snap = default_runner().get(job_id)
+    if snap is None:
+        raise ToolInputError(f"unknown job_id: {job_id}")
+    return snap
+
+
+def double_agent_list(runtime: Any, arguments: dict[str, Any]) -> Any:
+    conv = optional_string(arguments, "conversation_id")
+    states_arg = arguments.get("states")
+    if states_arg is not None and not isinstance(states_arg, list):
+        raise ToolInputError("states must be an array of strings")
+    states = tuple(str(s) for s in (states_arg or [])) or None
+    limit = arguments.get("limit")
+    if limit is not None and not isinstance(limit, int):
+        raise ToolInputError("limit must be an integer")
+    return {"jobs": default_runner().list(
+        conversation_id=conv, states=states, limit=int(limit or 50),
+    )}
+
+
+def double_agent_events(runtime: Any, arguments: dict[str, Any]) -> Any:
+    job_id = require_string(arguments, "job_id")
+    after = optional_string(arguments, "after_event_id")
+    limit = arguments.get("limit")
+    if limit is not None and not isinstance(limit, int):
+        raise ToolInputError("limit must be an integer")
+    return {
+        "job_id": job_id,
+        "events": default_blackboard().list_events(
+            job_id, after_event_id=after, limit=int(limit or 200),
+        ),
+    }
+
+
+def double_agent_cancel(runtime: Any, arguments: dict[str, Any]) -> Any:
+    job_id = require_string(arguments, "job_id")
+    try:
+        return default_runner().cancel(job_id)
+    except RunnerError as exc:
+        raise ToolInputError(str(exc)) from exc
+
+
+def double_agent_mark_stale(runtime: Any, arguments: dict[str, Any]) -> Any:
+    job_id = require_string(arguments, "job_id")
+    reason = optional_string(arguments, "reason") or "Marked stale via MCP."
+    try:
+        return default_runner().mark_stale(job_id, reason=reason)
+    except RunnerError as exc:
+        raise ToolInputError(str(exc)) from exc
+
+
 def _desktop_action_intent(arguments: dict[str, Any]) -> dict[str, Any]:
     action_name = str(arguments.get("action", "unknown")).lower()
     low_risk = action_name == "wait"
@@ -339,6 +435,115 @@ def build_tool_registry() -> dict[str, ToolDef]:
             {"type": "object", "properties": {}},
             read_only_annotations("MS4 runtime dependency status"),
             runtime_deps_status,
+        ),
+        ToolDef(
+            "ms4.hermes.version@v1",
+            "Report current vs latest Hermes Agent version (public GitHub releases). Read-only.",
+            {"type": "object", "properties": {"refresh": {"type": "boolean"}}},
+            read_only_annotations("MS4 Hermes version"),
+            hermes_version,
+        ),
+        ToolDef(
+            "ms4.hermes.releases@v1",
+            "List recent Hermes Agent releases for the pin-a-version selector. Cached ~1h.",
+            {"type": "object", "properties": {"refresh": {"type": "boolean"}}},
+            read_only_annotations("MS4 Hermes releases"),
+            hermes_releases,
+        ),
+        ToolDef(
+            "ms4.hermes.update@v1",
+            "Trigger a Hermes Agent upgrade to the latest release or a pinned target_version. Spawns a background job; poll ms4.hermes.update.status@v1.",
+            {"type": "object", "properties": {"target_version": {"type": "string"}, "version": {"type": "string"}, "request_user": {"type": "string"}}},
+            chat_annotations("MS4 Hermes update"),
+            hermes_update,
+        ),
+        ToolDef(
+            "ms4.hermes.update.status@v1",
+            "Report current/last Hermes upgrade job phase and progress trail.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 Hermes update status"),
+            hermes_update_status,
+        ),
+        ToolDef(
+            "ms4.double_agent.submit@v1",
+            "Submit a Double Agent background job. Enforces phase-1 authority (can_mutate_world must be false) and safe-id allowlists. Spawns a contained worker; poll ms4.double_agent.status@v1 for progress.",
+            {
+                "type": "object",
+                "required": ["parent_conversation_id", "conversation_revision_id", "user_visible_goal"],
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "parent_conversation_id": {"type": "string"},
+                    "conversation_revision_id": {"type": "integer"},
+                    "background_lobe_type": {"type": "string"},
+                    "user_visible_goal": {"type": "string"},
+                    "internal_goal": {"type": "string"},
+                    "authority": {"type": "object"},
+                    "resource_request": {"type": "object"},
+                    "status_policy": {"type": "object"},
+                    "priority": {"type": "string"},
+                    "latency_class": {"type": "string"},
+                    "request_user": {"type": "string"},
+                },
+            },
+            chat_annotations("MS4 Double Agent submit"),
+            double_agent_submit,
+        ),
+        ToolDef(
+            "ms4.double_agent.status@v1",
+            "Current snapshot for one Double Agent job: state, last safe_user_status, is_stale, last event type/timestamp.",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            read_only_annotations("MS4 Double Agent status"),
+            double_agent_status,
+        ),
+        ToolDef(
+            "ms4.double_agent.list@v1",
+            "List Double Agent jobs, optionally filtered by conversation_id and state(s).",
+            {
+                "type": "object",
+                "properties": {
+                    "conversation_id": {"type": "string"},
+                    "states": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer"},
+                },
+            },
+            read_only_annotations("MS4 Double Agent list"),
+            double_agent_list,
+        ),
+        ToolDef(
+            "ms4.double_agent.events@v1",
+            "Recent allowlisted lifecycle events for a Double Agent job. Anti-hallucination contract: raw model tokens are never returned.",
+            {
+                "type": "object",
+                "required": ["job_id"],
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "after_event_id": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+            read_only_annotations("MS4 Double Agent events"),
+            double_agent_events,
+        ),
+        ToolDef(
+            "ms4.double_agent.cancel@v1",
+            "Request cancellation of a running Double Agent job. Idempotent on already-finished jobs.",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            chat_annotations("MS4 Double Agent cancel"),
+            double_agent_cancel,
+        ),
+        ToolDef(
+            "ms4.double_agent.mark_stale@v1",
+            "Mark a Double Agent job stale (e.g. when the user changes direction). The worker also gets a cancel signal so it stops doing useless work.",
+            {
+                "type": "object",
+                "required": ["job_id"],
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            },
+            chat_annotations("MS4 Double Agent mark stale"),
+            double_agent_mark_stale,
         ),
         ToolDef(
             "ms4.desktop.status@v1",

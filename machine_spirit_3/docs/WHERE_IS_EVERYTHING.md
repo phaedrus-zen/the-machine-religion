@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Where Is Everything
 
-**Last updated:** 2026-05-14
+**Last updated:** 2026-05-21
 
 ---
 
@@ -12,8 +12,8 @@
 | **6089** | HiveMind Gateway (external dependency) | Yes | `HIVEMIND_GATEWAY_URL` env var |
 | **6132** | ms3_mcp_server (Python, tmr-psyche introspection MCP) | Yes | tmr-psyche config |
 | **6133** | blackboard_service (HiveMind extension, lobe runtime — proposed) | Yes | HiveMind extension config |
-| **9180** | MS4 Gateway | Yes | `MS4_GATEWAY_PORT` env var |
-| **9181** | MS4 MCP Server | Yes | `MS4_MCP_PORT` env var |
+| **9180** | MS4 Gateway (chat, voice status, desktop control, Hermes auto-update REST, Double Agent REST + Face Lobe wiring) | Yes | `MS4_GATEWAY_PORT` env var |
+| **9181** | MS4 MCP Server (`ms4.hermes.*@v1`, `ms4.double_agent.*@v1`, etc. — 27 tools total) | Yes | `MS4_MCP_PORT` env var |
 
 ## API Endpoints (37 routes)
 
@@ -190,6 +190,10 @@
 | MS4 Gateway | `http://127.0.0.1:9180/desktop/capture` | Read-only desktop screenshot capture endpoint |
 | MS4 Gateway | `http://127.0.0.1:9180/desktop/action` | Effectful desktop UI action endpoint gated by `MS4_DESKTOP_CONTROL`, MS3 ethics, hard safety blocks, and audit logging |
 | MS4 Gateway | `http://127.0.0.1:9180/audit` | Recent fused chat/tool audit events |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/active` | Live `hivemind.jobs.active@v1` snapshot (inference + pulls + scatter + training) |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/load` | Live `hivemind.cluster.load@v1` admission-control snapshot |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/state` | Combined `Ms4HivemindState.v1` snapshot (active jobs + load + service health + auth/mcp endpoints) |
+| MS4 Gateway | `http://127.0.0.1:9180/spirit/state` | Combined `Ms4SpiritState.v1` snapshot of MS3 identity / personality / resonance / state |
 | MS4 MCP | `http://127.0.0.1:9181/healthcheck/basic` | Basic MCP health |
 | MS4 MCP | `http://127.0.0.1:9181/api/v1/ms4_mcp/status` | MCP status, protocol, tool count |
 | `../../machine_spirit_4/plugins/hermes/ms4_consciousness/` | MS4-owned Hermes plugin source home |
@@ -237,6 +241,8 @@
 | `MS4_MS3_SIDECAR_URL` | `http://127.0.0.1:9080` | MS3 sidecar URL used by the `ms4_consciousness` plugin |
 | `MS4_HIVEMIND_BASE_URL` | `http://127.0.0.1:6089/v1` | HiveMind OpenAI-compatible provider base URL |
 | `MS4_SPIRIT_ID` | `sister` | Default spirit id for local MS4 validation and plugin boot |
+| `MS4_HIVEMIND_MCP_URL` | _(derives `:6105` from `MS4_HIVEMIND_URL`)_ | Pin the HiveMind MCP base URL. Default tries direct MCP gateway on port 6105 (lower latency, control-plane isolation) and falls back to `MS4_HIVEMIND_URL/v1/mcp` (HLI proxy) on connect failure. |
+| `MS4_HIVEMIND_API_KEY` | _(empty = dev mode)_ | When set, every MS4 → HiveMind HTTP/WebSocket call attaches `Authorization: Bearer <key>` so MS4 works against clusters with `MENTA_API_KEYS` configured. |
 
 ## Portable Psyche (tmr-psyche)
 

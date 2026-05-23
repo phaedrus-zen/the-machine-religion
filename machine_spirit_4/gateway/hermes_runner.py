@@ -1,15 +1,100 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+
+log = logging.getLogger("ms4.gateway.hermes_runner")
+
+
+def _now_local_iso() -> str:
+    """Return the current local date/time as ISO-8601 with timezone.
+
+    Used to ground the Face Lobe on every turn so questions like
+    "what is the date?" don't require a Depth Lobe dispatch. Local
+    time (with tzinfo) is what the operator actually wants to see.
+    """
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _canned_chat_failure_text(exc: Exception) -> str:
+    """Translate a FaceLobeChat exception into a short user-visible
+    reply that's safe to feed into TTS. The raw exception string
+    (full URL, timeout numbers, etc.) is operator detail and goes to
+    metrics.error / the audit log, not the user.
+
+    Tailored to the three failure modes seen live:
+      - HiveMind unreachable
+      - Streaming chat completion stalled / timed out
+      - Server returned a non-2xx (5xx)
+    """
+    msg = str(exc).lower()
+    if "stream" in msg and ("timed out" in msg or "unreachable" in msg):
+        return (
+            "I'm having trouble reaching the language cluster right now. "
+            "Give it a moment and try again, or use the Settings dialog "
+            "to switch the TTS engine to REST if HiveMind's streaming "
+            "endpoint is unhappy."
+        )
+    if "unreachable" in msg or "connection refused" in msg or "name or service" in msg:
+        return (
+            "HiveMind looks unreachable from MS4 right now. Check that "
+            "the cluster is running on the configured URL and try again."
+        )
+    if "5" in msg and ("502" in msg or "503" in msg or "500" in msg):
+        return (
+            "HiveMind returned a server error on the chat completion. "
+            "It's usually transient — try the same prompt again in a "
+            "few seconds."
+        )
+    # Catch-all canned text. The operator can dig the real exception out
+    # of metrics.error.
+    return (
+        "Something went wrong reaching the language model. The operator "
+        "can check the audit log for the exact error."
+    )
+
+
+def _combine_grounding(
+    grounding_source: str | None,
+    face_lobe_block: str | None,
+    dispatched_job: dict[str, Any] | None,
+) -> str:
+    """Combine the grounding-source labels so the operator can see at a
+    glance what context layers were applied to a turn."""
+    parts: list[str] = []
+    if grounding_source:
+        parts.append(grounding_source)
+    if face_lobe_block:
+        parts.append("face_lobe")
+    if dispatched_job and isinstance(dispatched_job, dict) and dispatched_job.get("job_id"):
+        parts.append("depth_lobe_dispatched")
+    return "+".join(parts) if parts else "none"
+
+from machine_spirit_4.double_agent import (
+    JobEnvelope,
+    ResourceRequest,
+    SchemaError,
+    build_face_lobe_context_block,
+    choose_depth_model,
+    choose_foreground_model,
+    default_runner,
+    face_lobe_turn_start,
+    router_route,
+)
+from machine_spirit_4.double_agent.safety import new_job_id
+
 from .audit import append_event
 from .context import build_grounded_user_message
+from .face_lobe_chat import FaceLobeChat, FaceLobeChatError
 
 
 @dataclass
@@ -34,6 +119,7 @@ class Ms4HermesRunner:
         ms3_url: str = "http://127.0.0.1:9080",
         default_model: str = "qwen3-coder-next:latest",
         agent_cls: Any | None = None,
+        face_lobe_chat: FaceLobeChat | None = None,
     ) -> None:
         self.hermes_dir = Path(hermes_dir)
         self.hivemind_url = hivemind_url.rstrip("/")
@@ -41,6 +127,11 @@ class Ms4HermesRunner:
         self.default_model = default_model
         self._agent_cls = agent_cls
         self._sessions: dict[str, SessionState] = {}
+        # Face Lobe direct-chat path: per artifact §5.1/§16.5 the foreground
+        # is "status and routing focused" and should NOT pay the Hermes
+        # tool-loop tax on every turn. We keep the Hermes plumbing for
+        # `dispatch_hermes_tool` and Depth Lobe workers.
+        self.face_lobe_chat = face_lobe_chat or FaceLobeChat(hivemind_url=self.hivemind_url)
 
     def ensure_hermes_path(self) -> None:
         hermes_path = str(self.hermes_dir)
@@ -133,58 +224,248 @@ class Ms4HermesRunner:
         model: str | None = None,
         stream_callback: Any | None = None,
     ) -> dict[str, Any]:
-        self.require_plugin()
+        """Foreground (Face Lobe) chat turn.
+
+        Routes ALL foreground turns through the direct FaceLobeChat path
+        (no Hermes loop, no plugin chain, no tool injection) so even
+        trivial turns return in seconds instead of tens of seconds.
+        Tool-requiring work is dispatched in parallel to a Depth Lobe
+        background job by the auto-router; the foreground reply mentions
+        the dispatch but doesn't wait on it.
+        """
         os.environ["MS4_MS3_SIDECAR_URL"] = self.ms3_url
         os.environ.setdefault("MS4_SPIRIT_ID", "sister")
 
-        selected_model = model or self.default_model
-        state = self.get_or_create_session(session_id, selected_model)
-        state.tool_trace = []
-        grounded_message, source = build_grounded_user_message(message, self.hivemind_url)
-        state.last_grounding_source = source
+        # ---- Face Lobe model resolution (precedence: per-turn > session-pinned > picker > default)
+        face_lobe_model: dict[str, Any]
+        existing_face = self.face_lobe_chat._sessions.get(session_id) if session_id else None
+        if model is not None:
+            selected_model = model
+            face_lobe_model = {
+                "schema": "Ms4ForegroundModel.v1",
+                "model_id": selected_model,
+                "source": "per_turn_override",
+                "detail": "request specified model",
+            }
+        elif existing_face is not None:
+            selected_model = existing_face.model or self.default_model
+            face_lobe_model = {
+                "schema": "Ms4ForegroundModel.v1",
+                "model_id": selected_model,
+                "source": "session_pinned",
+                "detail": "model pinned on session create; not re-picked mid-conversation",
+            }
+        else:
+            try:
+                choice = choose_foreground_model(hivemind_url=self.hivemind_url)
+                selected_model = choice.model_id
+                face_lobe_model = choice.to_dict()
+            except Exception as exc:
+                selected_model = self.default_model
+                face_lobe_model = {
+                    "schema": "Ms4ForegroundModel.v1",
+                    "model_id": selected_model,
+                    "source": "error",
+                    "detail": str(exc),
+                }
 
-        run_kwargs = {
-            "conversation_history": list(state.history),
-            "task_id": state.session_id,
-        }
-        if stream_callback is not None:
-            run_kwargs["stream_callback"] = stream_callback
-        result = state.agent.run_conversation(grounded_message, **run_kwargs)
-        state.history = result.get("messages", state.history)
+        # ---- Auto-router decision (and revision bump + stale-older-jobs)
+        route_decision = router_route(message)
+        message_for_chat = route_decision.cleaned_message or message
+        dispatched_job: dict[str, Any] | None = None
+        depth_choice_dict: dict[str, Any] | None = None
+
+        face_lobe_outcome: dict[str, Any] = {}
+        face_lobe_block: str | None = None
+        # We need to know dispatched_job before we build the context
+        # block (so the block can include the THIS TURN DISPATCHED /
+        # DID NOT DISPATCH line), so handle revision bump first, then
+        # auto-router dispatch, then build the block.
+        try:
+            face_lobe_outcome = face_lobe_turn_start(
+                conversation_id=session_id or f"ms4-{uuid.uuid4()}",
+                user_message=message_for_chat,
+            )
+        except Exception as exc:
+            face_lobe_outcome = {"error": str(exc)}
+
+        if route_decision.kind == "deep":
+            try:
+                revision_id = 1
+                rev_dict = face_lobe_outcome.get("revision") if isinstance(face_lobe_outcome.get("revision"), dict) else None
+                if rev_dict and isinstance(rev_dict.get("revision_id"), int):
+                    revision_id = int(rev_dict["revision_id"])
+                depth_choice = choose_depth_model(hivemind_url=self.hivemind_url)
+                depth_choice_dict = depth_choice.to_dict()
+                envelope = JobEnvelope(
+                    job_id=new_job_id(),
+                    parent_conversation_id=session_id or "ms4-conv",
+                    conversation_revision_id=revision_id,
+                    background_lobe_type="deep_chat",
+                    user_visible_goal=route_decision.goal or message_for_chat[:240],
+                    internal_goal=message_for_chat,
+                    resource_request=ResourceRequest(model_override=depth_choice.model_id),
+                )
+                envelope.validate()
+                dispatched_job = default_runner().submit(envelope)
+            except SchemaError as exc:
+                dispatched_job = {"error": f"router refused to dispatch: {exc}"}
+            except Exception as exc:
+                dispatched_job = {"error": f"router dispatch failed: {exc}"}
+
+        # Current local date/time as authoritative grounding so simple
+        # questions like "what is the date?" don't need a dispatch.
+        now_local = _now_local_iso()
+        date_grounding_line = f"current local date/time: {now_local}"
+        dispatched_job_id = (
+            dispatched_job["job_id"]
+            if isinstance(dispatched_job, dict) and dispatched_job.get("job_id")
+            else None
+        )
+        try:
+            face_lobe_block = build_face_lobe_context_block(
+                conversation_id=session_id or "",
+                dispatched_this_turn_job_id=dispatched_job_id,
+                extra_authoritative_lines=[date_grounding_line],
+            )
+        except Exception as exc:
+            log.warning("face_lobe context block failed: %s", exc)
+            face_lobe_block = (
+                "MS4 Face Lobe context (authoritative):\n"
+                f"- {date_grounding_line}\n"
+                + (
+                    f"- THIS TURN DISPATCHED job {dispatched_job_id} to the Depth Lobe.\n"
+                    if dispatched_job_id
+                    else "- THIS TURN DID NOT DISPATCH any background work.\n"
+                )
+            )
+
+        # ---- Grounded user message (TMR canon, inventory, tools-list, etc.)
+        grounded_message, grounding_source = build_grounded_user_message(message_for_chat, self.hivemind_url)
+        extra_system_blocks: list[str] = []
+        if face_lobe_block:
+            extra_system_blocks.append(face_lobe_block)
+        if grounded_message != message_for_chat:
+            extra_system_blocks.append(grounded_message.split("\n\nUser request:", 1)[0])
+        extra_system = "\n\n".join(extra_system_blocks) if extra_system_blocks else None
+
+        # ---- Direct chat call (the actual latency-sensitive bit)
+        completed = True
+        api_calls: int | None = 1
+        metrics: dict[str, Any] | None = None
+        face_result: dict[str, Any] = {}
+        effective_model = selected_model
+        fallback_used = False
+        wall_start = time.monotonic()
+        try:
+            face_result = self.face_lobe_chat.chat(
+                message_for_chat,
+                session_id=session_id,
+                model=selected_model,
+                stream_callback=stream_callback,
+                extra_system=extra_system,
+            )
+            text = face_result["text"]
+            chat_session_id = face_result["session_id"]
+            effective_model = face_result.get("model") or selected_model
+            fallback_used = bool(face_result.get("fallback_used"))
+            api_calls = int(face_result.get("api_calls") or 1)
+            metrics = face_result.get("metrics")
+        except FaceLobeChatError as exc:
+            # User-visible canned reply: the raw "HiveMind /v1/chat/completions
+            # (stream) unreachable: timed out" is ugly and meaningless to a
+            # voice user. Translate it into something the operator can act on
+            # AND something the TTS pipeline can synthesize into a sensible
+            # audible reply. The raw exception goes into metrics.error for
+            # debug + the audit log.
+            text = _canned_chat_failure_text(exc)
+            log.warning("Face Lobe chat call failed: %s", exc)
+            # Stream the canned text to the caller's stream_callback so the
+            # WS_SUPER TTS path still gets audio to synthesize and the user
+            # actually hears the apology instead of silence.
+            if stream_callback is not None:
+                try:
+                    stream_callback(text)
+                except Exception:
+                    pass
+            completed = False
+            api_calls = 0
+            chat_session_id = session_id or "ms4-unknown"
+            metrics = {
+                "schema": "Ms4TurnMetrics.v1",
+                "duration_ms": int((time.monotonic() - wall_start) * 1000),
+                "error": str(exc),
+                "requested_model": selected_model,
+                "streaming": stream_callback is not None,
+                "canned_reply": True,
+            }
+
         response = {
-            "text": result.get("final_response", ""),
-            "session_id": state.session_id,
-            "hermes_session_id": getattr(state.agent, "session_id", state.session_id),
-            "model": selected_model,
-            "grounding_source": source,
-            "api_calls": result.get("api_calls"),
-            "completed": result.get("completed", True),
-            "tool_trace": list(state.tool_trace),
-            "runtime": "hermes",
+            "text": text,
+            "session_id": chat_session_id,
+            "hermes_session_id": chat_session_id,  # kept for backward compat with old UI fields
+            "model": effective_model,
+            "grounding_source": _combine_grounding(grounding_source, face_lobe_block, dispatched_job),
+            "api_calls": api_calls,
+            "completed": completed,
+            "tool_trace": [],  # Face Lobe doesn't run tools; Depth Lobe does
+            "runtime": "face-lobe-direct",
             "ms3_sidecar_url": self.ms3_url,
             "hivemind_url": self.hivemind_url,
+            "face_lobe": face_lobe_outcome,
+            "face_lobe_model": face_lobe_model,
+            "face_lobe_context_block": face_lobe_block,
+            "router": route_decision.to_dict(),
+            "dispatched_job": dispatched_job,
+            "depth_lobe_model": depth_choice_dict,
+            "fallback_used": fallback_used,
+            "requested_model": selected_model if fallback_used else None,
+            "metrics": metrics,
         }
         append_event("chat_turn", {
-            "session_id": state.session_id,
-            "model": selected_model,
-            "grounding_source": source,
-            "tool_trace_count": len(state.tool_trace),
-            "completed": response["completed"],
+            "session_id": chat_session_id,
+            "model": effective_model,
+            "requested_model": selected_model,
+            "fallback_used": fallback_used,
+            "grounding_source": response["grounding_source"],
+            "tool_trace_count": 0,
+            "completed": completed,
+            "runtime": "face-lobe-direct",
+            "router_kind": route_decision.kind,
+            "dispatched_job_id": dispatched_job_id,
+            "revision_id": face_lobe_outcome.get("revision", {}).get("revision_id") if isinstance(face_lobe_outcome.get("revision"), dict) else None,
+            "marked_stale_jobs": face_lobe_outcome.get("marked_stale", []),
+            "metrics": metrics,
         })
         return response
 
     def sessions(self) -> list[dict[str, Any]]:
-        return [
-            {
+        # Foreground sessions live in face_lobe_chat now; Hermes-backed
+        # ad-hoc tool sessions (from dispatch_hermes_tool) live in
+        # self._sessions for backward compatibility. List both with a
+        # `runtime` discriminator.
+        out: list[dict[str, Any]] = []
+        for state in self.face_lobe_chat.sessions():
+            out.append({
+                "session_id": state["session_id"],
+                "hermes_session_id": state["session_id"],
+                "turns": state["turns"],
+                "model": state["model"],
+                "last_grounding_source": state["last_grounding_source"],
+                "tool_trace_count": 0,
+                "runtime": "face-lobe-direct",
+            })
+        for state in self._sessions.values():
+            out.append({
                 "session_id": state.session_id,
                 "hermes_session_id": getattr(state.agent, "session_id", state.session_id),
                 "turns": len(state.history),
                 "model": getattr(state.agent, "model", self.default_model),
                 "last_grounding_source": state.last_grounding_source,
                 "tool_trace_count": len(state.tool_trace),
-            }
-            for state in self._sessions.values()
-        ]
+                "runtime": "hermes-tool",
+            })
+        return out
 
     def health(self) -> dict[str, Any]:
         return {

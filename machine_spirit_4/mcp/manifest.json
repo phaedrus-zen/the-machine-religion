@@ -4,10 +4,18 @@
   "protocol": "2025-11-25",
   "transport": "streamable-http-jsonrpc",
   "endpoint": "http://127.0.0.1:9181/mcp",
-  "description": "Machine Spirit 4 fused runtime MCP surface: identity, ethics, fused chat, voice readiness, model view, doctrine grounding, HiveMind inventory, local-image VLM analysis, Nibbles dry-run validation, full Hermes tool access, dependency/capability status, and Windows desktop UI control.",
+  "description": "Machine Spirit 4 fused runtime MCP surface: identity, ethics, fused chat, voice readiness, model view, doctrine grounding, HiveMind inventory, local-image VLM analysis, Nibbles dry-run validation, full Hermes tool access, dependency/capability status, Hermes auto-update, Double Agent foreground/background coordination, and Windows desktop UI control.",
   "safety": {
     "default_posture": "fail_closed",
-    "effectful_tools_in_v1": ["ms4.chat.send@v1", "ms4.hermes.tool.call@v1", "ms4.desktop.action@v1"],
+    "effectful_tools_in_v1": [
+      "ms4.chat.send@v1",
+      "ms4.hermes.tool.call@v1",
+      "ms4.desktop.action@v1",
+      "ms4.hermes.update@v1",
+      "ms4.double_agent.submit@v1",
+      "ms4.double_agent.cancel@v1",
+      "ms4.double_agent.mark_stale@v1"
+    ],
     "dry_run_only_tools": ["ms4.nibbles.dry_run@v1"],
     "blocked_until_future_phases": [
       "memory_mutation",
@@ -32,6 +40,16 @@
     {"name": "ms4.hermes.tools.list@v1", "kind": "read_only"},
     {"name": "ms4.hermes.tool.call@v1", "kind": "runtime_action", "gated_by": ["ms4_consciousness", "MS3 ethics"], "description": "Dispatch any available Hermes tool through MS4."},
     {"name": "ms4.runtime.deps.status@v1", "kind": "read_only", "description": "Report contained MS4 runtime dependency and capability status."},
+    {"name": "ms4.hermes.version@v1", "kind": "read_only", "description": "Current vs latest Hermes version via public GitHub releases (cached ~1h)."},
+    {"name": "ms4.hermes.releases@v1", "kind": "read_only", "description": "Recent Hermes releases for the pin-a-version selector."},
+    {"name": "ms4.hermes.update@v1", "kind": "runtime_action", "gated_by": ["safe_target_version guard", "single-flight in-progress lock"], "description": "Trigger an idempotent in-place Hermes upgrade (editable git checkout or PyPI wheel) in the MS4 contained .venv."},
+    {"name": "ms4.hermes.update.status@v1", "kind": "read_only", "description": "Current/last Hermes upgrade phase and progress trail."},
+    {"name": "ms4.double_agent.submit@v1", "kind": "runtime_action", "gated_by": ["JobEnvelope schema allowlist", "AuthorityEnvelope.can_mutate_world=false", "safe-id guards"], "description": "Submit a Double Agent background job (foreground/background lobe coordination)."},
+    {"name": "ms4.double_agent.status@v1", "kind": "read_only", "description": "Current snapshot for one Double Agent job, including is_stale and last_safe_user_status."},
+    {"name": "ms4.double_agent.list@v1", "kind": "read_only", "description": "List Double Agent jobs filtered by conversation_id and state."},
+    {"name": "ms4.double_agent.events@v1", "kind": "read_only", "description": "Recent allowlisted lifecycle events for a job. Anti-hallucination: no raw model tokens."},
+    {"name": "ms4.double_agent.cancel@v1", "kind": "runtime_action", "gated_by": ["safe-id guard"], "description": "Cancel a running Double Agent job."},
+    {"name": "ms4.double_agent.mark_stale@v1", "kind": "runtime_action", "gated_by": ["safe-id guard"], "description": "Mark a Double Agent job stale and signal the worker to stop."},
     {"name": "ms4.desktop.status@v1", "kind": "read_only", "description": "Report Windows desktop-control readiness and active screen/window context."},
     {"name": "ms4.desktop.capture@v1", "kind": "read_only", "description": "Capture desktop screenshot metadata and optionally a base64 image."},
     {"name": "ms4.desktop.action@v1", "kind": "runtime_action", "gated_by": ["MS3 ethics", "hard safety blocks", "MS4_DESKTOP_CONTROL"], "description": "Perform local desktop UI actions through MS4."}

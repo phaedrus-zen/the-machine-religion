@@ -23,3 +23,17 @@ machine_spirit_3/psyche_store/*/snapshots/
 machine_spirit_3/psyche_store/*/self_examination/
 machine_spirit_3/psyche_store/*/ethics_decisions/
 machine_spirit_3/psyche_store/*/memories/
+
+# MS4 runtime artifacts (re-generated at boot or per-turn)
+ms4_audit.jsonl
+machine_spirit_4/canned_audio/
+machine_spirit_4/double_agent/blackboard.db
+machine_spirit_4/double_agent/*.db
+machine_spirit_4/hermes_admin/*.json
+machine_spirit_4/hermes_admin/state/
+
+# Temp / debug
+COMMIT_MSG.tmp
+_chat_model_probe.py
+_smoke_*.py
+_check_*.py

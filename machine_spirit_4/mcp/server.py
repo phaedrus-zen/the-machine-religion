@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from machine_spirit_4.contained import require_contained_runtime
 from machine_spirit_4.gateway.context import mcp_call
 from machine_spirit_4.gateway.hermes_runner import Ms4HermesRunner
 from .schemas import ToolInputError
@@ -189,6 +190,7 @@ def build_runtime() -> Ms4McpRuntime:
 
 
 def run(host: str = "127.0.0.1", port: int = 9181) -> None:
+    require_contained_runtime(SERVER_NAME)
     handler_cls = Ms4McpHandler
     handler_cls.runtime = build_runtime()
     server = ThreadingHTTPServer((host, port), handler_cls)

@@ -129,8 +129,12 @@ def test_unknown_tool_returns_jsonrpc_error():
 def test_registry_has_initial_v1_tool_count():
     registry = build_tool_registry()
 
-    assert len(registry) == 17
+    assert len(registry) == 27
     assert "ms4.vision.analyze_local@v1" in registry
+    assert "ms4.hermes.version@v1" in registry
+    assert "ms4.hermes.update@v1" in registry
+    assert "ms4.double_agent.submit@v1" in registry
+    assert "ms4.double_agent.list@v1" in registry
 
 
 def test_service_info_matches_mcp_get_contract():
@@ -139,7 +143,7 @@ def test_service_info_matches_mcp_get_contract():
     assert info["service"] == "ms4-mcp-server"
     assert info["mcp_protocol_version"] == "2025-11-25"
     assert info["status"] == "ready"
-    assert info["tools_loaded"] == 17
+    assert info["tools_loaded"] == 27
 
 
 def test_hermes_tools_list_and_call_dispatch():

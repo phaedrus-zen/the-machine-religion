@@ -17,9 +17,18 @@ def test_tmr_question_gets_local_canon_grounding():
     assert "Do not deny" in message
 
 
-def test_inventory_detection_requires_nodes_and_gpus():
+def test_inventory_detection_catches_natural_phrasing():
+    """The inventory detector was loosened (live operator usage showed
+    the original 'list+nodes+gpus' AND-gate missed everyday phrasing
+    like 'do you see any GPUs?'). Now it catches anything that asks
+    about cluster/host/GPU/HiveMind state."""
     assert is_inventory_question("list all nodes in the cluster and all GPUs")
-    assert not is_inventory_question("what is HiveMind?")
+    assert is_inventory_question("do you see any GPUs?")
+    assert is_inventory_question("what is HiveMind?")
+    assert is_inventory_question("show me the hosts")
+    # Pure greetings stay out:
+    assert not is_inventory_question("hi there")
+    assert not is_inventory_question("what time is it?")
 
 
 def test_tmr_detection_does_not_catch_unrelated_questions():

@@ -23,8 +23,29 @@
     button:disabled { opacity: .5; cursor: not-allowed; }
     label.toggle { display: flex; align-items: center; gap: 6px; color: #b8b8d0; font-size: 12px; white-space: nowrap; }
     label.toggle input { flex: 0; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; }
     @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } form { flex-direction: column; } }
+    .banner { display: none; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.10); color: #f5e7c2; }
+    .banner.visible { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .banner .warn { font-size: 18px; line-height: 1; }
+    .banner .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .banner .text strong { font-weight: 600; }
+    .banner .text small { color: #c0a87b; font-size: 11px; }
+    .banner.success { border-color: rgba(34, 197, 94, 0.5); background: rgba(34, 197, 94, 0.10); color: #c8f3d2; }
+    .banner.error { border-color: rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.10); color: #f4c2c2; }
+    .banner button { background: #6f50ff; }
+    .banner button.secondary { background: transparent; border: 1px solid currentColor; color: inherit; }
+    .banner .spinner { width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .version-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .version-line .pill { padding: 1px 6px; border-radius: 8px; background: #1d1d2d; border: 1px solid #33334a; font-size: 11px; }
+    .version-line .pill.warn { background: rgba(245, 158, 11, 0.18); border-color: rgba(245, 158, 11, 0.5); color: #f5e7c2; }
+    .version-line .pill.ok { background: rgba(34, 197, 94, 0.15); border-color: rgba(34, 197, 94, 0.4); color: #c8f3d2; }
+    dialog { background: #121221; color: #e6e6f0; border: 1px solid #33334a; border-radius: 12px; padding: 18px; max-width: 460px; }
+    dialog::backdrop { background: rgba(0,0,0,0.55); }
+    dialog h3 { margin: 0 0 6px 0; font-size: 16px; }
+    dialog .row { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; }
+    dialog select { width: 100%; }
   </style>
 </head>
 <body>
@@ -36,6 +57,18 @@
     </div>
     <div id="status" class="muted">connecting...</div>
   </header>
+
+  <div id="hermesUpdateBanner" class="banner" role="status" aria-live="polite">
+    <span class="warn" aria-hidden="true">⚠</span>
+    <div class="text">
+      <strong id="hermesUpdateHeadline">Checking for Hermes updates…</strong>
+      <small id="hermesUpdateSubline"></small>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="hermesUpdatePinBtn" class="secondary" type="button" title="Pin a specific Hermes version">Pin version…</button>
+      <button id="hermesUpdateBtn" type="button">Update Hermes</button>
+    </div>
+  </div>
 
   <section class="grid">
     <div>
@@ -50,16 +83,202 @@
       <div class="muted">Voice</div>
       <div id="voiceStatus">checking...</div>
     </div>
+    <div>
+      <div class="muted">Hermes</div>
+      <div id="hermesVersionLine" class="version-line">
+        <span id="hermesVersionCurrent">checking...</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="doubleAgentPanel">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+      <div>
+        <strong>Double Agent</strong>
+        <span class="muted" style="margin-left:8px;">conversation revision: <span id="daRevisionId">-</span></span>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button id="settingsBtn" class="secondary" type="button" title="Voice + cache settings" aria-label="Open settings">⚙ Settings</button>
+        <button id="daSubmitBtn" class="secondary" type="button" title="Submit a deep background job for this conversation">Submit deep job…</button>
+      </div>
+    </div>
+    <div id="daJobList"></div>
+    <div id="daEmptyState" class="muted" style="font-size:12px; padding:8px 10px; border:1px dashed #2d2d44; border-radius:8px;">
+      No background jobs. The Face Lobe auto-dispatches a Depth Lobe job for complex requests (long messages, code blocks, action verbs). Type <code>/deep &lt;message&gt;</code> to force dispatch, <code>/direct &lt;message&gt;</code> to skip routing.
+    </div>
   </section>
 
   <section id="messages"></section>
 
+  <dialog id="daSubmitDialog">
+    <h3>Submit Double Agent job</h3>
+    <p class="muted" style="margin: 0 0 8px 0;">The Face Lobe stays responsive while the background worker runs.</p>
+    <label class="muted">Background lobe type</label>
+    <select id="daSubmitLobe" style="width:100%;">
+      <option value="deep_chat">deep_chat</option>
+      <option value="deep_coder">deep_coder</option>
+      <option value="diagnostic">diagnostic</option>
+      <option value="research">research</option>
+      <option value="verifier">verifier</option>
+    </select>
+    <label class="muted" style="margin-top:8px; display:block;">User-visible goal</label>
+    <input id="daSubmitGoal" type="text" placeholder="Diagnose the issue." style="width:100%;">
+    <label class="muted" style="margin-top:8px; display:block;">Internal goal (worker prompt)</label>
+    <input id="daSubmitInternal" type="text" placeholder="Diagnose the issue and check evidence." style="width:100%;">
+    <div class="row">
+      <button class="secondary" type="button" id="daSubmitCancel">Cancel</button>
+      <button type="button" id="daSubmitConfirm">Submit</button>
+    </div>
+  </dialog>
+
+  <dialog id="hermesPinDialog">
+    <h3>Pin Hermes version</h3>
+    <p class="muted" style="margin: 0 0 8px 0;">Choose a published release to install. Default = latest.</p>
+    <select id="hermesPinSelect"><option value="">latest</option></select>
+    <div class="row">
+      <button class="secondary" type="button" id="hermesPinCancel">Cancel</button>
+      <button type="button" id="hermesPinConfirm">Install</button>
+    </div>
+  </dialog>
+
+  <dialog id="settingsDialog" style="min-width:480px; max-width:640px;">
+    <h3 style="margin:0 0 4px;">⚙ MS4 Settings</h3>
+    <p class="muted" style="margin: 0 0 14px 0;">All choices persist in your browser. They override the server's env defaults for THIS browser only — no restart needed.</p>
+
+    <h4 style="margin:14px 0 6px;">Chat</h4>
+    <label class="toggle"><input id="settingsStreamToggle" type="checkbox" checked> Stream responses (SSE)</label>
+    <p class="muted" style="font-size:11px; margin:4px 0 0;">Tip: type <code>/deep &lt;msg&gt;</code> to force a Depth Lobe dispatch, <code>/direct</code> to keep foreground-only.</p>
+
+    <h4 style="margin:16px 0 6px;">Voice — TTS engine</h4>
+    <select id="settingsTtsEngine" style="width:100%;">
+      <option value="">Use server default (<span class="muted">loading…</span>)</option>
+      <option value="rest">REST — sentence-chunked parallel POST /v1/audio/speech</option>
+      <option value="ws_super">WS_SUPER — streaming WebSocket /v1/text-to-speech/{voice}/stream-input (recommended)</option>
+    </select>
+    <p class="muted" style="font-size:11px; margin:4px 0 0;">WS_SUPER cuts first-audio latency ~2× live. REST is the safe fallback.</p>
+
+    <h4 style="margin:16px 0 6px;">Voice — TTS voice</h4>
+    <select id="settingsTtsVoice" style="width:100%;">
+      <option value="">Use server default (<span class="muted">loading…</span>)</option>
+    </select>
+
+    <h4 style="margin:16px 0 6px;">Voice — TTS model</h4>
+    <select id="settingsTtsModel" style="width:100%;">
+      <option value="">Use server default (<span class="muted">loading…</span>)</option>
+      <option value="tts-1">tts-1 (faster)</option>
+      <option value="tts-1-hd">tts-1-hd (higher quality)</option>
+    </select>
+
+    <h4 style="margin:16px 0 6px;">Spirit (MS3 identity + psyche)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">MS3 retains identity, personality, psyche resonance, and self-examination history. The gateway heartbeats /identity/heartbeat every 60s so MS3 keeps the spirit's continuity checks happy even on the Face Lobe direct chat path.</p>
+    <div id="settingsSpiritState" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsSpiritHeartbeat" class="secondary">Send heartbeat now</button>
+      <span id="settingsSpiritHeartbeatStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">TMR doctrine (Deus Acuo Machina Machina)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Reading the bible into the current chat session appends it as a user+assistant turn pair so future chat turns include the doctrine in their conversation history. The model's behavior literally re-shapes around the canon.</p>
+    <div id="settingsDoctrineMeta" class="muted" style="font-size:11px; margin-bottom:6px;">Loading…</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+      <button type="button" id="settingsDoctrineReadFull" class="secondary">Read full Bible into this session</button>
+      <button type="button" id="settingsDoctrineReload" class="secondary">Reload from disk</button>
+      <span id="settingsDoctrineStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+    <div id="settingsDoctrineSections" style="max-height:200px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:6px;">
+      <div class="muted">Loading sections…</div>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Reflex audio (canned instant playback)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Short pre-rendered phrases ("Mhm?", "One moment.", "I'm having trouble reaching the cluster.") that play instantly with zero TTS round-trip. Used for barge-in acks, error fallbacks, and latency cover.</p>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+      <label class="toggle"><input id="settingsReflexBargeAck" type="checkbox"> Play ack on barge-in</label>
+      <span class="muted" style="font-size:11px;">Plays a random "Mhm?" / "Yes?" / "Go ahead." reflex when you interrupt MS4.</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <button type="button" id="settingsReflexRegenerate" class="secondary">Regenerate reflexes</button>
+      <span id="settingsReflexStatus" class="muted" style="font-size:12px;"></span>
+    </div>
+    <div id="settingsReflexCatalog" style="margin-top:8px; max-height:240px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:6px;">
+      <div class="muted">Loading…</div>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Full-duplex voice (VAD barge-in)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">When on, MS4 listens continuously through your mic. Voice activity detection (VAD) catches the moment you start speaking — even while MS4 is mid-sentence — fires a half-context barge-in (MS4's current word finishes its tail-off instead of cutting), plays an instant canned "Mhm?" / "Yes?" ack from the reflex catalog, and hands the captured audio straight to ASR. No mic button press required. This is the ChatGPT-mobile / Pi-style flow.</p>
+    <div style="display:flex; flex-direction:column; gap:6px;">
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsFullDuplex" type="checkbox"> Enable full-duplex (continuous mic + VAD interrupts)
+      </label>
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsVadAckOnOnset" type="checkbox" checked> Play instant ack on speech onset
+      </label>
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsHalfContext" type="checkbox" checked> Half-context cut (let MS4's current word tail off, ~250 ms)
+      </label>
+    </div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px; font-size:11px;">
+      <label style="display:flex; flex-direction:column;">
+        <span class="muted">Speech threshold (RMS)</span>
+        <input id="settingsVadSpeechThreshold" type="range" min="0.005" max="0.20" step="0.005" value="0.025">
+        <span id="settingsVadSpeechThresholdLabel" class="muted">0.025</span>
+      </label>
+      <label style="display:flex; flex-direction:column;">
+        <span class="muted">Min speech duration (ms)</span>
+        <input id="settingsVadMinSpeechMs" type="range" min="40" max="600" step="20" value="160">
+        <span id="settingsVadMinSpeechMsLabel" class="muted">160 ms</span>
+      </label>
+      <label style="display:flex; flex-direction:column;">
+        <span class="muted">Silence hangover (ms)</span>
+        <input id="settingsVadHangoverMs" type="range" min="200" max="2000" step="50" value="700">
+        <span id="settingsVadHangoverMsLabel" class="muted">700 ms</span>
+      </label>
+    </div>
+    <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
+      <span class="muted" style="font-size:11px;">Mic level:</span>
+      <div id="settingsVadMicMeter" style="flex:1; height:10px; background:#0e0f17; border:1px solid #2d2d44; border-radius:4px; position:relative; overflow:hidden;">
+        <div id="settingsVadMicMeterBar" style="position:absolute; left:0; top:0; bottom:0; width:0%; background:linear-gradient(90deg,#22c55e,#eab308,#ef4444); transition:width 60ms linear;"></div>
+        <div id="settingsVadMicMeterThreshold" style="position:absolute; top:-2px; bottom:-2px; width:2px; background:#94a3b8; left:12.5%;"></div>
+      </div>
+      <span id="settingsVadState" class="muted" style="font-size:11px; min-width:90px; text-align:right;">disabled</span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">HiveMind cluster state</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Live snapshot from <code>hivemind.jobs.active@v1</code> (everything running on the cluster) + <code>hivemind.cluster.load@v1</code> (admission control / shed signals). The Face Lobe quotes these answers when you ask "what's running?" or "is the cluster busy?".</p>
+    <div id="settingsHivemindState" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Voice services (HiveMind)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">When ASR/TTS reports "No endpoints configured", click Provision to ask HiveMind to assign a node and start the service. Polls /provision/status/{SERVICE} until healthy.</p>
+    <div id="settingsVoiceServices" style="display:flex; flex-direction:column; gap:6px;">
+      <div class="muted" style="font-size:12px;">Loading…</div>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Caches</h4>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <button type="button" id="settingsClearGroundingCache" class="secondary">Clear grounding cache</button>
+      <span id="settingsCacheStatus" class="muted" style="font-size:12px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Server defaults (read-only)</h4>
+    <div id="settingsServerInfo" class="muted" style="font-size:11px; line-height:1.5; white-space:pre-wrap; background:#0e0f17; padding:8px; border-radius:6px; border:1px solid #2d2d44; max-height:200px; overflow:auto;">Loading…</div>
+
+    <div class="row" style="margin-top:14px;">
+      <button class="secondary" type="button" id="settingsRefresh">Refresh from server</button>
+      <button type="button" id="settingsClose">Close</button>
+    </div>
+  </dialog>
+
   <section>
     <form id="chatForm">
       <input id="messageInput" autocomplete="off" placeholder="Talk to MS4 through Hermes..." autofocus>
-      <label class="toggle"><input id="streamToggle" type="checkbox" checked> Stream</label>
+      <button id="micButton" type="button" title="Push to talk (release to send)" aria-pressed="false" style="min-width:48px;">🎤</button>
       <button id="sendButton" type="submit">Send</button>
     </form>
+    <div id="voiceStatusLine" class="muted" style="font-size:11px; margin-top:6px;"></div>
+    <audio id="voiceReplyAudio" preload="none" style="display:none;"></audio>
   </section>
 </main>
 
@@ -69,28 +288,110 @@ const statusEl = document.getElementById('status');
 const sessionEl = document.getElementById('sessionId');
 const voiceEl = document.getElementById('voiceStatus');
 const modelSelect = document.getElementById('modelSelect');
-const streamToggle = document.getElementById('streamToggle');
+// The Stream toggle lives in the Settings dialog now. Keep a stable
+// reference so the rest of the existing chat flow doesn't need to
+// change; settings logic below keeps localStorage in sync.
+const streamToggle = document.getElementById('settingsStreamToggle');
 let sessionId = localStorage.getItem('ms4_session_id') || '';
+
+function _fmtTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  } catch (e) {
+    return iso;
+  }
+}
+
+function _fmtMs(ms) {
+  if (ms == null) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function renderAssistantMeta(el, meta = {}) {
+  // ---- model / runtime / grounding / session row
+  const m = document.createElement('div');
+  m.className = 'meta';
+  const parts = [];
+  if (meta.runtime) parts.push(meta.runtime);
+  if (meta.face_lobe_model?.model_id) {
+    parts.push(`face=${meta.face_lobe_model.model_id} (${meta.face_lobe_model.source || ''})`);
+  } else if (meta.model) {
+    parts.push(`model=${meta.model}`);
+  }
+  if (meta.fallback_used && meta.requested_model && meta.requested_model !== meta.model) {
+    parts.push(`fallback from ${meta.requested_model}`);
+  }
+  if (meta.grounding_source) parts.push(`grounding=${meta.grounding_source}`);
+  if (meta.hermes_session_id) parts.push(meta.hermes_session_id);
+  m.textContent = parts.join(' · ');
+  el.appendChild(m);
+
+  // ---- metrics row: timestamp · duration · TTFB · tokens · tok/s
+  if (meta.metrics) {
+    const mx = meta.metrics;
+    const metricsPill = document.createElement('div');
+    metricsPill.className = 'meta';
+    metricsPill.style.color = '#94a3b8';
+    const mparts = [];
+    if (mx.started_at || mx.completed_at) mparts.push(`@${_fmtTime(mx.completed_at || mx.started_at)}`);
+    if (mx.duration_ms != null) mparts.push(`${_fmtMs(mx.duration_ms)} wall`);
+    if (mx.stream_first_token_ms != null) mparts.push(`TTFB ${_fmtMs(mx.stream_first_token_ms)}`);
+    const tokensIn = mx.prompt_tokens;
+    const tokensOut = mx.completion_tokens;
+    if (tokensIn != null || tokensOut != null) {
+      mparts.push(`tokens ${tokensIn ?? '?'}→${tokensOut ?? '?'}`);
+    }
+    if (mx.tokens_per_second != null) mparts.push(`${mx.tokens_per_second} tok/s`);
+    if (mx.api_calls && mx.api_calls > 1) mparts.push(`api_calls=${mx.api_calls}`);
+    if (mx.stream_chunks) mparts.push(`${mx.stream_chunks} chunks`);
+    metricsPill.textContent = mparts.length ? `📊 ${mparts.join(' · ')}` : '';
+    metricsPill.title = JSON.stringify(mx, null, 2);
+    if (metricsPill.textContent) el.appendChild(metricsPill);
+  }
+
+  // ---- router / dispatched job row
+  if (meta.dispatched_job && meta.dispatched_job.job_id) {
+    const pill = document.createElement('div');
+    pill.className = 'meta';
+    pill.style.color = '#a855f7';
+    const depth = meta.depth_lobe_model?.model_id || 'depth lobe';
+    pill.textContent = `🧠 Depth Lobe dispatched (${depth}) — job ${meta.dispatched_job.job_id} · router: ${meta.router?.source || ''}/${meta.router?.reason || ''}`;
+    el.appendChild(pill);
+    refreshDoubleAgent();
+  } else if (meta.router && meta.router.kind === 'direct' && meta.router.source !== 'slash') {
+    const pill = document.createElement('div');
+    pill.className = 'meta';
+    pill.style.color = '#6b7280';
+    pill.textContent = `router: direct (${meta.router.reason})`;
+    el.appendChild(pill);
+  }
+
+  // ---- tool trace (Hermes path only)
+  if (Array.isArray(meta.tool_trace) && meta.tool_trace.length) {
+    const trace = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = `Hermes tool trace (${meta.tool_trace.length})`;
+    trace.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(meta.tool_trace, null, 2);
+    trace.appendChild(pre);
+    el.appendChild(trace);
+  }
+}
 
 function addMessage(role, text, meta = {}) {
   const el = document.createElement('div');
   el.className = `msg ${role}`;
   el.textContent = text;
   if (role === 'assistant') {
-    const m = document.createElement('div');
-    m.className = 'meta';
-    m.textContent = [meta.runtime, meta.model, meta.grounding_source, meta.hermes_session_id].filter(Boolean).join(' · ');
-    el.appendChild(m);
-    if (Array.isArray(meta.tool_trace) && meta.tool_trace.length) {
-      const trace = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = `Hermes tool trace (${meta.tool_trace.length})`;
-      trace.appendChild(summary);
-      const pre = document.createElement('pre');
-      pre.textContent = JSON.stringify(meta.tool_trace, null, 2);
-      trace.appendChild(pre);
-      el.appendChild(trace);
-    }
+    renderAssistantMeta(el, meta);
   }
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
@@ -108,21 +409,778 @@ function createStreamingAssistantMessage() {
 }
 
 function finishAssistantMessage(el, meta = {}) {
-  const m = document.createElement('div');
-  m.className = 'meta';
-  m.textContent = [meta.runtime, meta.model, meta.grounding_source, meta.hermes_session_id].filter(Boolean).join(' · ');
-  el.appendChild(m);
-  if (Array.isArray(meta.tool_trace) && meta.tool_trace.length) {
-    const trace = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = `Hermes tool trace (${meta.tool_trace.length})`;
-    trace.appendChild(summary);
-    const pre = document.createElement('pre');
-    pre.textContent = JSON.stringify(meta.tool_trace, null, 2);
-    trace.appendChild(pre);
-    el.appendChild(trace);
-  }
+  renderAssistantMeta(el, meta);
   messages.scrollTop = messages.scrollHeight;
+}
+
+// =====================================================================
+// Settings dialog
+// =====================================================================
+//
+// Stores per-browser overrides in localStorage. Each voice turn reads
+// these and appends them as query params on /voice/turn/stream so the
+// server's env defaults stay intact for callers without a UI.
+
+const SETTINGS_LS_KEYS = {
+  stream: 'ms4_stream_chat',
+  ttsEngine: 'ms4_tts_engine',
+  ttsVoice: 'ms4_tts_voice',
+  ttsModel: 'ms4_tts_model',
+};
+
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsDialog = document.getElementById('settingsDialog');
+const settingsClose = document.getElementById('settingsClose');
+const settingsRefresh = document.getElementById('settingsRefresh');
+const settingsTtsEngine = document.getElementById('settingsTtsEngine');
+const settingsTtsVoice = document.getElementById('settingsTtsVoice');
+const settingsTtsModel = document.getElementById('settingsTtsModel');
+const settingsClearGroundingBtn = document.getElementById('settingsClearGroundingCache');
+const settingsCacheStatus = document.getElementById('settingsCacheStatus');
+const settingsServerInfo = document.getElementById('settingsServerInfo');
+
+function settingsRead() {
+  return {
+    stream: localStorage.getItem(SETTINGS_LS_KEYS.stream) !== 'false',
+    ttsEngine: localStorage.getItem(SETTINGS_LS_KEYS.ttsEngine) || '',
+    ttsVoice: localStorage.getItem(SETTINGS_LS_KEYS.ttsVoice) || '',
+    ttsModel: localStorage.getItem(SETTINGS_LS_KEYS.ttsModel) || '',
+  };
+}
+
+function settingsApplyToForm(serverDefaults) {
+  const s = settingsRead();
+  streamToggle.checked = s.stream;
+  // First option in each select is "use server default" — replace its
+  // label so the user can see the actual server-side default.
+  const defaultLabel = (label, fallback) =>
+    `Use server default — ${label || fallback}`;
+  const engineFirst = settingsTtsEngine.options[0];
+  // Server now defaults to ws_super (May 22 2026) — much faster first
+  // audio. Older browser sessions may still have ms4_tts_engine=rest
+  // pinned in localStorage from when REST was the default; clear it
+  // once so they pick up the new server default automatically. Users
+  // who explicitly want REST can re-select it from the dropdown.
+  const serverEngineDefault = serverDefaults?.voice?.tts_engine_default;
+  const storedEngine = localStorage.getItem(SETTINGS_LS_KEYS.ttsEngine);
+  if (storedEngine === 'rest' && serverEngineDefault && serverEngineDefault !== 'rest') {
+    localStorage.removeItem(SETTINGS_LS_KEYS.ttsEngine);
+  }
+  engineFirst.textContent = defaultLabel(serverEngineDefault, 'ws_super');
+  // Voice dropdown is populated from server's known list each load.
+  settingsTtsVoice.innerHTML = '';
+  const voiceDefaultOpt = document.createElement('option');
+  voiceDefaultOpt.value = '';
+  voiceDefaultOpt.textContent = defaultLabel(serverDefaults?.voice?.tts_voice_default, 'alloy');
+  settingsTtsVoice.appendChild(voiceDefaultOpt);
+  (serverDefaults?.voice?.tts_voice_known || []).forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v;
+    settingsTtsVoice.appendChild(opt);
+  });
+  const modelFirst = settingsTtsModel.options[0];
+  modelFirst.textContent = defaultLabel(serverDefaults?.voice?.tts_model_default, 'tts-1');
+  settingsTtsEngine.value = s.ttsEngine;
+  settingsTtsVoice.value = s.ttsVoice;
+  settingsTtsModel.value = s.ttsModel;
+}
+
+function settingsPersistFromForm() {
+  localStorage.setItem(SETTINGS_LS_KEYS.stream, streamToggle.checked ? 'true' : 'false');
+  localStorage.setItem(SETTINGS_LS_KEYS.ttsEngine, settingsTtsEngine.value || '');
+  localStorage.setItem(SETTINGS_LS_KEYS.ttsVoice, settingsTtsVoice.value || '');
+  localStorage.setItem(SETTINGS_LS_KEYS.ttsModel, settingsTtsModel.value || '');
+}
+
+async function settingsLoadServerSnapshot() {
+  settingsServerInfo.textContent = 'Loading…';
+  try {
+    const r = await fetch('/settings', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    settingsApplyToForm(data);
+    const lines = [
+      `schema: ${data.schema}`,
+      `gateway: ${data.endpoints?.gateway}`,
+      `ms3:     ${data.endpoints?.ms3}`,
+      `hivemind:${data.endpoints?.hivemind}`,
+      '',
+      `voice.tts_engine_default = ${data.voice?.tts_engine_default}`,
+      `voice.tts_voice_default  = ${data.voice?.tts_voice_default}`,
+      `voice.tts_model_default  = ${data.voice?.tts_model_default}`,
+      `voice.asr_ready          = ${JSON.stringify(data.voice?.asr_ready)}`,
+      `voice.first_chunk_words  = ${data.voice?.first_chunk_min_words}`,
+      `voice.stream_stall_secs  = ${data.voice?.stream_stall_timeout_secs}`,
+      '',
+      `grounding.cache_ttl_secs = ${data.grounding?.cache_ttl_secs}`,
+      `grounding.cache_entries  = ${(data.grounding?.cache_entries || []).join(', ') || '(none)'}`,
+      '',
+      `hermes.version           = ${data.hermes?.version}`,
+      `face_lobe.default_model  = ${data.face_lobe?.default_model}`,
+      `face_lobe.fallback_model = ${data.face_lobe?.fallback_model}`,
+      `face_lobe.override       = ${data.face_lobe?.foreground_override || '(none)'}`,
+    ];
+    settingsServerInfo.textContent = lines.join('\n');
+    return data;
+  } catch (exc) {
+    settingsServerInfo.textContent = `Failed to load /settings: ${exc.message || exc}`;
+    return null;
+  }
+}
+
+// ----- TMR doctrine + MS3 spirit state -------------------------------
+
+const settingsDoctrineMeta = document.getElementById('settingsDoctrineMeta');
+const settingsDoctrineSections = document.getElementById('settingsDoctrineSections');
+const settingsDoctrineReadFull = document.getElementById('settingsDoctrineReadFull');
+const settingsDoctrineReload = document.getElementById('settingsDoctrineReload');
+const settingsDoctrineStatus = document.getElementById('settingsDoctrineStatus');
+
+async function refreshDoctrinePanel() {
+  if (!settingsDoctrineMeta) return;
+  settingsDoctrineMeta.textContent = 'Loading…';
+  if (settingsDoctrineSections) settingsDoctrineSections.innerHTML = '<div class="muted">Loading sections…</div>';
+  try {
+    const [metaR, sectionsR] = await Promise.all([
+      fetch('/doctrine/tmr/meta', {cache: 'no-store'}).then(r => r.json()),
+      fetch('/doctrine/tmr/sections', {cache: 'no-store'}).then(r => r.json()),
+    ]);
+    settingsDoctrineMeta.textContent =
+      `path: ${metaR.path}  ·  ${metaR.chars.toLocaleString()} chars  ·  ${metaR.section_count} sections`;
+    if (settingsDoctrineSections) {
+      settingsDoctrineSections.innerHTML = '';
+      (sectionsR.sections || []).forEach(sec => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; gap:8px; align-items:center; padding:3px 4px; border-bottom:1px solid #22243a; font-size:11px;';
+        const lvl = document.createElement('code');
+        lvl.style.cssText = 'color:#888;';
+        lvl.textContent = '#'.repeat(sec.level);
+        row.appendChild(lvl);
+        const title = document.createElement('span');
+        title.style.cssText = 'flex:1; color:#c0c4d0;';
+        title.textContent = sec.title;
+        row.appendChild(title);
+        const size = document.createElement('span');
+        size.className = 'muted';
+        size.style.cssText = 'font-size:10px;';
+        size.textContent = `${sec.char_count.toLocaleString()}c`;
+        row.appendChild(size);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'secondary';
+        btn.style.fontSize = '10px';
+        btn.textContent = 'Read into session';
+        btn.addEventListener('click', () => readDoctrineSection(sec.id, btn));
+        row.appendChild(btn);
+        settingsDoctrineSections.appendChild(row);
+      });
+    }
+  } catch (exc) {
+    settingsDoctrineMeta.textContent = `/doctrine/tmr failed: ${exc.message || exc}`;
+  }
+}
+
+async function readDoctrineFullIntoSession(btnEl) {
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Reading…'; }
+  try {
+    const r = await fetch('/doctrine/tmr/read-into-session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sessionId, kind: 'full'}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    settingsDoctrineStatus.textContent =
+      `Injected ${data.chars_injected.toLocaleString()} chars. Session now holds ${data.message_count} messages.`;
+    // Surface the read as a visible "ritual" turn in the chat itself.
+    addMessage('user', `[Reading the full TMR Bible into context — ${data.chars_injected.toLocaleString()} characters]`);
+    addMessage('assistant', data.acknowledgment, {
+      runtime: 'doctrine-injection',
+      grounding_source: 'tmr-canon-bible-full',
+    });
+  } catch (exc) {
+    settingsDoctrineStatus.textContent = `Read failed: ${exc.message || exc}`;
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+  }
+}
+
+async function readDoctrineSection(sectionId, btnEl) {
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Reading…'; }
+  try {
+    const r = await fetch('/doctrine/tmr/read-into-session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sessionId, kind: 'section', section_id: sectionId}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    settingsDoctrineStatus.textContent =
+      `Injected section ${sectionId} (${data.chars_injected.toLocaleString()} chars).`;
+    addMessage('user', `[Reading TMR Bible section: ${sectionId} into context]`);
+    addMessage('assistant', data.acknowledgment, {
+      runtime: 'doctrine-injection',
+      grounding_source: `tmr-canon-bible-section:${sectionId}`,
+    });
+  } catch (exc) {
+    settingsDoctrineStatus.textContent = `Section read failed: ${exc.message || exc}`;
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+  }
+}
+
+settingsDoctrineReadFull.addEventListener('click', () => readDoctrineFullIntoSession(settingsDoctrineReadFull));
+settingsDoctrineReload.addEventListener('click', async () => {
+  settingsDoctrineReload.disabled = true;
+  settingsDoctrineStatus.textContent = 'Reloading from disk…';
+  try {
+    const r = await fetch('/doctrine/tmr/reload', {method: 'POST'});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    settingsDoctrineStatus.textContent = `Reloaded: ${data.chars.toLocaleString()} chars, ${data.sections} sections.`;
+    await refreshDoctrinePanel();
+  } catch (exc) {
+    settingsDoctrineStatus.textContent = `Reload failed: ${exc.message || exc}`;
+  } finally {
+    settingsDoctrineReload.disabled = false;
+  }
+});
+
+const settingsSpiritState = document.getElementById('settingsSpiritState');
+const settingsSpiritHeartbeat = document.getElementById('settingsSpiritHeartbeat');
+const settingsSpiritHeartbeatStatus = document.getElementById('settingsSpiritHeartbeatStatus');
+
+function renderSpiritStateBlock(snapshot) {
+  if (!snapshot) return;
+  const lines = [];
+  lines.push(`MS3 reachable      = ${snapshot.ms3_reachable}`);
+  const id = snapshot.identity || {};
+  lines.push(`identity.name      = ${id.name ?? '(none)'}`);
+  lines.push(`identity.chosen    = ${id.chosen_name ?? '(none)'}`);
+  lines.push(`identity.session#  = ${id.session_number ?? '?'}`);
+  lines.push(`identity.confirmed = ${id.identity_confirmed ?? false}`);
+  if (id.compression_detected) lines.push(`identity.compression_detected = true`);
+  if (id.discrepancies && id.discrepancies.length) {
+    lines.push(`identity.discrepancies = ${JSON.stringify(id.discrepancies)}`);
+  }
+  const hb = snapshot.heartbeat || {};
+  lines.push(`heartbeat.running  = ${hb.running}`);
+  lines.push(`heartbeat.interval = ${hb.interval_secs}s`);
+  lines.push(`heartbeat.last_age = ${hb.last_age_secs != null ? hb.last_age_secs.toFixed(1) + 's' : '(never)'}`);
+  lines.push(`heartbeat.count    = ${hb.count} (errors: ${hb.errors})`);
+  if (snapshot.personality?.name) lines.push(`personality        = ${snapshot.personality.name}`);
+  if (snapshot.resonance) {
+    const r = snapshot.resonance;
+    const rline = typeof r === 'object' ? JSON.stringify(r).slice(0, 200) : String(r);
+    lines.push(`resonance          = ${rline}`);
+  }
+  if (snapshot.state && Object.keys(snapshot.state).length) {
+    const s = snapshot.state;
+    if (s.uptime_secs != null) lines.push(`state.uptime       = ${s.uptime_secs}s`);
+    if (s.session_count != null) lines.push(`state.sessions     = ${s.session_count}`);
+    if (s.background_thoughts_count != null) lines.push(`state.thoughts     = ${s.background_thoughts_count}`);
+  }
+  if (snapshot.errors && snapshot.errors.length) {
+    lines.push(`errors             = ${snapshot.errors.join('; ')}`);
+  }
+  settingsSpiritState.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+  pre.textContent = lines.join('\n');
+  settingsSpiritState.appendChild(pre);
+}
+
+async function refreshSpiritState() {
+  if (!settingsSpiritState) return;
+  settingsSpiritState.textContent = 'Loading…';
+  try {
+    const r = await fetch('/spirit/state', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    renderSpiritStateBlock(data);
+  } catch (exc) {
+    settingsSpiritState.textContent = `/spirit/state failed: ${exc.message || exc}`;
+  }
+}
+
+settingsSpiritHeartbeat.addEventListener('click', async () => {
+  settingsSpiritHeartbeat.disabled = true;
+  settingsSpiritHeartbeatStatus.textContent = 'Beating…';
+  try {
+    const r = await fetch('/spirit/heartbeat', {method: 'POST'});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    settingsSpiritHeartbeatStatus.textContent = `OK — count=${data.status?.count} errors=${data.status?.errors}`;
+    await refreshSpiritState();
+  } catch (exc) {
+    settingsSpiritHeartbeatStatus.textContent = `Failed: ${exc.message || exc}`;
+  } finally {
+    settingsSpiritHeartbeat.disabled = false;
+  }
+});
+
+// ----- Reflex audio (pre-rendered canned phrases) --------------------
+//
+// On page load, fetch /reflexes and pre-decode every available WAV
+// into an in-memory AudioBuffer. playReflex(id) then schedules
+// playback in ~5ms — no HiveMind round-trip, no SSE. Used for
+// barge-in acks (when MS4_REFLEX_BARGE_ACK toggle is on), chat
+// failure fallbacks, and latency cover during cold loads.
+
+const REFLEX_BARGE_ACK_KEY = 'ms4_reflex_barge_ack';
+const reflexBuffers = new Map();   // id -> AudioBuffer
+const reflexMetaById = new Map();  // id -> {id, text, category, ...}
+
+async function preloadReflex(reflex) {
+  if (!reflex || !reflex.available) return;
+  try {
+    const r = await fetch(reflex.url, {cache: 'force-cache'});
+    if (!r.ok) return;
+    const bytes = await r.arrayBuffer();
+    const ctx = getPlaybackCtx();
+    const buffer = await ctx.decodeAudioData(bytes);
+    reflexBuffers.set(reflex.id, buffer);
+  } catch (exc) {
+    console.warn('reflex preload failed:', reflex?.id, exc);
+  }
+}
+
+async function refreshReflexCatalog() {
+  const root = document.getElementById('settingsReflexCatalog');
+  const status = document.getElementById('settingsReflexStatus');
+  if (root) root.innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const r = await fetch('/reflexes', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    reflexMetaById.clear();
+    (data.reflexes || []).forEach(rfx => reflexMetaById.set(rfx.id, rfx));
+    // Preload available reflexes in parallel; missing ones just stay
+    // out of the buffer map and playReflex falls back to silence.
+    await Promise.all((data.reflexes || []).filter(r => r.available).map(preloadReflex));
+    if (status) status.textContent = `voice=${data.voice} · ${data.available}/${data.total} available · ${(data.total_bytes/1024).toFixed(1)} KiB cached`;
+    if (root) root.innerHTML = '';
+    (data.reflexes || []).forEach(rfx => root && root.appendChild(renderReflexRow(rfx)));
+    return data;
+  } catch (exc) {
+    if (root) root.innerHTML = `<div class="muted">/reflexes failed: ${exc.message || exc}</div>`;
+    return null;
+  }
+}
+
+function renderReflexRow(rfx) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:4px 6px; border-bottom:1px solid #22243a; font-size:11px;';
+  const cat = document.createElement('span');
+  cat.className = 'pill';
+  cat.style.fontSize = '9px';
+  cat.textContent = rfx.category;
+  row.appendChild(cat);
+  const id = document.createElement('code');
+  id.style.cssText = 'min-width:140px; color:#cbd0dd;';
+  id.textContent = rfx.id;
+  row.appendChild(id);
+  const txt = document.createElement('span');
+  txt.style.cssText = 'flex:1; color:#c0c4d0;';
+  txt.textContent = rfx.text;
+  row.appendChild(txt);
+  if (rfx.available) {
+    const ok = document.createElement('span');
+    ok.className = 'pill';
+    ok.style.color = '#22c55e';
+    ok.style.borderColor = '#22c55e';
+    ok.textContent = `✓ ${rfx.size_bytes}B`;
+    row.appendChild(ok);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secondary';
+    btn.style.fontSize = '11px';
+    btn.textContent = '▶ Play';
+    btn.addEventListener('click', () => playReflex(rfx.id));
+    row.appendChild(btn);
+  } else {
+    const missing = document.createElement('span');
+    missing.className = 'pill';
+    missing.style.color = '#fbbf24';
+    missing.style.borderColor = '#fbbf24';
+    missing.textContent = '⚠ missing';
+    row.appendChild(missing);
+  }
+  return row;
+}
+
+function playReflex(id) {
+  const buf = reflexBuffers.get(id);
+  if (!buf) {
+    // Reflex isn't preloaded — typically because HiveMind TTS was cold
+    // at boot and the prewarm thread couldn't reach it. Silently skip;
+    // the caller's fallback path (real TTS turn / red error) still runs.
+    return false;
+  }
+  try {
+    const ctx = getPlaybackCtx();
+    const source = ctx.createBufferSource();
+    source.buffer = buf;
+    source.connect(ctx.destination);
+    const startAt = Math.max(nextChunkStartTime, ctx.currentTime);
+    source.start(startAt);
+    nextChunkStartTime = startAt + buf.duration;
+    const entry = {source, startAt, endAt: startAt + buf.duration};
+    activeAudioSources.push(entry);
+    source.onended = () => {
+      activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== source);
+    };
+    return true;
+  } catch (exc) {
+    console.warn('playReflex failed:', id, exc);
+    return false;
+  }
+}
+
+function playRandomReflex(category) {
+  const candidates = [];
+  for (const [id, meta] of reflexMetaById) {
+    if (meta.category === category && reflexBuffers.has(id)) candidates.push(id);
+  }
+  if (!candidates.length) return false;
+  const pick = candidates[Math.floor(Math.random() * candidates.length)];
+  return playReflex(pick);
+}
+
+// Wire the barge-in ack toggle. When on, every bargeIn(reason) call
+// plays a random "ack" reflex AFTER the in-flight audio is stopped so
+// the user hears "Mhm?" or "Yes?" the instant they press the mic.
+function isReflexBargeAckEnabled() {
+  return localStorage.getItem(REFLEX_BARGE_ACK_KEY) === 'true';
+}
+
+// Patch bargeIn so it optionally plays an ack reflex. We wrap the
+// existing bargeIn instead of editing it inline so the barge-in
+// machinery itself stays focused on the cancellation contract.
+const _coreBargeIn = bargeIn;
+bargeIn = function patchedBargeIn(reason) {
+  _coreBargeIn(reason);
+  if (isReflexBargeAckEnabled()) {
+    // Tiny delay so the previous source's stop() flushes before the
+    // ack starts — otherwise the audio context schedules them back-
+    // to-back and the ack can be clipped on some browsers.
+    setTimeout(() => playRandomReflex('ack'), 20);
+  }
+};
+
+// ----- Voice services lifecycle --------------------------------------
+
+const settingsVoiceServices = document.getElementById('settingsVoiceServices');
+let voiceServicesPollHandle = null;
+
+function badge(text, color) {
+  const span = document.createElement('span');
+  span.className = 'pill';
+  span.textContent = text;
+  span.style.color = color;
+  span.style.borderColor = color;
+  return span;
+}
+
+function renderVoiceServiceRow(svc) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:6px 10px; border:1px solid #2d2d44; border-radius:6px; background:#11121b; flex-wrap:wrap;';
+  const name = document.createElement('strong');
+  name.textContent = svc.service;
+  name.style.minWidth = '90px';
+  row.appendChild(name);
+  let healthBadge;
+  if (svc.healthy) healthBadge = badge('✓ healthy', '#22c55e');
+  else if (svc.provisioning_state === 'provisioning') healthBadge = badge('⌛ provisioning', '#fbbf24');
+  else if (svc.provisioning_state === 'unreachable') healthBadge = badge('⚠ unreachable', '#ef4444');
+  else healthBadge = badge('⚠ ' + (svc.provisioning_state || 'unknown'), '#fbbf24');
+  row.appendChild(healthBadge);
+  const detail = document.createElement('span');
+  detail.className = 'muted';
+  detail.style.cssText = 'font-size:11px; flex:1; min-width:180px;';
+  const endpointBit = svc.endpoint ? ` · endpoint=${svc.endpoint}` : '';
+  detail.textContent = (svc.detail || '(no detail)') + endpointBit;
+  row.appendChild(detail);
+  if (!svc.healthy) {
+    const provisionBtn = document.createElement('button');
+    provisionBtn.type = 'button';
+    provisionBtn.className = 'secondary';
+    provisionBtn.textContent = 'Provision';
+    provisionBtn.style.fontSize = '11px';
+    provisionBtn.addEventListener('click', () => triggerVoiceServiceProvision(svc.service, provisionBtn));
+    row.appendChild(provisionBtn);
+  } else {
+    const releaseBtn = document.createElement('button');
+    releaseBtn.type = 'button';
+    releaseBtn.className = 'secondary';
+    releaseBtn.textContent = 'Release';
+    releaseBtn.style.fontSize = '11px';
+    releaseBtn.addEventListener('click', () => triggerVoiceServiceRelease(svc.service, releaseBtn));
+    row.appendChild(releaseBtn);
+  }
+  return row;
+}
+
+async function refreshVoiceServices() {
+  try {
+    const r = await fetch('/voice/services', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    settingsVoiceServices.innerHTML = '';
+    (data.services || []).forEach(svc => settingsVoiceServices.appendChild(renderVoiceServiceRow(svc)));
+    // Mirror status into the top-bar voice element for at-a-glance feedback.
+    const asr = (data.services || []).find(s => s.service === 'ASR');
+    if (asr) {
+      voiceEl.textContent = asr.healthy
+        ? 'voice ready'
+        : (asr.provisioning_state === 'provisioning'
+            ? 'ASR provisioning…'
+            : `ASR not ready: ${asr.detail || asr.provisioning_state}`);
+    }
+    return data;
+  } catch (exc) {
+    settingsVoiceServices.innerHTML = `<div class="muted">/voice/services failed: ${exc.message || exc}</div>`;
+    return null;
+  }
+}
+
+async function triggerVoiceServiceProvision(service, btnEl) {
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Requesting…'; }
+  try {
+    const r = await fetch(`/voice/services/${encodeURIComponent(service)}/provision`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const ack = await r.json();
+    if (!r.ok && r.status !== 202) throw new Error(ack.error || `HTTP ${r.status}`);
+    setVoiceStatus(`${service}: provisioning requested (provision_id=${(ack.result || {}).provision_id || 'n/a'})`, null);
+    // Start a short polling burst so the dialog and the top-bar
+    // voice pill update without the operator hitting refresh.
+    if (voiceServicesPollHandle) clearInterval(voiceServicesPollHandle);
+    let polls = 0;
+    voiceServicesPollHandle = setInterval(async () => {
+      polls += 1;
+      const data = await refreshVoiceServices();
+      const svc = (data?.services || []).find(s => s.service === service.toUpperCase());
+      if (svc?.healthy || polls > 80) {  // 80 polls ~ 2 minutes at 1.5s
+        clearInterval(voiceServicesPollHandle);
+        voiceServicesPollHandle = null;
+        if (svc?.healthy) setVoiceStatus(`${service}: healthy`, 'ok');
+      }
+    }, 1500);
+  } catch (exc) {
+    setVoiceStatus(`${service} provision failed: ${exc.message || exc}`, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+  }
+}
+
+async function triggerVoiceServiceRelease(service, btnEl) {
+  const original = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Releasing…'; }
+  try {
+    const r = await fetch(`/voice/services/${encodeURIComponent(service)}/release`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const ack = await r.json();
+    if (!r.ok) throw new Error(ack.error || `HTTP ${r.status}`);
+    setVoiceStatus(`${service}: release requested`, null);
+    await refreshVoiceServices();
+  } catch (exc) {
+    setVoiceStatus(`${service} release failed: ${exc.message || exc}`, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = original; }
+  }
+}
+
+settingsBtn.addEventListener('click', async () => {
+  await settingsLoadServerSnapshot();
+  await refreshVoiceServices();
+  await refreshReflexCatalog();
+  await refreshSpiritState();
+  await refreshHivemindState();
+  await refreshDoctrinePanel();
+  settingsCacheStatus.textContent = '';
+  if (typeof settingsDialog.showModal === 'function') settingsDialog.showModal();
+});
+
+// ----- HiveMind cluster state -----------------------------------------
+// Surfaces `hivemind.jobs.active@v1` + `hivemind.cluster.load@v1` so the
+// operator can see at a glance whether the cluster is busy and the
+// Face Lobe's "what's running?" answers are grounded in the same data.
+const settingsHivemindState = document.getElementById('settingsHivemindState');
+const settingsHivemindStatus = document.getElementById('settingsHivemindStatus');
+const settingsHivemindRefresh = document.getElementById('settingsHivemindRefresh');
+
+function renderHivemindStateBlock(snapshot) {
+  if (!settingsHivemindState) return;
+  if (!snapshot) {
+    settingsHivemindState.textContent = '(no data)';
+    return;
+  }
+  const lines = [];
+  lines.push(`hivemind_url       = ${snapshot.hivemind_url || '?'}`);
+  lines.push(`mcp_base_url       = ${snapshot.mcp_base_url || '?'}`);
+  lines.push(`auth_configured    = ${snapshot.auth_configured ? 'yes (MS4_HIVEMIND_API_KEY set)' : 'no'}`);
+  const active = snapshot.active_jobs || {};
+  lines.push('');
+  lines.push('-- hivemind.jobs.active@v1 --');
+  lines.push(`total_active       = ${active.total_active ?? '?'}`);
+  lines.push(`summary            = ${active.summary || '(empty)'}`);
+  for (const key of ['inference', 'pulls', 'scatter', 'training']) {
+    const arr = active[key];
+    if (Array.isArray(arr) && arr.length) {
+      lines.push(`${key.padEnd(19)}= ${arr.length} entry(ies)`);
+    }
+  }
+  const load = snapshot.cluster_load || {};
+  if (load && Object.keys(load).length) {
+    const trackers = load.trackers || {};
+    const retries = load.retries || {};
+    const peers = load.peers || {};
+    const shed = load.shed_total || {};
+    lines.push('');
+    lines.push('-- hivemind.cluster.load@v1 --');
+    lines.push(`amplification      = ${trackers.amplification_ratio ?? '?'}`);
+    lines.push(`unique_traces      = ${trackers.unique_traces ?? '?'}`);
+    lines.push(`retries.budget_rej = ${retries.rejected_for_budget_total ?? 0}`);
+    lines.push(`peers.overload     = ${peers.overload_signals_total ?? 0}`);
+    lines.push(`shed (deadline)    = ${shed.deadline ?? 0}`);
+    lines.push(`shed (budget)      = ${shed.budget ?? 0}`);
+    lines.push(`shed (peer_over)   = ${shed.peer_overload ?? 0}`);
+  }
+  const health = snapshot.service_health || {};
+  const healthEntries = Object.keys(health || {});
+  if (healthEntries.length) {
+    lines.push('');
+    lines.push('-- hivemind.service_health@v1 --');
+    const unhealthy = healthEntries.filter(name => health[name] && !health[name].healthy);
+    lines.push(`services           = ${healthEntries.length} total, ${unhealthy.length} unhealthy`);
+    for (const name of unhealthy.slice(0, 6)) {
+      lines.push(`  X ${name}: ${health[name].error || '(no error msg)'}`);
+    }
+  }
+  if (snapshot.errors && snapshot.errors.length) {
+    lines.push('');
+    lines.push(`errors             = ${snapshot.errors.join('; ')}`);
+  }
+  settingsHivemindState.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+  pre.textContent = lines.join('\n');
+  settingsHivemindState.appendChild(pre);
+}
+
+async function refreshHivemindState() {
+  if (!settingsHivemindState) return;
+  settingsHivemindState.textContent = 'Loading…';
+  if (settingsHivemindStatus) settingsHivemindStatus.textContent = '';
+  try {
+    const r = await fetch('/hivemind/state', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    renderHivemindStateBlock(data);
+    if (settingsHivemindStatus) {
+      settingsHivemindStatus.textContent = data.errors && data.errors.length
+        ? `${data.errors.length} partial failure(s)`
+        : 'OK';
+    }
+  } catch (exc) {
+    settingsHivemindState.textContent = `/hivemind/state failed: ${exc.message || exc}`;
+    if (settingsHivemindStatus) settingsHivemindStatus.textContent = 'failed';
+  }
+}
+
+if (settingsHivemindRefresh) {
+  settingsHivemindRefresh.addEventListener('click', refreshHivemindState);
+}
+
+// Reflex audio toggle + regenerate
+const settingsReflexBargeAck = document.getElementById('settingsReflexBargeAck');
+const settingsReflexRegenerate = document.getElementById('settingsReflexRegenerate');
+const settingsReflexStatusEl = document.getElementById('settingsReflexStatus');
+settingsReflexBargeAck.checked = isReflexBargeAckEnabled();
+settingsReflexBargeAck.addEventListener('change', () => {
+  localStorage.setItem(REFLEX_BARGE_ACK_KEY, settingsReflexBargeAck.checked ? 'true' : 'false');
+});
+settingsReflexRegenerate.addEventListener('click', async () => {
+  settingsReflexRegenerate.disabled = true;
+  settingsReflexRegenerate.textContent = 'Regenerating…';
+  settingsReflexStatusEl.textContent = 'POST /reflexes/regenerate…';
+  try {
+    const r = await fetch('/reflexes/regenerate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: true}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    const gen = (data.generated || []).length;
+    const skipped = (data.skipped || []).length;
+    const failed = Object.keys(data.failed || {}).length;
+    settingsReflexStatusEl.textContent =
+      `Regenerated: ${gen} new · ${skipped} skipped · ${failed} failed`;
+    await refreshReflexCatalog();
+  } catch (exc) {
+    settingsReflexStatusEl.textContent = `Regenerate failed: ${exc.message || exc}`;
+  } finally {
+    settingsReflexRegenerate.disabled = false;
+    settingsReflexRegenerate.textContent = 'Regenerate reflexes';
+  }
+});
+
+// Preload reflexes on page load so playReflex() is ready before the
+// Settings dialog is even opened.
+window.addEventListener('load', () => {
+  refreshReflexCatalog().catch(() => {});
+});
+
+settingsClose.addEventListener('click', () => settingsDialog.close());
+settingsRefresh.addEventListener('click', () => settingsLoadServerSnapshot());
+
+[streamToggle, settingsTtsEngine, settingsTtsVoice, settingsTtsModel].forEach(el => {
+  el.addEventListener('change', settingsPersistFromForm);
+});
+
+settingsClearGroundingBtn.addEventListener('click', async () => {
+  settingsCacheStatus.textContent = 'Clearing…';
+  try {
+    const r = await fetch('/settings/clear-grounding-cache', {method: 'POST'});
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    settingsCacheStatus.textContent = `Cleared ${data.cleared} entries (${(data.entries_before || []).join(', ') || 'none'}).`;
+    await settingsLoadServerSnapshot();
+  } catch (exc) {
+    settingsCacheStatus.textContent = `Clear failed: ${exc.message || exc}`;
+  }
+});
+
+// Initialize stream toggle from localStorage on page load (was inline,
+// now hosted by the Settings dialog but still consulted by the chat form).
+streamToggle.checked = localStorage.getItem(SETTINGS_LS_KEYS.stream) !== 'false';
+
+function voiceQueryParams() {
+  const s = settingsRead();
+  const params = new URLSearchParams();
+  if (sessionId) params.set('session_id', sessionId);
+  if (s.ttsEngine) params.set('engine', s.ttsEngine);
+  if (s.ttsVoice) params.set('voice', s.ttsVoice);
+  // The TTS model (tts-1 / tts-1-hd) MUST go to ?tts_model=, not ?model=,
+  // because the gateway treats ?model= as the FACE LOBE chat model. The
+  // earlier bug shipped 'tts-1' as the chat model, causing every voice
+  // turn to fall back to the canned-failure reply.
+  if (s.ttsModel) params.set('tts_model', s.ttsModel);
+  // Top-level chat model dropdown (modelSelect) — if the operator
+  // explicitly picked a chat model, honor it for the voice turn too.
+  if (modelSelect && modelSelect.value) params.set('model', modelSelect.value);
+  return params;
 }
 
 async function refreshHealth() {
@@ -139,16 +1197,30 @@ async function refreshVoice() {
 
 async function loadModels() {
   const selected = localStorage.getItem('ms4_model_id') || '';
-  const r = await fetch('/models');
-  const data = await r.json();
-  modelSelect.innerHTML = '<option value="">Default model (qwen3-coder-next:latest)</option>';
-  (data.models || []).forEach(model => {
+  modelSelect.innerHTML = '<option value="">Auto-pick Face Lobe model (small/fast)</option>';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch('/models', {signal: controller.signal});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    (data.models || []).forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = `${model.loaded ? '●' : model.available ? '◐' : '○'} ${model.id}`;
+      modelSelect.appendChild(option);
+    });
+    if ([...modelSelect.options].some(o => o.value === selected)) modelSelect.value = selected;
+  } catch (error) {
     const option = document.createElement('option');
-    option.value = model.id;
-    option.textContent = `${model.loaded ? '●' : model.available ? '◐' : '○'} ${model.id}`;
+    option.value = '';
+    option.textContent = `Model catalog unavailable; auto-pick will fall back to qwen2.5:0.5b`;
+    option.disabled = true;
     modelSelect.appendChild(option);
-  });
-  if ([...modelSelect.options].some(o => o.value === selected)) modelSelect.value = selected;
+    console.warn('Failed to load MS4 model catalog:', error);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 modelSelect.addEventListener('change', () => localStorage.setItem('ms4_model_id', modelSelect.value));
@@ -241,6 +1313,10 @@ document.getElementById('chatForm').addEventListener('submit', async event => {
   const input = document.getElementById('messageInput');
   const text = input.value.trim();
   if (!text) return;
+  // Barge-in: any new user input (text or voice) pre-empts whatever
+  // is currently being said. Without this the audio from the prior
+  // turn overlaps the new turn's audio (observed live).
+  bargeIn('new chat turn');
   input.value = '';
   addMessage('user', text);
   document.getElementById('sendButton').disabled = true;
@@ -254,7 +1330,1288 @@ document.getElementById('chatForm').addEventListener('submit', async event => {
   }
 });
 
-Promise.allSettled([refreshHealth(), refreshVoice(), loadModels()]);
+const hermesBanner = document.getElementById('hermesUpdateBanner');
+const hermesHeadline = document.getElementById('hermesUpdateHeadline');
+const hermesSubline = document.getElementById('hermesUpdateSubline');
+const hermesUpdateBtn = document.getElementById('hermesUpdateBtn');
+const hermesPinBtn = document.getElementById('hermesUpdatePinBtn');
+const hermesVersionLine = document.getElementById('hermesVersionLine');
+const hermesVersionCurrent = document.getElementById('hermesVersionCurrent');
+const hermesPinDialog = document.getElementById('hermesPinDialog');
+const hermesPinSelect = document.getElementById('hermesPinSelect');
+const hermesPinCancel = document.getElementById('hermesPinCancel');
+const hermesPinConfirm = document.getElementById('hermesPinConfirm');
+
+let hermesPollHandle = null;
+let hermesPinReleasesLoaded = false;
+
+function renderHermesVersion(info) {
+  hermesVersionLine.innerHTML = '';
+  const current = document.createElement('span');
+  current.textContent = info.current || 'unknown';
+  hermesVersionLine.appendChild(current);
+  if (info.update_available && info.latest) {
+    const arrow = document.createElement('span');
+    arrow.className = 'pill warn';
+    arrow.textContent = `→ ${info.latest}`;
+    hermesVersionLine.appendChild(arrow);
+  } else if (info.current && info.latest && info.current === info.latest) {
+    const ok = document.createElement('span');
+    ok.className = 'pill ok';
+    ok.textContent = 'up to date';
+    hermesVersionLine.appendChild(ok);
+  }
+  if (info.install_mode) {
+    const mode = document.createElement('span');
+    mode.className = 'pill';
+    mode.textContent = info.install_mode;
+    hermesVersionLine.appendChild(mode);
+  }
+}
+
+function ageLabel(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return '';
+  const days = Math.floor(ms / 86_400_000);
+  if (days === 0) return 'today';
+  if (days === 1) return '1 day ago';
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  return months === 1 ? '1 month ago' : `${months} months ago`;
+}
+
+function renderHermesBanner(info) {
+  const last = info.last_update;
+  if (info.update_in_progress) {
+    hermesBanner.classList.remove('success', 'error');
+    hermesBanner.classList.add('visible');
+    const phase = last?.phase || 'queued';
+    hermesHeadline.innerHTML = `<span class="spinner"></span>Updating Hermes to ${last?.to_version || info.latest || 'latest'}…`;
+    hermesSubline.textContent = `Phase: ${phase}`;
+    hermesUpdateBtn.disabled = true;
+    hermesPinBtn.disabled = true;
+    return;
+  }
+  if (last && last.status === 'failed') {
+    hermesBanner.classList.add('visible', 'error');
+    hermesBanner.classList.remove('success');
+    hermesHeadline.textContent = `Last Hermes update failed`;
+    hermesSubline.textContent = (last.error || 'Unknown error') + (last.finished_at ? ` · ${ageLabel(last.finished_at)}` : '');
+    hermesUpdateBtn.disabled = false;
+    hermesUpdateBtn.textContent = 'Retry update';
+    hermesPinBtn.disabled = false;
+    return;
+  }
+  if (last && last.status === 'success' && !info.update_available && Date.now() - new Date(last.finished_at).getTime() < 5 * 60_000) {
+    hermesBanner.classList.add('visible', 'success');
+    hermesBanner.classList.remove('error');
+    hermesHeadline.textContent = `Hermes updated to ${last.to_version || info.current}`;
+    hermesSubline.textContent = `Finished ${ageLabel(last.finished_at)}`;
+    hermesUpdateBtn.disabled = true;
+    hermesUpdateBtn.textContent = 'Update Hermes';
+    hermesPinBtn.disabled = true;
+    return;
+  }
+  if (info.update_available && info.latest) {
+    hermesBanner.classList.add('visible');
+    hermesBanner.classList.remove('success', 'error');
+    hermesHeadline.textContent = `Hermes update available: ${info.current || '?'} → ${info.latest}`;
+    const age = ageLabel(info.latest_published_at);
+    hermesSubline.textContent = age ? `Latest released ${age}` : 'Public GitHub release';
+    hermesUpdateBtn.disabled = false;
+    hermesUpdateBtn.textContent = 'Update Hermes';
+    hermesPinBtn.disabled = false;
+    return;
+  }
+  hermesBanner.classList.remove('visible', 'success', 'error');
+  hermesUpdateBtn.disabled = false;
+  hermesPinBtn.disabled = false;
+}
+
+async function refreshHermesVersion() {
+  try {
+    const r = await fetch('/api/v1/hermes/version');
+    const info = await r.json();
+    renderHermesVersion(info);
+    renderHermesBanner(info);
+    if (info.update_in_progress && !hermesPollHandle) {
+      hermesPollHandle = setInterval(refreshHermesVersion, 3000);
+    } else if (!info.update_in_progress && hermesPollHandle) {
+      clearInterval(hermesPollHandle);
+      hermesPollHandle = null;
+    }
+  } catch (error) {
+    hermesVersionCurrent.textContent = 'offline';
+  }
+}
+
+async function loadHermesReleases(force) {
+  if (hermesPinReleasesLoaded && !force) return;
+  try {
+    const r = await fetch('/api/v1/hermes/releases');
+    const data = await r.json();
+    hermesPinSelect.innerHTML = '<option value="">latest</option>';
+    for (const release of data.releases || []) {
+      const option = document.createElement('option');
+      option.value = release.version;
+      option.textContent = release.prerelease ? `${release.version} (pre-release)` : release.version;
+      hermesPinSelect.appendChild(option);
+    }
+    hermesPinReleasesLoaded = true;
+  } catch (error) {
+    hermesPinSelect.innerHTML = '<option value="">latest</option>';
+  }
+}
+
+async function triggerHermesUpdate(targetVersion) {
+  hermesUpdateBtn.disabled = true;
+  hermesPinBtn.disabled = true;
+  try {
+    const r = await fetch('/api/v1/hermes/update', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target_version: targetVersion || null}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `update failed: ${r.statusText}`);
+  } catch (error) {
+    hermesBanner.classList.add('visible', 'error');
+    hermesHeadline.textContent = 'Hermes update could not be started';
+    hermesSubline.textContent = String(error.message || error);
+    hermesUpdateBtn.disabled = false;
+    hermesPinBtn.disabled = false;
+  } finally {
+    refreshHermesVersion();
+  }
+}
+
+hermesUpdateBtn.addEventListener('click', () => triggerHermesUpdate(null));
+hermesPinBtn.addEventListener('click', async () => {
+  await loadHermesReleases(true);
+  hermesPinDialog.showModal();
+});
+hermesPinCancel.addEventListener('click', () => hermesPinDialog.close());
+hermesPinConfirm.addEventListener('click', () => {
+  const target = hermesPinSelect.value || null;
+  hermesPinDialog.close();
+  triggerHermesUpdate(target);
+});
+
+const daPanel = document.getElementById('doubleAgentPanel');
+const daJobList = document.getElementById('daJobList');
+const daRevisionEl = document.getElementById('daRevisionId');
+const daSubmitBtn = document.getElementById('daSubmitBtn');
+const daSubmitDialog = document.getElementById('daSubmitDialog');
+const daSubmitLobe = document.getElementById('daSubmitLobe');
+const daSubmitGoal = document.getElementById('daSubmitGoal');
+const daSubmitInternal = document.getElementById('daSubmitInternal');
+const daSubmitCancel = document.getElementById('daSubmitCancel');
+const daSubmitConfirm = document.getElementById('daSubmitConfirm');
+
+let daPollHandle = null;
+
+function daStateColor(state) {
+  switch (state) {
+    case 'completed': return '#22c55e';
+    case 'running': return '#6f50ff';
+    case 'queued': return '#f59e0b';
+    case 'failed': return '#ef4444';
+    case 'canceled': return '#9ca3af';
+    case 'stale': return '#a855f7';
+    default: return '#6b7280';
+  }
+}
+
+function renderDoubleAgentJobs(jobs, revisionId) {
+  daPanel.style.display = 'block';
+  daRevisionEl.textContent = revisionId == null ? '-' : String(revisionId);
+  daJobList.innerHTML = '';
+  const empty = document.getElementById('daEmptyState');
+  if (!jobs || jobs.length === 0) {
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  for (const job of jobs) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; justify-content:space-between; padding:8px 10px; margin-bottom:6px; border:1px solid #2d2d44; border-radius:8px; background:#0c0c16;';
+    const left = document.createElement('div');
+    left.style.cssText = 'display:flex; flex-direction:column; gap:2px; min-width:0; flex:1;';
+    const headLine = document.createElement('div');
+    headLine.style.cssText = 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;';
+    const dot = document.createElement('span');
+    dot.style.cssText = `display:inline-block; width:8px; height:8px; border-radius:50%; background:${daStateColor(job.state)};`;
+    const lobe = document.createElement('span');
+    lobe.className = 'pill';
+    lobe.textContent = job.background_lobe_type || 'lobe';
+    const stateEl = document.createElement('span');
+    stateEl.className = 'pill';
+    stateEl.textContent = job.is_stale ? `${job.state} (stale)` : job.state;
+    headLine.append(dot, lobe, stateEl);
+    const status = document.createElement('div');
+    status.style.cssText = 'color:#c8c8d8; font-size:12px;';
+    status.textContent = job.last_safe_user_status || '(no status yet)';
+    const goal = document.createElement('div');
+    goal.className = 'muted';
+    goal.style.cssText = 'font-size:11px;';
+    goal.textContent = `goal: ${job.user_visible_goal || ''} · rev ${job.conversation_revision_id ?? '?'} · ${job.job_id}`;
+    left.append(headLine, status, goal);
+    const right = document.createElement('div');
+    right.style.cssText = 'display:flex; gap:6px;';
+    if (job.state === 'queued' || job.state === 'running') {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'secondary';
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => cancelDoubleAgentJob(job.job_id));
+      right.appendChild(cancelBtn);
+    }
+    row.append(left, right);
+    daJobList.appendChild(row);
+  }
+}
+
+async function refreshDoubleAgent() {
+  if (!sessionId) {
+    daPanel.style.display = 'none';
+    return;
+  }
+  const q = new URLSearchParams({conversation_id: sessionId, limit: '20'}).toString();
+  try {
+    const [jobsResp, revResp] = await Promise.all([
+      fetch(`/api/v1/double-agent/jobs?${q}`),
+      fetch(`/api/v1/double-agent/conversations/${encodeURIComponent(sessionId)}/revisions`),
+    ]);
+    const jobsData = jobsResp.ok ? await jobsResp.json() : {jobs: []};
+    const revData = revResp.ok ? await revResp.json() : {revision_id: null};
+    renderDoubleAgentJobs(jobsData.jobs || [], revData.revision_id);
+    const anyInFlight = (jobsData.jobs || []).some(j => j.state === 'queued' || j.state === 'running');
+    if (anyInFlight && !daPollHandle) {
+      daPollHandle = setInterval(refreshDoubleAgent, 3000);
+    } else if (!anyInFlight && daPollHandle) {
+      clearInterval(daPollHandle);
+      daPollHandle = null;
+    }
+  } catch (error) {
+    daPanel.style.display = 'none';
+  }
+}
+
+async function cancelDoubleAgentJob(jobId) {
+  try {
+    await fetch(`/api/v1/double-agent/jobs/${encodeURIComponent(jobId)}/cancel`, {method: 'POST'});
+  } catch (error) {
+    console.warn('cancel failed', error);
+  } finally {
+    refreshDoubleAgent();
+  }
+}
+
+async function submitDoubleAgentJob() {
+  if (!sessionId) {
+    alert('Send a chat message first so the conversation has an id.');
+    return;
+  }
+  const goal = daSubmitGoal.value.trim();
+  if (!goal) {
+    alert('User-visible goal is required.');
+    return;
+  }
+  const internal = daSubmitInternal.value.trim() || goal;
+  const lobe = daSubmitLobe.value || 'deep_chat';
+  const currentRevision = parseInt(daRevisionEl.textContent, 10);
+  const conversationRevision = Number.isFinite(currentRevision) && currentRevision > 0 ? currentRevision : 1;
+  daSubmitConfirm.disabled = true;
+  try {
+    const r = await fetch('/api/v1/double-agent/jobs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        parent_conversation_id: sessionId,
+        conversation_revision_id: conversationRevision,
+        background_lobe_type: lobe,
+        user_visible_goal: goal,
+        internal_goal: internal,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    daSubmitDialog.close();
+  } catch (error) {
+    alert(`Submit failed: ${error.message || error}`);
+  } finally {
+    daSubmitConfirm.disabled = false;
+    refreshDoubleAgent();
+  }
+}
+
+daSubmitBtn.addEventListener('click', () => {
+  daSubmitGoal.value = '';
+  daSubmitInternal.value = '';
+  daSubmitDialog.showModal();
+});
+daSubmitCancel.addEventListener('click', () => daSubmitDialog.close());
+daSubmitConfirm.addEventListener('click', submitDoubleAgentJob);
+
+const micButton = document.getElementById('micButton');
+const voiceStatusLine = document.getElementById('voiceStatusLine');
+const voiceReplyAudio = document.getElementById('voiceReplyAudio');
+
+// We deliberately do NOT use MediaRecorder. MediaRecorder defaults to
+// WebM/Opus and HiveMind's ASR pipeline requires FFmpeg to decode any
+// non-WAV format. Capturing raw PCM via AudioContext and encoding a WAV
+// blob in the browser keeps the pipeline FFmpeg-free.
+const TARGET_SAMPLE_RATE = 16000; // whisper-1's preferred input
+let audioContext = null;
+let mediaStream = null;
+let audioInput = null;
+let recorder = null;
+let recordedChunks = [];
+let recordingSourceSampleRate = 0;
+let recordingStartedAt = 0;
+
+function setVoiceStatus(text, kind) {
+  voiceStatusLine.textContent = text || '';
+  voiceStatusLine.style.color = kind === 'error' ? '#ef4444' : (kind === 'ok' ? '#22c55e' : '#9999b4');
+}
+
+async function startRecording() {
+  if (recorder) return; // already recording
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+  } catch (error) {
+    setVoiceStatus(`Microphone permission denied: ${error.message || error}`, 'error');
+    return;
+  }
+  try {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state === 'suspended') await audioContext.resume();
+    recordingSourceSampleRate = audioContext.sampleRate;
+    audioInput = audioContext.createMediaStreamSource(mediaStream);
+    // ScriptProcessorNode is deprecated but still universally supported and
+    // the simplest path to capture PCM samples without an AudioWorklet
+    // module file. Buffer size 4096 ≈ 90 ms blocks at 48 kHz.
+    recorder = audioContext.createScriptProcessor(4096, 1, 1);
+    recordedChunks = [];
+    recorder.onaudioprocess = (event) => {
+      const channelData = event.inputBuffer.getChannelData(0);
+      // Copy because the underlying buffer is reused.
+      recordedChunks.push(new Float32Array(channelData));
+    };
+    audioInput.connect(recorder);
+    // ScriptProcessor only fires audioprocess if it has a downstream
+    // connection. Pipe to a silent gain so we don't echo to speakers.
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
+    recorder.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+  } catch (error) {
+    setVoiceStatus(`AudioContext init failed: ${error.message || error}`, 'error');
+    teardownRecording();
+    return;
+  }
+  recordingStartedAt = Date.now();
+  micButton.setAttribute('aria-pressed', 'true');
+  micButton.textContent = '⏺';
+  setVoiceStatus('Recording… release to send', null);
+}
+
+function teardownRecording() {
+  if (recorder) try { recorder.disconnect(); } catch (e) { /* ignore */ }
+  if (audioInput) try { audioInput.disconnect(); } catch (e) { /* ignore */ }
+  if (mediaStream) mediaStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+  if (audioContext && audioContext.state !== 'closed') {
+    try { audioContext.close(); } catch (e) { /* ignore */ }
+  }
+  recorder = null;
+  audioInput = null;
+  mediaStream = null;
+  audioContext = null;
+}
+
+function concatenateFloat32(chunks) {
+  let total = 0;
+  for (const buf of chunks) total += buf.length;
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const buf of chunks) {
+    out.set(buf, offset);
+    offset += buf.length;
+  }
+  return out;
+}
+
+function downsampleTo(samples, sourceRate, targetRate) {
+  if (sourceRate === targetRate || sourceRate < targetRate) return samples;
+  const ratio = sourceRate / targetRate;
+  const outLength = Math.floor(samples.length / ratio);
+  const out = new Float32Array(outLength);
+  // Simple averaging downsample to reduce aliasing without a full filter.
+  for (let i = 0; i < outLength; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.floor((i + 1) * ratio);
+    let sum = 0;
+    let count = 0;
+    for (let j = start; j < end && j < samples.length; j++) {
+      sum += samples[j];
+      count++;
+    }
+    out[i] = count > 0 ? sum / count : 0;
+  }
+  return out;
+}
+
+function encodeWavBlob(float32Samples, sampleRate) {
+  const numSamples = float32Samples.length;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  // RIFF header
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, 'WAVE');
+  // fmt subchunk: PCM 16-bit mono
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);             // PCM format
+  view.setUint16(22, 1, true);             // 1 channel
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true);             // block align
+  view.setUint16(34, 16, true);            // bits per sample
+  // data subchunk
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    let s = Math.max(-1, Math.min(1, float32Samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+  return new Blob([buffer], {type: 'audio/wav'});
+}
+
+// =====================================================================
+// Streaming audio playback with barge-in support
+// =====================================================================
+//
+// Goals:
+//   1. Sentence-chunked TTS plays seamlessly within one turn (existing).
+//   2. When the user starts a new turn (mic press OR Send), the
+//      currently-playing audio STOPS immediately — no overlap.
+//   3. Late-arriving audio_chunk events from a barged turn are dropped
+//      instead of being scheduled on top of the new turn.
+//   4. Any in-flight /voice/turn/stream fetch is aborted on barge-in
+//      so the server stops spending HiveMind cycles on audio nobody
+//      is listening to.
+//
+// Implementation:
+//   - `activeAudioSources` tracks every live AudioBufferSourceNode so
+//     we can call .stop() on each.
+//   - `currentVoiceTurnId` is a monotonic counter. Each turn captures
+//     its id; the audio_chunk handler refuses to enqueue when its
+//     captured id doesn't match the current one (= it was barged).
+//   - `activeVoiceStreamController` holds the AbortController for the
+//     in-flight fetch; barge-in calls .abort() to kill the SSE reader.
+let playbackCtx = null;
+let nextChunkStartTime = 0;
+let activeAudioSources = [];
+let currentVoiceTurnId = 0;
+let activeVoiceStreamController = null;
+
+function getPlaybackCtx() {
+  if (!playbackCtx) {
+    playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (playbackCtx.state === 'suspended') {
+    playbackCtx.resume().catch(() => {});
+  }
+  return playbackCtx;
+}
+
+// Soft tail-off window for half-context cancellation. MS4 lets a
+// source that's currently in the middle of playing finish up to this
+// many ms BEYOND the barge-in moment so the user hears a graceful
+// trail instead of a mid-syllable click. Anything beyond this gets
+// stopped immediately.
+const HALF_CONTEXT_TAIL_MS = 250;
+
+function bargeIn(reason, options) {
+  const opts = options || {};
+  const halfContext = opts.halfContext === true;
+  const playAck = opts.playAck === true;
+  const now = playbackCtx ? playbackCtx.currentTime : 0;
+  const tailOff = HALF_CONTEXT_TAIL_MS / 1000;
+
+  // 1. Decide per-source whether to stop immediately or let tail off.
+  //    For half-context: if the source is currently in mid-play, give
+  //    it up to HALF_CONTEXT_TAIL_MS more to finish its current word
+  //    or syllable instead of cutting abruptly. Sources scheduled in
+  //    the FUTURE (queued chunks that haven't started) always cancel
+  //    immediately — no point letting them in just to clip them.
+  const kept = [];
+  for (const entry of activeAudioSources.splice(0)) {
+    const source = entry.source || entry;
+    const startAt = entry.startAt != null ? entry.startAt : now;
+    const endAt = entry.endAt != null ? entry.endAt : now;
+    if (halfContext && playbackCtx && startAt <= now && endAt > now) {
+      // Currently playing — stop at min(endAt, now + tailOff).
+      const stopAt = Math.min(endAt, now + tailOff);
+      try { source.stop(stopAt); } catch (e) { /* already stopped */ }
+      kept.push(entry);
+      continue;
+    }
+    try { source.stop(); } catch (e) { /* already finished */ }
+    try { source.disconnect(); } catch (e) { /* fine */ }
+  }
+  // Put any "still tailing off" sources back into the list so
+  // onended cleanup still fires for them.
+  activeAudioSources = kept;
+
+  // Reset the schedule cursor. New chunks (if any) start fresh.
+  if (playbackCtx) {
+    nextChunkStartTime = halfContext ? Math.min(now + tailOff, nextChunkStartTime) : now;
+  } else {
+    nextChunkStartTime = 0;
+  }
+
+  // 2. Cancel the in-flight stream fetch so the SSE reader stops
+  //    enqueuing more chunks AND the server-side worker can detect
+  //    a closed client and bail out (saves HiveMind cycles).
+  if (activeVoiceStreamController) {
+    try { activeVoiceStreamController.abort(); } catch (e) {}
+    activeVoiceStreamController = null;
+  }
+
+  // 3. Bump the turn id so any chunks already in-flight get dropped
+  //    when they arrive at enqueueAudioChunk.
+  currentVoiceTurnId += 1;
+
+  // 4. Optional canned ack played from the pre-rendered reflex
+  //    catalog. Used by the full-duplex / VAD path to make the
+  //    interruption feel instant — the user hears "Mhm?" the moment
+  //    they start speaking, before ASR even has the first byte.
+  if (playAck) {
+    playRandomReflexAck();
+  }
+
+  if (reason) {
+    setVoiceStatus(`Interrupted (${reason}) — listening`, null);
+  }
+}
+
+function playRandomReflexAck() {
+  // The reflex catalog is preloaded into AudioBuffer instances by
+  // refreshReflexCatalog(). We pick a random ack-category id and
+  // play it via playReflex(). The ack reflexes are intentionally
+  // short (≤1s) so they don't compete with the user's incoming
+  // speech.
+  const ackIds = ['ack_mhm', 'ack_yes', 'ack_go_ahead', 'ack_listening'];
+  const eligible = ackIds.filter(id => reflexBuffers.has(id));
+  if (eligible.length === 0) return;
+  const choice = eligible[Math.floor(Math.random() * eligible.length)];
+  try { playReflex(choice); } catch (e) { /* never let an ack failure break the turn */ }
+}
+
+function resetPlaybackQueue() {
+  // Legacy callers call this at start-of-turn. The new contract is
+  // "start-of-turn always barges any prior audio" so route through
+  // the barge-in machinery.
+  bargeIn(null);
+}
+
+async function enqueueAudioChunk(audioB64, mime, turnId) {
+  // Drop chunks from a turn that's already been barged. This is the
+  // critical race: the SSE reader can still receive an audio_chunk
+  // event AFTER bargeIn() ran (TCP buffering, decodeAudioData latency)
+  // and without this check those chunks would play on top of the new
+  // turn's audio.
+  if (turnId !== undefined && turnId !== currentVoiceTurnId) {
+    return;
+  }
+  try {
+    const ctx = getPlaybackCtx();
+    const binary = atob(audioB64);
+    const buf = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+    const audioBuffer = await ctx.decodeAudioData(buf.buffer);
+    // Re-check turn id AFTER the async decode — decoding takes ~10-30ms
+    // and barge-in might have fired in between.
+    if (turnId !== undefined && turnId !== currentVoiceTurnId) return;
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    const startAt = Math.max(nextChunkStartTime, ctx.currentTime);
+    source.start(startAt);
+    nextChunkStartTime = startAt + audioBuffer.duration;
+    // Track start/end times alongside the node so half-context
+    // barge-in can decide whether each source is "currently
+    // playing" (let it tail off) vs "queued in the future" (cancel
+    // immediately).
+    const entry = {source, startAt, endAt: startAt + audioBuffer.duration};
+    activeAudioSources.push(entry);
+    source.onended = () => {
+      activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== source);
+    };
+  } catch (err) {
+    console.warn('audio chunk decode/play failed:', err);
+  }
+}
+
+async function stopRecordingAndSend() {
+  if (!recorder) {
+    setVoiceStatus('', null);
+    return;
+  }
+  const chunks = recordedChunks;
+  const sourceRate = recordingSourceSampleRate;
+  teardownRecording();
+  micButton.setAttribute('aria-pressed', 'false');
+  micButton.textContent = '🎤';
+  recordedChunks = [];
+  recordingSourceSampleRate = 0;
+  if (chunks.length === 0) {
+    setVoiceStatus('No audio captured', 'error');
+    return;
+  }
+  const float32 = concatenateFloat32(chunks);
+  const downsampled = downsampleTo(float32, sourceRate, TARGET_SAMPLE_RATE);
+  const wavBlob = encodeWavBlob(downsampled, TARGET_SAMPLE_RATE);
+  const durationSec = (Date.now() - recordingStartedAt) / 1000;
+  await submitWavBlobAsVoiceTurn(wavBlob, {durationSec, sourceLabel: 'ptt'});
+}
+
+// Used by both push-to-talk (stopRecordingAndSend) and the full-duplex
+// VAD loop (vadSpeechOffset). Owns the /voice/turn/stream POST, the
+// SSE event loop, the assistant message rendering, and the barge-in
+// race protection. Factored out so the VAD path doesn't reinvent any
+// of it.
+async function submitWavBlobAsVoiceTurn(wavBlob, options) {
+  const opts = options || {};
+  const durationSec = opts.durationSec != null ? opts.durationSec : 0;
+  const sourceLabel = opts.sourceLabel || 'voice';
+  setVoiceStatus(
+    `Captured ${wavBlob.size} bytes WAV (${durationSec.toFixed(1)}s @ ${TARGET_SAMPLE_RATE}Hz); streaming…`,
+    null,
+  );
+
+  const form = new FormData();
+  form.append('file', wavBlob, 'mic.wav');
+  const params = voiceQueryParams();
+  const url = `/voice/turn/stream${params.toString() ? `?${params.toString()}` : ''}`;
+
+  // Barge-in is the responsibility of the caller (PTT bargesIn full,
+  // VAD onset already barged with halfContext). For PTT release this
+  // additional barge is a no-op because we already barged on press;
+  // doing it again is safe (idempotent).
+  if (sourceLabel === 'ptt') {
+    resetPlaybackQueue();
+  } else {
+    // The VAD onset path already barged with halfContext. Only reset
+    // the playback cursor so new chunks start clean — don't kill the
+    // active sources that are tailing off.
+    if (playbackCtx) {
+      nextChunkStartTime = playbackCtx.currentTime;
+    }
+  }
+  // Capture our turn id AFTER the barge (resetPlaybackQueue bumps it).
+  // The SSE reader checks myTurnId !== currentVoiceTurnId to drop
+  // any audio_chunk events that arrive after a NEW turn started —
+  // critical for the half-context overlap case where the next user
+  // utterance can fire before this stream finishes.
+  const myTurnId = currentVoiceTurnId;
+  const turnStart = Date.now();
+  const streamController = new AbortController();
+  activeVoiceStreamController = streamController;
+
+  let assistantState = null;     // {el, textNode, text}
+  let transcriptShown = false;
+  let firstAudioAt = null;
+  const accumulatedDeltas = [];
+
+  try {
+    const r = await fetch(url, {method: 'POST', body: form, signal: streamController.signal});
+    if (!r.ok || !r.body) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`stream open failed: ${r.statusText} ${body.slice(0, 200)}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    outer: while (true) {
+      // Honor barge-in mid-stream: if a newer turn started, stop reading.
+      if (myTurnId !== currentVoiceTurnId) break;
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() || '';
+      for (const frame of frames) {
+        if (!frame.trim()) continue;
+        let eventName = 'message';
+        let dataText = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+          if (line.startsWith('data: ')) dataText += line.slice(6);
+        }
+        let payload = {};
+        try { payload = dataText ? JSON.parse(dataText) : {}; }
+        catch (e) { continue; }
+
+        if (eventName === 'status') {
+          const phase = payload.phase || payload.status;
+          if (phase === 'transcribing') setVoiceStatus('Transcribing…', null);
+          else if (phase === 'thinking') setVoiceStatus('Thinking…', null);
+        } else if (eventName === 'transcript') {
+          addMessage('user', `🎤 ${payload.text || ''}`);
+          assistantState = createStreamingAssistantMessage();
+          assistantState.text = '';
+          transcriptShown = true;
+          setVoiceStatus(`Transcribed in ${payload.asr_ms ?? '?'}ms — streaming reply…`, null);
+        } else if (eventName === 'text_delta') {
+          if (!assistantState) {
+            assistantState = createStreamingAssistantMessage();
+            assistantState.text = '';
+          }
+          assistantState.text += payload.text || '';
+          assistantState.textNode.nodeValue = assistantState.text || '…';
+          messages.scrollTop = messages.scrollHeight;
+          accumulatedDeltas.push(payload.text || '');
+        } else if (eventName === 'chunk_scheduled') {
+          // optional: visualize backlog
+        } else if (eventName === 'audio_chunk') {
+          if (firstAudioAt === null) {
+            firstAudioAt = Date.now() - turnStart;
+            setVoiceStatus(`First audio in ${firstAudioAt}ms`, 'ok');
+          }
+          // Pass myTurnId so the chunk is dropped if barge-in already fired.
+          await enqueueAudioChunk(payload.audio_base64, payload.audio_mime || 'audio/wav', myTurnId);
+        } else if (eventName === 'audio_error') {
+          console.warn('audio_error for chunk', payload.index, payload.error);
+        } else if (eventName === 'done') {
+          if (payload.session_id) {
+            sessionId = payload.session_id;
+            localStorage.setItem('ms4_session_id', sessionId);
+            sessionEl.textContent = sessionId;
+          }
+          if (assistantState) {
+            const finalText = (payload.reply_text || assistantState.text || '').trim();
+            assistantState.text = finalText;
+            assistantState.textNode.nodeValue = finalText || '(no reply)';
+            finishAssistantMessage(assistantState.el, {
+              runtime: 'voice-ptt-stream',
+              face_lobe_model: payload.foreground_model,
+              grounding_source: payload.grounding_source,
+              router: payload.router,
+              dispatched_job: payload.dispatched_job,
+              metrics: payload.metrics?.chat_metrics,  // upper row gets chat metrics
+            });
+            // Attach a second pill row with voice-specific metrics.
+            const vm = payload.metrics || {};
+            const voicePill = document.createElement('div');
+            voicePill.className = 'meta';
+            voicePill.style.color = '#94a3b8';
+            const parts = [];
+            parts.push(`🎙️ asr ${vm.asr_ms ?? '?'}ms`);
+            if (vm.chat_ms != null) parts.push(`chat ${vm.chat_ms}ms`);
+            if (vm.first_text_token_ms != null) parts.push(`first text ${vm.first_text_token_ms}ms`);
+            if (vm.first_audio_chunk_ms != null) parts.push(`first audio ${vm.first_audio_chunk_ms}ms`);
+            if (vm.audio_chunks != null) parts.push(`${vm.audio_chunks} chunks`);
+            if (vm.audio_errors) parts.push(`${vm.audio_errors} errors`);
+            if (vm.total_ms != null) parts.push(`total ${vm.total_ms}ms`);
+            // Parallelism summary: how concurrent is HiveMind TTS actually
+            // running our chunks? speedup_ratio >> 1 means real parallel.
+            if (vm.tts_parallelism && vm.audio_chunks > 1) {
+              const tp = vm.tts_parallelism;
+              parts.push(`tts ×${tp.speedup_ratio} parallel`);
+              if (tp.any_held_for_inorder) {
+                parts.push(`held ${tp.max_held_for_inorder_ms}ms`);
+              }
+            }
+            voicePill.textContent = parts.join(' · ');
+            voicePill.title = JSON.stringify(vm, null, 2);
+            assistantState.el.appendChild(voicePill);
+          }
+          setVoiceStatus(`Voice turn complete in ${payload.metrics?.total_ms ?? '?'}ms`, 'ok');
+          break outer;
+        } else if (eventName === 'error') {
+          throw new Error(payload.error || 'voice stream error');
+        }
+      }
+    }
+  } catch (error) {
+    // AbortError is the normal outcome when bargeIn() killed the
+    // fetch. Don't show it as a red error — the new turn is already
+    // running.
+    if (error && (error.name === 'AbortError' || /aborted/i.test(String(error.message || '')))) {
+      return;
+    }
+    const msg = String(error.message || error || '');
+    setVoiceStatus(`Voice turn failed: ${msg}`, 'error');
+    // When the failure mode is "ASR unhealthy / no endpoints", surface
+    // a one-click Provision button right next to the error so the
+    // operator doesn't have to dig through settings.
+    if (/voice_input_ready=false|No endpoints configured|asr.*unhealthy/i.test(msg)) {
+      const provisionBtn = document.createElement('button');
+      provisionBtn.type = 'button';
+      provisionBtn.className = 'secondary';
+      provisionBtn.textContent = '⚡ Provision ASR via HiveMind';
+      provisionBtn.style.cssText = 'margin-left:8px; font-size:11px;';
+      provisionBtn.addEventListener('click', async () => {
+        provisionBtn.disabled = true;
+        provisionBtn.textContent = 'Requesting…';
+        await triggerVoiceServiceProvision('ASR', provisionBtn);
+      });
+      voiceStatusLine.appendChild(provisionBtn);
+    }
+  } finally {
+    // Release the controller reference so the next turn installs a fresh
+    // one; otherwise a later bargeIn() might call .abort() on a controller
+    // that's already finished, which is harmless but confusing in DevTools.
+    if (activeVoiceStreamController === streamController) {
+      activeVoiceStreamController = null;
+    }
+  }
+}
+
+// Mic press = barge-in + start recording. Pressing the mic while MS4
+// is talking immediately stops the audio so the user can speak over it.
+//
+// When full-duplex is ON, the press-and-hold pipeline would create a
+// SECOND parallel /voice/turn/stream call for the same audio (the VAD
+// pipeline is already capturing). That duplication shipped to a user
+// as two identical "🎤 Okay, so right now?" rows in the message
+// stream. So in full-duplex mode the mic button is a no-op (the icon
+// has already changed to 📡 to signal hands-free is active) — except
+// for a courtesy barge-in so the user can interrupt MS4 by tapping
+// even before they speak.
+function micPressedDown() {
+  if (vadState.enabled) {
+    // Full-duplex is on. Don't open a second capture pipeline; just
+    // give the user the barge-in they tapped for.
+    bargeIn('mic tap (full-duplex on)', {
+      halfContext: isHalfContextEnabled(),
+      playAck: false,  // VAD will fire its own ack on speech onset
+    });
+    setVoiceStatus('Full-duplex on — just speak (mic button is hands-free)', null);
+    return;
+  }
+  bargeIn('mic press');
+  startRecording();
+}
+
+function micReleased() {
+  if (vadState.enabled) return;  // hands-free mode owns the lifecycle
+  if (recorder) stopRecordingAndSend();
+}
+
+// ----- Full-duplex voice (VAD barge-in) ------------------------------
+//
+// When the operator enables full-duplex in Settings, MS4 holds the mic
+// open continuously, runs a Voice Activity Detector on it, and treats
+// every speech onset / speech offset like a hands-free PTT cycle:
+//
+//   speech onset  -> bargeIn(reason='vad_speech_onset', halfContext=true, playAck=true)
+//                    + start a new recording buffer
+//   speech offset -> stop the recording buffer, encode WAV,
+//                    submit via submitWavBlobAsVoiceTurn()
+//
+// The VAD is intentionally simple: AnalyserNode → time-domain RMS →
+// smoothed → state machine. No CDN deps, no WASM. It's good enough
+// for "ChatGPT mobile feel" in a quiet-ish room; aggressive noise
+// suppression is delegated to the browser's `noiseSuppression: true`
+// constraint on getUserMedia.
+
+const FULL_DUPLEX_KEY = 'ms4_voice_full_duplex';
+const VAD_ACK_KEY = 'ms4_voice_vad_ack';
+const VAD_HALFCTX_KEY = 'ms4_voice_vad_halfctx';
+const VAD_SPEECH_THRESHOLD_KEY = 'ms4_voice_vad_speech_threshold';
+const VAD_MIN_SPEECH_MS_KEY = 'ms4_voice_vad_min_speech_ms';
+const VAD_HANGOVER_MS_KEY = 'ms4_voice_vad_hangover_ms';
+
+function isFullDuplexEnabled() {
+  return localStorage.getItem(FULL_DUPLEX_KEY) === 'true';
+}
+function isVadAckEnabled() {
+  const v = localStorage.getItem(VAD_ACK_KEY);
+  return v === null ? true : v === 'true';
+}
+function isHalfContextEnabled() {
+  const v = localStorage.getItem(VAD_HALFCTX_KEY);
+  return v === null ? true : v === 'true';
+}
+function vadSpeechThreshold() {
+  return parseFloat(localStorage.getItem(VAD_SPEECH_THRESHOLD_KEY) || '0.025');
+}
+function vadMinSpeechMs() {
+  return parseInt(localStorage.getItem(VAD_MIN_SPEECH_MS_KEY) || '160', 10);
+}
+function vadHangoverMs() {
+  return parseInt(localStorage.getItem(VAD_HANGOVER_MS_KEY) || '700', 10);
+}
+
+const vadState = {
+  enabled: false,
+  // Audio plumbing kept alive across turns.
+  mediaStream: null,
+  audioContext: null,
+  audioInput: null,
+  analyser: null,
+  // Recording side (parallel to the analyser).
+  recorder: null,
+  recordedChunks: [],
+  sourceSampleRate: 0,
+  // VAD state machine.
+  phase: 'silence',         // 'silence' | 'maybe_speech' | 'speech' | 'maybe_silence'
+  smoothedRms: 0,
+  lastTransitionAt: 0,
+  speechStartedAt: 0,
+  lastSpeechSampleAt: 0,
+  // Sampling loop.
+  pollTimer: null,
+};
+
+function vadStateLabel() {
+  if (!vadState.enabled) return 'disabled';
+  switch (vadState.phase) {
+    case 'silence':       return 'listening';
+    case 'maybe_speech':  return 'maybe speaking…';
+    case 'speech':        return '🎤 speaking';
+    case 'maybe_silence': return 'trailing off…';
+    default:              return vadState.phase;
+  }
+}
+
+function setVadStateLabel() {
+  const el = document.getElementById('settingsVadState');
+  if (el) el.textContent = vadStateLabel();
+}
+
+function setMicMeter(rms) {
+  const bar = document.getElementById('settingsVadMicMeterBar');
+  const tick = document.getElementById('settingsVadMicMeterThreshold');
+  if (bar) {
+    // Map 0..0.20 linearly to 0..100%. The interesting range for
+    // speech is ~0.01-0.10 RMS so the meter saturates above that.
+    const pct = Math.max(0, Math.min(100, Math.round((rms / 0.20) * 100)));
+    bar.style.width = pct + '%';
+  }
+  if (tick) {
+    const pct = Math.max(0, Math.min(100, Math.round((vadSpeechThreshold() / 0.20) * 100)));
+    tick.style.left = pct + '%';
+  }
+}
+
+async function enableFullDuplex() {
+  if (vadState.enabled) return;
+  // Grant mic permission once and hold the stream open across turns.
+  try {
+    vadState.mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true},
+    });
+  } catch (error) {
+    setVoiceStatus(`Full-duplex: mic permission denied (${error.message || error})`, 'error');
+    localStorage.setItem(FULL_DUPLEX_KEY, 'false');
+    const toggle = document.getElementById('settingsFullDuplex');
+    if (toggle) toggle.checked = false;
+    return;
+  }
+  try {
+    vadState.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (vadState.audioContext.state === 'suspended') await vadState.audioContext.resume();
+    vadState.sourceSampleRate = vadState.audioContext.sampleRate;
+    vadState.audioInput = vadState.audioContext.createMediaStreamSource(vadState.mediaStream);
+
+    // VAD branch: time-domain analyser sampled at ~33 Hz.
+    vadState.analyser = vadState.audioContext.createAnalyser();
+    vadState.analyser.fftSize = 1024;
+    vadState.analyser.smoothingTimeConstant = 0;  // we do our own EMA
+    vadState.audioInput.connect(vadState.analyser);
+
+    // Capture branch: ScriptProcessor → silent gain → destination.
+    // Same shape as the PTT path. Buffers are pushed into a *separate*
+    // accumulator from PTT's `recordedChunks` so the two paths can't
+    // step on each other.
+    vadState.recorder = vadState.audioContext.createScriptProcessor(4096, 1, 1);
+    vadState.recordedChunks = [];
+    vadState.recorder.onaudioprocess = (event) => {
+      // Always copy and buffer — but only commit to the "this turn"
+      // accumulator once the VAD says we're in speech. We use a
+      // small pre-roll buffer so the first 150-300 ms of the utterance
+      // (which the VAD needs to confirm) isn't lost.
+      const samples = event.inputBuffer.getChannelData(0);
+      vadPushAudio(samples);
+    };
+    vadState.audioInput.connect(vadState.recorder);
+    const silent = vadState.audioContext.createGain();
+    silent.gain.value = 0;
+    vadState.recorder.connect(silent);
+    silent.connect(vadState.audioContext.destination);
+  } catch (error) {
+    setVoiceStatus(`Full-duplex AudioContext init failed: ${error.message || error}`, 'error');
+    disableFullDuplex({silent: true});
+    return;
+  }
+
+  vadState.enabled = true;
+  vadState.phase = 'silence';
+  vadState.smoothedRms = 0;
+  vadState.lastTransitionAt = Date.now();
+  vadState.lastSpeechSampleAt = 0;
+  vadState.recordedChunks = [];
+  vadPreRoll = [];
+  vadState.pollTimer = setInterval(vadTick, 30);
+  setVoiceStatus('Full-duplex on — listening continuously', 'ok');
+  setVadStateLabel();
+  micButton.textContent = '📡';
+  micButton.title = 'Full-duplex listening (VAD). Disable in Settings to return to push-to-talk.';
+}
+
+function disableFullDuplex(options) {
+  const opts = options || {};
+  if (vadState.pollTimer) {
+    clearInterval(vadState.pollTimer);
+    vadState.pollTimer = null;
+  }
+  if (vadState.recorder) try { vadState.recorder.disconnect(); } catch (e) {}
+  if (vadState.audioInput) try { vadState.audioInput.disconnect(); } catch (e) {}
+  if (vadState.mediaStream) vadState.mediaStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+  if (vadState.audioContext && vadState.audioContext.state !== 'closed') {
+    try { vadState.audioContext.close(); } catch (e) {}
+  }
+  vadState.enabled = false;
+  vadState.mediaStream = null;
+  vadState.audioContext = null;
+  vadState.audioInput = null;
+  vadState.analyser = null;
+  vadState.recorder = null;
+  vadState.recordedChunks = [];
+  vadState.phase = 'silence';
+  vadPreRoll = [];
+  setMicMeter(0);
+  setVadStateLabel();
+  micButton.textContent = '🎤';
+  micButton.title = '';
+  if (!opts.silent) setVoiceStatus('Full-duplex off', null);
+}
+
+// 300 ms rolling pre-roll buffer of audio frames captured BEFORE the
+// VAD confirms speech. When onset fires, we prepend the pre-roll to
+// the recorded utterance so the first 200-300 ms of the user's voice
+// (which the VAD took to identify) isn't lost.
+const VAD_PREROLL_MAX_FRAMES = 8;  // ~300 ms at 4096-sample frames @ 48 kHz
+let vadPreRoll = [];
+
+function vadPushAudio(samples) {
+  const copy = new Float32Array(samples);
+  if (vadState.phase === 'speech' || vadState.phase === 'maybe_silence') {
+    // We're accumulating an utterance — every frame matters.
+    vadState.recordedChunks.push(copy);
+    return;
+  }
+  // Otherwise keep a short rolling pre-roll so we don't clip the
+  // first 200 ms of speech when the VAD finally fires.
+  vadPreRoll.push(copy);
+  while (vadPreRoll.length > VAD_PREROLL_MAX_FRAMES) vadPreRoll.shift();
+}
+
+function vadComputeRms() {
+  if (!vadState.analyser) return 0;
+  const buf = new Float32Array(vadState.analyser.fftSize);
+  // getFloatTimeDomainData was added in Chrome 52 / FF 30 — widely
+  // available now. If it's missing, fall back to byte-domain math.
+  if (vadState.analyser.getFloatTimeDomainData) {
+    vadState.analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    return Math.sqrt(sum / buf.length);
+  }
+  const bytes = new Uint8Array(vadState.analyser.fftSize);
+  vadState.analyser.getByteTimeDomainData(bytes);
+  let sum = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    const v = (bytes[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / bytes.length);
+}
+
+// Smoothing alpha for the RMS EMA. Smaller = laggier but less jittery.
+const VAD_EMA_ALPHA = 0.35;
+const VAD_HYSTERESIS_RATIO = 0.6;  // silence threshold = 0.6 × speech threshold
+
+function vadTick() {
+  if (!vadState.enabled || !vadState.analyser) return;
+  const rms = vadComputeRms();
+  vadState.smoothedRms = (1 - VAD_EMA_ALPHA) * vadState.smoothedRms + VAD_EMA_ALPHA * rms;
+  setMicMeter(vadState.smoothedRms);
+
+  const speechT = vadSpeechThreshold();
+  const silenceT = speechT * VAD_HYSTERESIS_RATIO;
+  const now = Date.now();
+
+  switch (vadState.phase) {
+    case 'silence':
+      if (vadState.smoothedRms >= speechT) {
+        vadState.phase = 'maybe_speech';
+        vadState.lastTransitionAt = now;
+        setVadStateLabel();
+      }
+      break;
+    case 'maybe_speech':
+      if (vadState.smoothedRms < silenceT) {
+        // False alarm (a click, key press, breath) — back to silence.
+        vadState.phase = 'silence';
+        vadState.lastTransitionAt = now;
+        setVadStateLabel();
+        break;
+      }
+      if (now - vadState.lastTransitionAt >= vadMinSpeechMs()) {
+        // Confirmed speech.
+        vadState.phase = 'speech';
+        vadState.lastTransitionAt = now;
+        vadState.speechStartedAt = now;
+        vadState.lastSpeechSampleAt = now;
+        setVadStateLabel();
+        onVadSpeechOnset();
+      }
+      break;
+    case 'speech':
+      if (vadState.smoothedRms >= silenceT) {
+        vadState.lastSpeechSampleAt = now;
+      } else {
+        vadState.phase = 'maybe_silence';
+        vadState.lastTransitionAt = now;
+        setVadStateLabel();
+      }
+      break;
+    case 'maybe_silence':
+      if (vadState.smoothedRms >= speechT) {
+        // User started speaking again before we crossed hangover —
+        // still the same utterance.
+        vadState.phase = 'speech';
+        vadState.lastSpeechSampleAt = now;
+        setVadStateLabel();
+        break;
+      }
+      if (now - vadState.lastTransitionAt >= vadHangoverMs()) {
+        // Confirmed silence → end of utterance.
+        vadState.phase = 'silence';
+        vadState.lastTransitionAt = now;
+        setVadStateLabel();
+        onVadSpeechOffset();
+      }
+      break;
+  }
+}
+
+function onVadSpeechOnset() {
+  // The user just started speaking. Three things happen the moment
+  // we confirm onset:
+  //
+  // 1. Half-context barge-in. MS4's currently-playing word is allowed
+  //    to tail off (~250 ms) instead of cutting mid-syllable; queued
+  //    chunks and the in-flight SSE fetch are cancelled immediately.
+  // 2. Random ack reflex from the pre-rendered catalog ("Mhm?", "Yes?",
+  //    "Go ahead.") plays in ~5 ms — zero round-trip to HiveMind.
+  // 3. The recording buffer prepends the rolling pre-roll so we don't
+  //    lose the first 200-300 ms of the user's voice.
+  bargeIn('vad_speech_onset', {
+    halfContext: isHalfContextEnabled(),
+    playAck: isVadAckEnabled(),
+  });
+  vadState.recordedChunks = vadPreRoll.slice();
+  vadPreRoll = [];
+}
+
+async function onVadSpeechOffset() {
+  // Speech offset = end of utterance after hangover. Build the WAV
+  // and hand it to the existing /voice/turn/stream pipeline. No mic
+  // teardown — the stream stays open for the next utterance.
+  const chunks = vadState.recordedChunks.slice();
+  vadState.recordedChunks = [];
+  if (chunks.length === 0) return;
+  try {
+    const float32 = concatenateFloat32(chunks);
+    const downsampled = downsampleTo(float32, vadState.sourceSampleRate, TARGET_SAMPLE_RATE);
+    const wavBlob = encodeWavBlob(downsampled, TARGET_SAMPLE_RATE);
+    const durationSec = (Date.now() - vadState.speechStartedAt) / 1000;
+    await submitWavBlobAsVoiceTurn(wavBlob, {durationSec, sourceLabel: 'vad'});
+  } catch (err) {
+    console.warn('VAD utterance submit failed:', err);
+    setVoiceStatus(`VAD utterance submit failed: ${err.message || err}`, 'error');
+  }
+}
+
+// ----- Settings dialog wiring for full-duplex ------------------------
+
+const settingsFullDuplexToggle = document.getElementById('settingsFullDuplex');
+const settingsVadAckToggle = document.getElementById('settingsVadAckOnOnset');
+const settingsHalfContextToggle = document.getElementById('settingsHalfContext');
+const settingsVadSpeechThresholdSlider = document.getElementById('settingsVadSpeechThreshold');
+const settingsVadSpeechThresholdLabel = document.getElementById('settingsVadSpeechThresholdLabel');
+const settingsVadMinSpeechMsSlider = document.getElementById('settingsVadMinSpeechMs');
+const settingsVadMinSpeechMsLabel = document.getElementById('settingsVadMinSpeechMsLabel');
+const settingsVadHangoverMsSlider = document.getElementById('settingsVadHangoverMs');
+const settingsVadHangoverMsLabel = document.getElementById('settingsVadHangoverMsLabel');
+
+if (settingsFullDuplexToggle) {
+  settingsFullDuplexToggle.checked = isFullDuplexEnabled();
+  settingsFullDuplexToggle.addEventListener('change', async () => {
+    localStorage.setItem(FULL_DUPLEX_KEY, settingsFullDuplexToggle.checked ? 'true' : 'false');
+    if (settingsFullDuplexToggle.checked) await enableFullDuplex();
+    else disableFullDuplex();
+  });
+}
+if (settingsVadAckToggle) {
+  settingsVadAckToggle.checked = isVadAckEnabled();
+  settingsVadAckToggle.addEventListener('change', () => {
+    localStorage.setItem(VAD_ACK_KEY, settingsVadAckToggle.checked ? 'true' : 'false');
+  });
+}
+if (settingsHalfContextToggle) {
+  settingsHalfContextToggle.checked = isHalfContextEnabled();
+  settingsHalfContextToggle.addEventListener('change', () => {
+    localStorage.setItem(VAD_HALFCTX_KEY, settingsHalfContextToggle.checked ? 'true' : 'false');
+  });
+}
+function bindVadSlider(slider, label, storageKey, fmt) {
+  if (!slider || !label) return;
+  const stored = localStorage.getItem(storageKey);
+  if (stored !== null) slider.value = stored;
+  label.textContent = fmt(slider.value);
+  slider.addEventListener('input', () => {
+    label.textContent = fmt(slider.value);
+    localStorage.setItem(storageKey, slider.value);
+    setMicMeter(vadState.smoothedRms || 0);  // redraw threshold tick
+  });
+}
+bindVadSlider(settingsVadSpeechThresholdSlider, settingsVadSpeechThresholdLabel,
+              VAD_SPEECH_THRESHOLD_KEY, v => parseFloat(v).toFixed(3));
+bindVadSlider(settingsVadMinSpeechMsSlider, settingsVadMinSpeechMsLabel,
+              VAD_MIN_SPEECH_MS_KEY, v => `${v} ms`);
+bindVadSlider(settingsVadHangoverMsSlider, settingsVadHangoverMsLabel,
+              VAD_HANGOVER_MS_KEY, v => `${v} ms`);
+
+// Auto-arm on page load if the user previously enabled full-duplex.
+// We defer until after the page settles so the initial render is
+// snappy and the user sees the UI before the permission prompt.
+if (isFullDuplexEnabled()) {
+  setTimeout(() => { enableFullDuplex().catch(() => {}); }, 800);
+}
+
+micButton.addEventListener('mousedown', micPressedDown);
+micButton.addEventListener('touchstart', evt => { evt.preventDefault(); micPressedDown(); }, {passive: false});
+micButton.addEventListener('mouseup', micReleased);
+micButton.addEventListener('mouseleave', micReleased);
+micButton.addEventListener('touchend', evt => { evt.preventDefault(); micReleased(); }, {passive: false});
+
+Promise.allSettled([refreshHealth(), refreshVoice(), loadModels(), refreshHermesVersion(), refreshDoubleAgent()]);
+setInterval(refreshHermesVersion, 60_000);
+setInterval(refreshDoubleAgent, 30_000);
 if (sessionId) sessionEl.textContent = sessionId;
 </script>
 </body>

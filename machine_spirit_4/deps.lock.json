@@ -2,7 +2,17 @@
   "schema": "Ms4DependencyLock.v1",
   "python": {
     "minimum": "3.11",
-    "venv": ".venv"
+    "venv": ".venv",
+    "containment": {
+      "guard_module": "machine_spirit_4.contained",
+      "guard_entry": "require_contained_runtime",
+      "override_env": "MS4_ALLOW_UNCONTAINED_RUNTIME",
+      "exit_code_on_violation": 78,
+      "applied_to": [
+        "machine_spirit_4.gateway.server.run",
+        "machine_spirit_4.mcp.server.run"
+      ]
+    }
   },
   "capability_groups": {
     "core": {
@@ -13,7 +23,26 @@
       "requirements": "requirements-full-hermes.txt",
       "editable_env": "MS4_HERMES_DIR",
       "editable_default": "~/Documents/hermes-agent",
-      "imports": ["run_agent", "model_tools", "plugins.ms4_consciousness"]
+      "pypi_package": "hermes-agent",
+      "current_tracked_version": "0.14.0",
+      "release_feed": "https://api.github.com/repos/NousResearch/hermes-agent/releases",
+      "imports": ["run_agent", "model_tools", "plugins.ms4_consciousness"],
+      "auto_update": {
+        "module": "machine_spirit_4.hermes_admin",
+        "rest_routes": [
+          "/api/v1/hermes/version",
+          "/api/v1/hermes/releases",
+          "/api/v1/hermes/update",
+          "/api/v1/hermes/update/status"
+        ],
+        "mcp_tools": [
+          "ms4.hermes.version@v1",
+          "ms4.hermes.releases@v1",
+          "ms4.hermes.update@v1",
+          "ms4.hermes.update.status@v1"
+        ],
+        "persistent_state": "runtime/hermes_update_state.json"
+      }
     },
     "browser": {
       "packages": ["websockets", "playwright"],
@@ -22,6 +51,43 @@
     "desktop": {
       "packages": ["mss", "pyautogui", "pygetwindow"],
       "control_env": "MS4_DESKTOP_CONTROL"
+    },
+    "double_agent": {
+      "module": "machine_spirit_4.double_agent",
+      "phase": "1_local",
+      "persistent_state": "runtime/double_agent.sqlite3",
+      "rest_routes": [
+        "/api/v1/double-agent/jobs",
+        "/api/v1/double-agent/jobs/{id}",
+        "/api/v1/double-agent/jobs/{id}/events",
+        "/api/v1/double-agent/jobs/{id}/cancel",
+        "/api/v1/double-agent/jobs/{id}/mark-stale",
+        "/api/v1/double-agent/conversations/{conv}/revisions"
+      ],
+      "mcp_tools": [
+        "ms4.double_agent.submit@v1",
+        "ms4.double_agent.status@v1",
+        "ms4.double_agent.list@v1",
+        "ms4.double_agent.events@v1",
+        "ms4.double_agent.cancel@v1",
+        "ms4.double_agent.mark_stale@v1"
+      ],
+      "event_type_allowlist": [
+        "job.queued",
+        "job.started",
+        "job.tool.call.started",
+        "job.tool.call.completed",
+        "job.checkpoint",
+        "job.partial_finding",
+        "job.needs_input",
+        "job.ethics_block",
+        "job.completed",
+        "job.failed",
+        "job.canceled",
+        "job.stale"
+      ],
+      "max_concurrent_jobs_default": 2,
+      "research_artifact": "docs/double_agent/research_artifact_v2.md"
     }
   }
 }
