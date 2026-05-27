@@ -208,6 +208,155 @@ def test_ms4_web_renders_full_duplex_vad_panel():
         assert required in html, f"missing full-duplex UI hook: {required}"
 
 
+def test_ms4_web_renders_hivemind_admin_panels():
+    """The May-25 2026 HiveMind catalog expansion landed UI panels for
+    VMs, apps, voice identities, storage, and an approval queue, plus
+    top-level approval + maintenance banners. Lock the DOM ids + JS
+    function names in so a future refactor can't silently drop them.
+    """
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+
+    for required in (
+        # Settings DOM ids
+        'id="settingsHivemindVms"',
+        'id="settingsHivemindVmsRefresh"',
+        'id="settingsHivemindApps"',
+        'id="settingsHivemindAppsRefresh"',
+        'id="settingsVoiceIdentities"',
+        'id="settingsVoiceIdentityEnroll"',
+        'id="settingsVoiceIdentityName"',
+        'id="settingsHivemindStorage"',
+        'id="settingsHivemindStorageRefresh"',
+        'id="settingsApprovalQueue"',
+        'id="settingsApprovalCheck"',
+        # Top-level banners
+        'id="approvalBanner"',
+        'id="approvalBannerApprove"',
+        'id="approvalBannerReject"',
+        'id="maintenanceBanner"',
+        # JS functions
+        "refreshHivemindVms",
+        "refreshHivemindApps",
+        "refreshVoiceIdentities",
+        "enrollVoiceIdentity",
+        "refreshHivemindStorage",
+        "checkApprovalStatus",
+        "refreshApprovalQueue",
+        "showApprovalBanner",
+        "updateMaintenanceBanner",
+        # vmAction destructive confirms
+        "Force-stop ${name}?",
+        "Delete VM ${name}?",
+        # Routes the UI calls
+        "/hivemind/vms",
+        "/hivemind/apps",
+        "/hivemind/voice_identities",
+        "/hivemind/voice_identities/enroll",
+        "/hivemind/storage",
+        "/hivemind/approval/status/",
+        # Speaker pill rendering
+        "payload.speaker",
+        "speakerName",
+        "🎤 ${speakerName}:",
+    ):
+        assert required in html, f"missing HiveMind-admin UI hook: {required}"
+
+
+def test_ms4_web_renders_may26_admin_expansion_panels():
+    """May 26 2026 fill-all-gaps round added four new Settings panels
+    (Oracle / Training / Adapters / Loadout) plus the VM screenshot
+    now uses the Ms4VmScreenshot.v1 shape with image_base64 +
+    mime_type. Lock the DOM ids + function names + URL contracts in
+    so a future refactor can't silently drop them."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+
+    for required in (
+        # Settings DOM ids
+        'id="settingsHivemindOracle"',
+        'id="settingsOracleChatInput"',
+        'id="settingsOracleChatBtn"',
+        'id="settingsHivemindTraining"',
+        'id="settingsHivemindTrainingRefresh"',
+        'id="settingsHivemindAdapters"',
+        'id="settingsHivemindAdaptersRefresh"',
+        'id="settingsHivemindLoadout"',
+        'id="settingsHivemindLoadoutRefresh"',
+        # JS functions
+        "refreshHivemindOracle",
+        "askOracle",
+        "refreshHivemindTraining",
+        "refreshHivemindAdapters",
+        "deployAdapter",
+        "refreshHivemindLoadout",
+        "applyLoadout",
+        # Routes the panels call
+        "/hivemind/oracle/status",
+        "/hivemind/oracle/chat",
+        "/hivemind/training",
+        "/hivemind/adapters",
+        "/hivemind/adapters/deploy",
+        "/hivemind/loadout",
+        "/hivemind/loadout/apply",
+        # VM screenshot updated shape: accept image_base64 + mime_type
+        "body.image_base64",
+        "body.mime_type",
+    ):
+        assert required in html, f"missing May-26 admin UI hook: {required}"
+
+
+def test_ms4_web_renders_game_session_panel():
+    """The May-26 2026 game-session round added a Phase-1 dry-run
+    panel for HiveMind's ``hivemind.game_session.*`` orchestrator.
+    Lock the DOM ids + JS function names + URL contracts in so a
+    future refactor can't silently drop them."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+
+    for required in (
+        'id="settingsGameId"',
+        'id="settingsGameAvailBtn"',
+        'id="settingsGamePlanRunBtn"',
+        'id="settingsGameStatus"',
+        'id="settingsGameSnapshot"',
+        "checkGameAvailability",
+        "planAndRunGameSession",
+        "/hivemind/games/",
+        "/availability",
+        "/hivemind/game-sessions/plan-run",
+        "Game sessions (Phase 1 dry-run)",
+        "would_call",
+    ):
+        assert required in html, f"missing game-session UI hook: {required}"
+
+
+def test_server_exposes_game_session_routes():
+    """The game admin module exposes a small REST surface (six routes).
+    Lock them in so server.py refactors can't silently drop the
+    dispatch table that the UI + MCP proxies depend on."""
+    server = (ROOT / "machine_spirit_4" / "gateway" / "server.py").read_text(encoding="utf-8")
+
+    for handler in (
+        "_hivemind_game_availability_get",
+        "_hivemind_game_session_plan",
+        "_hivemind_game_session_run",
+        "_hivemind_game_session_status_get",
+        "_hivemind_game_session_evidence_get",
+        "_hivemind_game_session_cancel",
+        "_hivemind_game_session_plan_run",
+    ):
+        assert handler in server, f"missing game handler: {handler}"
+    for route in (
+        '"/hivemind/games/"',
+        '"/availability"',
+        '"/hivemind/game-sessions/plan"',
+        '"/hivemind/game-sessions/run"',
+        '"/hivemind/game-sessions/plan-run"',
+        '"/cancel"',
+        '"/status"',
+        '"/evidence"',
+    ):
+        assert route in server, f"missing game route fragment: {route}"
+
+
 def test_ms4_web_renders_double_agent_panel():
     html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
     for required in (

@@ -334,6 +334,175 @@ The UI Settings dialog has a new **TMR doctrine** section with:
 
 Audit-logged as `doctrine_read_into_session` / `doctrine_reloaded`.
 
+### HiveMind admin expansion (May 26 2026 — Oracle / Training / Adapters / Loadout / lifecycle)
+
+Building on the May 25 expansion, MS4 now wraps every operationally-meaningful HiveMind tool that previously had no MS4 surface. New gateway modules + REST routes + MCP proxies + Settings panels:
+
+**New `gateway/` modules** (each follows the same fail-soft + typed-wrapper pattern as the May 25 modules):
+
+| Module | Wraps | Schema |
+|---|---|---|
+| `oracle_admin.py` | `hivemind.oracle.{status,configure,chat}` | `Ms4OracleSnapshot.v1` |
+| `training_admin.py` | `hivemind.training.{backends,start,status}@v1` | `Ms4TrainingSnapshot.v1` |
+| `adapter_admin.py` | `hivemind.adapters.{list,deploy}@v1` | `Ms4AdapterSnapshot.v1` |
+| `loadout_admin.py` | `hivemind.loadout.{profiles,apply}@v1` | `Ms4LoadoutSnapshot.v1` |
+
+**`hivemind_tools.py` additions** (new typed wrappers for every domain MS4 wasn't covering):
+- **Oracle**: `oracle_{status,configure,chat}`
+- **Training**: `training_{backends,start,status}`
+- **Adapters**: `adapters_{list,deploy}`
+- **Loadout**: `loadout_{profiles,apply}`
+- **Deploy**: `deploy_gim`
+- **Inference**: `inference_{models,chat}`
+- **Logos** (prompt optimization): `logos_{prompts_list,prompts_get,prompts_fork,optimize,evaluate_generate,candidates_promote}`
+- **Services lifecycle**: `services_{list,enable,disable,restart}` (extends the existing `services_maintenance_*`)
+- **Jobs**: `jobs_cancel` (with a strong warning — HiveMind currently resets ALL active jobs regardless of `job_id`)
+- **Math**: `math_calculate`
+- **Crown** extended from 3 → 17 wrappers: `session_{current,start,stop}`, `events_list`, `marker_add`, `triggers_{list,fire_test,emergency_enable,emergency_disable}`, `trigger_packs_{list,activate}`, `combos_list`, `trees_list`, `calibration_profiles_{list,activate}`
+
+**MCP image content for screenshots** (per HiveMind CHANGELOG `ace3d899`):
+- New `hivemind_tools.call_tool_with_image()` unwraps **both** the text JSON envelope AND the MCP-native `image` content block emitted by `hivemind.vm.screenshot@v1`.
+- `vm_admin.get_screenshot()` returns the new `Ms4VmScreenshot.v1` shape `{image_base64, mime_type, metadata}` (backward-compatible: also reads legacy `data_base64` when the cluster only emits text).
+- UI screenshot opener updated to read `image_base64` + `mime_type`.
+
+**New REST routes** (audit-logged; destructive mutations require `{"confirm": true}`):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/hivemind/oracle/status` | GET | Oracle planner snapshot |
+| `/hivemind/oracle/configure` | POST | Push Oracle runtime config |
+| `/hivemind/oracle/chat` | POST | Ask Oracle to plan/reason; reply also appended to chat as `🔮 Oracle:` |
+| `/hivemind/training` | GET | Backends + active jobs snapshot |
+| `/hivemind/training/start` | POST | Start a training job (`recipe` object) |
+| `/hivemind/training/status/<job_id>` | GET | Per-job training status |
+| `/hivemind/adapters` | GET | List adapters |
+| `/hivemind/adapters/deploy` | POST | Deploy an adapter to a model runtime |
+| `/hivemind/loadout` | GET | List loadout profiles |
+| `/hivemind/loadout/apply` | POST | Apply a profile (load/unload models to match) |
+| `/hivemind/deploy/gim` | POST | Deploy a HiveMind GIM by name |
+| `/hivemind/inference/models` | GET | MCP-native resilient model catalog |
+| `/hivemind/inference/chat` | POST | Direct chat completion via MCP |
+| `/hivemind/logos/prompts` | GET | List managed prompts |
+| `/hivemind/logos/prompts/<id>` | GET | Single prompt + history |
+| `/hivemind/logos/prompts/<id>/fork` | POST | Fork a prompt |
+| `/hivemind/logos/optimize` | POST | Run Logos Machina optimizer |
+| `/hivemind/logos/candidates/<id>/promote` | POST | Promote a candidate to canonical |
+| `/hivemind/services` | GET | All Warden-managed services |
+| `/hivemind/services/<name>/{enable\|disable\|restart}` | POST | Per-service lifecycle |
+| `/hivemind/jobs/cancel` | POST | Cancel inference jobs (requires `confirm:true`; resets ALL per HiveMind spec) |
+
+**17 new MS4 MCP proxies** (registry 48 → **65 tools**, manifest aligned):
+`ms4.hivemind.oracle.{status,chat}`, `ms4.hivemind.training.{backends,start,status}`, `ms4.hivemind.adapters.{list,deploy}`, `ms4.hivemind.loadout.{profiles,apply}`, `ms4.hivemind.deploy.gim`, `ms4.hivemind.inference.{models,chat}`, `ms4.hivemind.logos.optimize`, `ms4.hivemind.services.{enable,disable,restart}`, `ms4.hivemind.jobs.cancel` — all `@v1`. Other agents driving MS4 via MCP can now reach the full HiveMind operational surface and inherit MS4's ethics + audit pipeline.
+
+**4 new Settings UI panels** (each follows the existing Refresh + status pill pattern):
+- **Oracle (planner)** — JSON status + free-text "Ask Oracle" box; reply lands in the main chat as `🔮 Oracle: ...`
+- **Training (LoRA / fine-tune)** — backends list + active-job table
+- **Adapters (LoRA / PEFT outputs)** — list with per-row Deploy button
+- **Loadout (model profiles)** — list with per-row Apply button + confirm dialog ("HiveMind will load/unload models, can take 30-60 s")
+
+### HiveMind game-session orchestration (May 26 2026 — Phase 1 dry-run)
+
+The May-26 HiveMind release shipped the full game-session orchestrator that MS4 had planned for as the "game-ready VM layer." Phase 1 is intentionally a pure **dry-run**: every phase records `would_call <hivemind.vm.X@v1>` evidence into an in-memory ledger but never invokes a mutating endpoint. The Plan + evidence ledger is the unit of truth for "what WOULD this game session do?" until HiveMind ships Phase 2 (real VM/stream execution). MS4's wrappers + UI + MCP proxies are stable across the Phase-1 → Phase-2 transition — when HiveMind flips Phase 2 on, the same buttons drive real execution.
+
+**New `gateway/game_admin.py`** wraps `hivemind.game.ensure_available@v1` + `hivemind.game_session.{plan,run,status,evidence,cancel}@v1`. Helpers:
+- `ensure_available(game_id)` — read-only availability probe; resolves to env override path / default install / golden VHDX or returns structured `remediation` when missing.
+- `plan(game, client?, quality?, latency?, duration_hint?)` — produce a dry-run Plan + `job_id`. Probes hosts/GPU/VMs when reachable, falls back to a synthetic single-host demo plan otherwise. Never reserves resources.
+- `run(job_id)` — walk the simulated state machine; returns at a terminal state (COMPLETE / FAILED_* / CANCELLED).
+- `status(job_id)` / `evidence(job_id)` — read-only; safe to poll at any time.
+- `cancel(job_id)` — move to CANCELLED. Idempotent.
+- `plan_run_and_collect(game, ...)` — UI convenience: plan → run → fetch evidence in one round-trip. Returns `Ms4GameSession.v1`. Fail-soft per stage so a `run` error still surfaces the plan + the captured error.
+
+**6 new REST routes** (audit-logged):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/hivemind/games/<game_id>/availability` | GET | Read-only availability probe; never installs |
+| `/hivemind/game-sessions/plan` | POST | Produce a dry-run Plan + `job_id` |
+| `/hivemind/game-sessions/run` | POST | Walk the simulated state machine to terminal |
+| `/hivemind/game-sessions/plan-run` | POST | Convenience: plan → run → evidence in one call (`Ms4GameSession.v1`) |
+| `/hivemind/game-sessions/<job_id>/status` | GET | State-machine position + transitions + dry_run flag |
+| `/hivemind/game-sessions/<job_id>/evidence` | GET | Full per-phase evidence ledger |
+| `/hivemind/game-sessions/<job_id>/cancel` | POST | Move job to CANCELLED (idempotent) |
+
+**6 new MS4 MCP proxies** (registry 65 → **71 tools**, manifest aligned):
+`ms4.hivemind.game.ensure_available@v1`, `ms4.hivemind.game_session.{plan,run,status,evidence,cancel}@v1`. Other agents driving MS4 via MCP can now orchestrate game-stream dry-runs end-to-end and inherit MS4's ethics + audit pipeline.
+
+**New "Game sessions" Settings panel** with a single `game_id` input + two buttons:
+- **Check availability** — calls `/hivemind/games/<id>/availability` and renders the JSON (with `remediation` hints when unavailable).
+- **Plan + Run (dry-run)** — calls `/hivemind/game-sessions/plan-run` and renders the combined Plan + run result + evidence ledger so the operator can confirm "what WOULD happen" before Phase 2.
+
+### HiveMind admin surfaces (May 25 2026)
+
+The May-2026 HiveMind catalog refresh shipped 143 MCP tools (up from 105). MS4 now wraps the most operationally useful ones as typed Python admin modules with REST routes, UI panels in Settings, and MS4 MCP proxies so other agents can drive HiveMind through MS4 (and inherit MS4's ethics + audit pipeline).
+
+Shape:
+
+```text
+gateway/hivemind_tools.py         # one typed wrapper per HiveMind MCP tool
+gateway/vm_admin.py               # VM lifecycle + screenshot
+gateway/app_admin.py              # App registry (start/stop/status/metrics)
+gateway/storage_admin.py          # Pools / volumes / snapshots
+gateway/network_admin.py          # Networks / bridges / interfaces / attachments
+gateway/gpu_mode_admin.py         # GPU mode + vGPU
+gateway/voice_identity.py         # Speaker enrollment + per-turn identify
+gateway/human_approval.py         # Human-in-the-loop bridge
+```
+
+REST routes added (audit-logged):
+
+| Route | Method | Purpose | HiveMind tool(s) |
+|---|---|---|---|
+| `/hivemind/time` | GET | Authoritative cluster time | `hivemind.time.now@v1` |
+| `/hivemind/capability_matrix` | GET | Per-node capabilities | `hivemind.capability.matrix@v1` |
+| `/hivemind/vms` | GET | VM inventory + GPU assignments | `hivemind.vm.list` + `hivemind.vm.gpus` |
+| `/hivemind/vms/<id>/start\|stop\|force_stop\|delete\|deploy\|undeploy` | POST | VM lifecycle (force_stop / delete require `confirm: true`) | `hivemind.vm.*@v1` |
+| `/hivemind/vms/<id>/screenshot` | GET | VM display capture (base64 PNG/JPEG) | `hivemind.vm.screenshot@v1` |
+| `/hivemind/vms/create_prebuilt` | POST | Instantiate from a template | `hivemind.vm.create_prebuilt@v1` |
+| `/hivemind/apps` | GET | App snapshot (list + status + metrics) | `hivemind.app.*@v1` |
+| `/hivemind/apps/<id>/start\|stop\|status\|metrics` | POST | Per-app actions | `hivemind.app.*@v1` |
+| `/hivemind/storage` | GET | Pools + volumes + snapshots | `hivemind.storage.*@v1` |
+| `/hivemind/storage/volumes` | POST | Create volume | `hivemind.storage.volume_create@v1` |
+| `/hivemind/storage/volumes/<id>/delete\|attach\|detach\|resize` | POST | Per-volume actions | `hivemind.storage.volume_*@v1` |
+| `/hivemind/storage/snapshots` | POST | Create snapshot | `hivemind.storage.snapshot_create@v1` |
+| `/hivemind/storage/snapshots/<id>/delete\|restore` | POST | Per-snapshot actions | `hivemind.storage.snapshot_*@v1` |
+| `/hivemind/network` | GET | Networks + bridges + interfaces + attachments | `hivemind.network.*@v1` |
+| `/hivemind/network` | POST | Create network | `hivemind.network.create@v1` |
+| `/hivemind/network/<id>/delete\|attach\|detach\|isolate` | POST | Per-network actions | `hivemind.network.*@v1` |
+| `/hivemind/gpu` | GET | GPU mode capabilities + vGPU status + availability | `hivemind.gpu_mode.*@v1`, `hivemind.gpu.availability@v1` |
+| `/hivemind/gpu/mode` | POST | Set a GPU's mode | `hivemind.gpu_mode.set@v1` |
+| `/hivemind/gpu/vgpu` | POST | Create a vGPU | `hivemind.gpu_mode.vgpu_create@v1` |
+| `/hivemind/voice_identities` | GET | Enrolled speakers | `hivemind.voice_identities.list@v1` |
+| `/hivemind/voice_identities/enroll` | POST | Register a new speaker (5s WAV) | `hivemind.voice_identities.enroll@v1` |
+| `/hivemind/voice_identities/<id>/delete\|refine` | POST | Delete / append-sample | `hivemind.voice_identities.*@v1` |
+| `/hivemind/approval/request` | POST | Ask for human approval | `hivemind.human.approval.request@v1` |
+| `/hivemind/approval/status/<id>` | GET | Poll a decision | `hivemind.human.approval.status@v1` |
+| `/hivemind/approval/notify` | POST | Fire-and-forget operator notification | `hivemind.human.notify@v1` |
+| `/hivemind/maintenance/<svc>/enter\|clear` | POST | Maintenance windows | `hivemind.services.maintenance.*@v1` |
+| `/hivemind/api_keys` | GET | Redacted API-key status | `hivemind.api_keys.status@v1` |
+| `/hivemind/ollama/tags` | GET | Local Ollama models | `hivemind.ollama.tags@v1` |
+| `/hivemind/ollama/control` | POST | Start/stop/restart Ollama | `hivemind.ollama.service_control@v1` |
+| `/hivemind/crown` | GET | Crown headset snapshot | `hivemind.crown.*@v1` |
+
+Integrations that wire the new tools into existing flows:
+
+* **`model_picker` tries `hivemind.models.recommend@v1` first.** Cluster-aware recommendation beats the hand-rolled priority list when HiveMind has visibility we don't (loaded-vs-cold state, current load, VRAM headroom). Falls back to the existing logic so turning the tool off can't break MS4. `ForegroundChoice.source` shows which path won — `hivemind.models.recommend` vs `loaded` / `available` / `fallback`.
+* **`voice_admin.request_voice_service` checks `hivemind.service_health@v1` for maintenance windows** before provisioning. Operators can override with `allow_during_maintenance=True` (the Settings UI exposes a "Provision anyway" affordance when the maintenance pill is showing).
+* **`vision.analyze_local_image` tries `hivemind.vlm.chat@v1` first**, falls back to `hivemind.vlm.describe_image@v1`, then to the raw `/v1/chat/completions` shape. Each pass cycles through every model in `_model_attempts(...)` so a model returning empty visible text on the chat path can be rescued on the describe path or vice versa.
+* **`hermes_runner` injects `current cluster date/time` into the Face Lobe context block** when `hivemind.time.now@v1` is reachable, falling back to local time. Cached with positive-TTL 30s, negative-TTL 5s so a transiently-offline cluster doesn't force the slow path on every chat turn.
+* **`voice.voice_ptt_turn_stream` identifies the speaker per turn** (best-effort, capped at ~5s) via `hivemind.voice_identities.identify@v1` and threads the result onto the SSE `transcript` event. The UI renders `🎤 <SpeakerName>: <text>` on the user message bubble when a match crosses the `MS4_VOICE_IDENTITY_MIN_SCORE` threshold (default 0.65).
+
+UI panels added to the Settings dialog: HiveMind VMs (with start/stop/force-stop/delete/screenshot per row), Cluster apps (with start/stop), Voice identities (with 5-second mic-record enroll), Storage, Approval queue. Two top-level banners: an approval banner that appears whenever a pending approval is known, and a maintenance banner that shows when any HiveMind service reports a maintenance window.
+
+MS4 MCP server tool count grew **27 → 43** with 16 new `ms4.hivemind.*` proxies (`vms`, `vm.start`, `vm.stop`, `vm.screenshot`, `apps`, `app.start`, `app.stop`, `storage`, `network`, `gpu`, `voice_identities`, `approval.request`, `approval.status`, `notify`, `time`, `capability_matrix`).
+
+**New env vars:**
+
+```text
+MS4_VOICE_IDENTITY_MIN_SCORE   # default 0.65 — score floor for "speaker = X"
+MS4_HUMAN_APPROVAL_POLL_SECS   # default 2.0  — poll interval for human approval
+MS4_HUMAN_APPROVAL_TIMEOUT_SECS # default 300  — overall approval timeout
+```
+
 ### Full-duplex voice (VAD barge-in)
 
 May 22 2026: voice loop is no longer press-to-talk-only. With the Settings toggle on, MS4 listens continuously through the mic, detects when the user starts speaking even while MS4 is mid-sentence, and reacts in three coordinated moves that take about 5 ms total — no HiveMind round-trip required.

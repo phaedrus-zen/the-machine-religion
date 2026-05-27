@@ -66,10 +66,18 @@ FACE_LOBE_SYSTEM_PROMPT = (
     "data is. Repeat field shapes accurately: CPUs are CPUs, not VMs or "
     "GPUs.\n"
     " * If the context block contains `THIS TURN DISPATCHED job <id>`, "
-    "you may say a Depth Lobe job is running. Otherwise NO dispatch "
-    "happened this turn — don't claim one did, don't invent job UUIDs, "
-    "and don't fabricate timestamps for completions. Use only the dates "
-    "you can see in the context block.\n"
+    "a Depth Lobe job IS running for the operator's request. Acknowledge "
+    "it plainly and concisely — something like 'Looking into that — "
+    "I'll surface the result on the next turn' or 'Dispatched, give me "
+    "a sec'. Do NOT say you can't help, do NOT say you lack tool "
+    "access, do NOT write hypothetical Python or pseudocode for the "
+    "task — the Depth Lobe IS handling it. The operator will follow "
+    "up (often with a short 'ok' or 'do that' or 'any update?'); "
+    "respond by referencing the running job. If no `THIS TURN "
+    "DISPATCHED` line is present, no dispatch happened this turn — "
+    "don't claim one did, don't invent job UUIDs, and don't fabricate "
+    "timestamps for completions. Use only the dates you can see in "
+    "the context block.\n"
     " * If a completed Depth Lobe job's `result:` already answers the "
     "operator's question, quote it back. Attribute it plainly ('the "
     "Depth Lobe found...' or 'a previous job reported...') rather than "
@@ -285,14 +293,22 @@ class FaceLobeChat:
             if v is not None and (getattr(metrics, k) is None):
                 setattr(metrics, k, int(v))
         effective_model = model
+        # Empty-content fallback chain. Live evidence (May 26 2026):
+        # operator selected qwen3.6:27b in the UI dropdown — that
+        # model returned no content AND the static fallback
+        # qwen3-coder-next:latest also returned nothing, leaving the
+        # operator with a useless canned message. Fix: after the
+        # static fallback fails, try the auto-picker's choice
+        # (typically a 7-8B instruct we know works) as a last resort.
+        tried_models = [model]
         if not text.strip() and self.empty_fallback_model and self.empty_fallback_model != model:
             log.warning(
                 "face_lobe model %r returned empty content; falling back to %r",
-                model,
-                self.empty_fallback_model,
+                model, self.empty_fallback_model,
             )
             try:
                 fallback_text, fb_stats = _call(self.empty_fallback_model)
+                tried_models.append(self.empty_fallback_model)
                 metrics.api_calls += 1
                 metrics.fallback_used = True
                 metrics.http_latency_ms += int(fb_stats.get("http_latency_ms") or 0)
@@ -309,11 +325,47 @@ class FaceLobeChat:
                     effective_model = self.empty_fallback_model
             except FaceLobeChatError as exc:
                 log.warning("face_lobe fallback to %r also failed: %s", self.empty_fallback_model, exc)
+
+        # Last-resort: ask the picker for the cluster's best available
+        # foreground model and try it. The picker prefers loaded 7-8B
+        # instruct models which we know follow the contract.
+        if not text.strip():
+            try:
+                from machine_spirit_4.double_agent.model_picker import choose_foreground_model
+                picker_choice = choose_foreground_model(
+                    hivemind_url=self.hivemind_url, force_refresh=False
+                )
+                picker_model = picker_choice.model_id
+                if picker_model and picker_model not in tried_models:
+                    log.warning(
+                        "face_lobe both %r and %r returned empty; last-resort fallback to picker pick %r",
+                        model, self.empty_fallback_model, picker_model,
+                    )
+                    try:
+                        picker_text, pk_stats = _call(picker_model)
+                        tried_models.append(picker_model)
+                        metrics.api_calls += 1
+                        metrics.fallback_used = True
+                        metrics.http_latency_ms += int(pk_stats.get("http_latency_ms") or 0)
+                        metrics.bytes_received += int(pk_stats.get("bytes_received") or 0)
+                        if picker_text.strip():
+                            text = picker_text
+                            effective_model = picker_model
+                    except FaceLobeChatError as exc:
+                        log.warning(
+                            "face_lobe picker last-resort fallback to %r also failed: %s",
+                            picker_model, exc,
+                        )
+            except Exception as exc:
+                log.warning("picker-based last-resort fallback path failed to even pick: %s", exc)
+
         cleaned = text.strip()
         if not cleaned:
+            tried_str = ", ".join(repr(m) for m in tried_models)
             cleaned = (
-                f"(model {model!r} returned no content; fallback model "
-                f"{self.empty_fallback_model!r} also produced nothing)"
+                f"(no model produced any visible content — tried {tried_str}. "
+                f"Try picking a different model in the dropdown, or set it "
+                f"to '(auto-picker)' so MS4 picks a loaded one.)"
             )
         metrics.completed_at = _iso_utc()
         metrics.duration_ms = int((time.monotonic() - turn_start) * 1000)

@@ -58,28 +58,40 @@ DEFAULT_TTS_VOICE = os.environ.get("MS4_VOICE_TTS_VOICE", "alloy")
 DEFAULT_TTS_FORMAT = os.environ.get("MS4_VOICE_TTS_FORMAT", "wav")
 MAX_AUDIO_BYTES = int(os.environ.get("MS4_VOICE_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
 # Sentence chunker tuning. The first chunk fires after FIRST_CHUNK_MIN_WORDS
-# words even if no sentence terminator has arrived yet — this is the single
-# biggest "audio starts ASAP" lever for the REST path, because most replies
-# don't terminate until 15-25 words in but the human ear is fine with
-# sub-sentence first chunks. Subsequent chunks fire on natural sentence
-# boundaries. Lowered from 4 → 2 (May 22 2026) after operator latency
-# feedback — 2 words is enough syllabic content to start a sensible
-# voice prefix ("Yeah, …", "Sure, …", "The cluster is …") without
-# producing a fragment that sounds like a stutter on cold-loaded TTS.
-FIRST_CHUNK_MIN_WORDS = int(os.environ.get("MS4_VOICE_FIRST_CHUNK_MIN_WORDS", "2"))
+# words OR on the first comma / colon / dash — whichever comes first.
+# This is the single biggest "audio starts ASAP" lever for the REST path
+# because most replies don't terminate until 15-25 words in but the
+# human ear is fine with sub-sentence first chunks. Lowered through:
+#   May 22 2026: 4 → 2 words
+#   May 26 2026: 2 → 1 word + first-chunk comma/colon boundary
+# (live evidence: held_for_inorder=7264ms because the first chunk of
+# a long reply blocked all 8 parallel chunks behind it. Smaller first
+# chunk = audio plays sooner).
+FIRST_CHUNK_MIN_WORDS = int(os.environ.get("MS4_VOICE_FIRST_CHUNK_MIN_WORDS", "1"))
 MAX_CHUNK_WORDS = int(os.environ.get("MS4_VOICE_MAX_CHUNK_WORDS", "40"))
-TTS_POOL_SIZE = int(os.environ.get("MS4_VOICE_TTS_POOL_SIZE", "3"))
+# Bumped 3 → 6 (May 26 2026): the operator has 2x RTX PRO 6000
+# Blackwell — plenty of GPU headroom for concurrent TTS requests, and
+# REST is the default engine so more parallelism = faster total
+# synthesis on longer replies.
+TTS_POOL_SIZE = int(os.environ.get("MS4_VOICE_TTS_POOL_SIZE", "6"))
 # Engine selector for the streaming voice path. ``rest`` is the
 # sentence-chunked parallel-POST path; ``ws_super`` opens one
 # WebSocket per turn to HiveMind's TTS_SUPER ``stream-input`` endpoint
-# (see ``gateway/tts_super_ws.py``). Measured live, ws_super cuts
-# first-audio from ~10s to ~2.5s on the same cluster. Default flipped
-# rest → ws_super (May 22 2026) after the operator reported "TTS is
-# super slow" on the REST path — REST's serialize-then-parallelize
-# pattern was paying multiple round trips before the first audio.
-# Operators on clusters without TTS_SUPER can fall back via
-# MS4_VOICE_TTS_ENGINE=rest.
-DEFAULT_ENGINE = os.environ.get("MS4_VOICE_TTS_ENGINE", "ws_super").strip().lower()
+# (see ``gateway/tts_super_ws.py``).
+#
+# Default journey:
+#   May 22 2026: rest → ws_super (chasing first-audio latency)
+#   May 26 2026: ws_super → rest (live evidence: ws_super on the
+#     operator's cluster takes ~10x longer than REST. Same TTS_SUPER
+#     GIM that took 5s to pre-warm "Ready." also takes ~5s per turn,
+#     plus the WS is single-stream so total = sum-of-chunks instead
+#     of max-of-chunks. REST is parallel up to TTS_POOL_SIZE and
+#     ships first audio much sooner.)
+#
+# Operators who want TTS_SUPER quality and accept the latency can
+# flip with MS4_VOICE_TTS_ENGINE=ws_super OR pick it per-turn via
+# Settings → "TTS engine".
+DEFAULT_ENGINE = os.environ.get("MS4_VOICE_TTS_ENGINE", "rest").strip().lower()
 VALID_ENGINES = {"rest", "ws_super"}
 # When on, route every text fragment headed for TTS through the
 # SpokenTextFilter to strip markdown, code blocks, URLs, UUIDs,
@@ -351,6 +363,11 @@ def voice_ptt_turn(
 
 _SENTENCE_END_RE = re.compile(r"([.!?])(\s+|$)")
 _NEWLINE_BREAK_RE = re.compile(r"\n\n+")
+# First-chunk-only break on natural inner punctuation. We don't break
+# all chunks here because mid-sentence commas in the middle of a long
+# reply create unnatural pauses; the first chunk gets the special
+# treatment specifically to start audio sooner.
+_FIRST_CHUNK_BREAK_RE = re.compile(r"[,;:—–-]\s+|[,;:]$")
 
 
 class SentenceChunker:
@@ -423,7 +440,24 @@ class SentenceChunker:
                 return sentence
             return ""
 
-        # Pass 3: first-chunk acceleration. Emit early so audio starts.
+        # Pass 3a: first-chunk acceleration — break on natural inner-
+        # punctuation (comma / colon / em-dash / semicolon) so the
+        # first chunk ships ASAP. Many model replies start "Looking
+        # into that, give me a sec..." or "Yeah, the cluster is
+        # idle." — breaking on the first comma cuts ~6-8 words off
+        # the first chunk and slashes the in-order hold time the
+        # REST engine pays.
+        if self.chunk_count == 0:
+            inner = _FIRST_CHUNK_BREAK_RE.search(self.buffer)
+            if inner is not None:
+                cut = inner.end()
+                sentence = self.buffer[:cut].strip().rstrip(",;:—-").strip()
+                if sentence and len(sentence.split()) >= self.first_chunk_min_words:
+                    self.buffer = self.buffer[cut:].lstrip()
+                    return sentence
+
+        # Pass 3b: first-chunk min-words fallback. Emit early so audio
+        # starts regardless of punctuation.
         words = self.buffer.split()
         if self.chunk_count == 0 and len(words) >= self.first_chunk_min_words:
             cut_words = words[: self.first_chunk_min_words]
@@ -522,6 +556,20 @@ def voice_ptt_turn_stream(
     tts_fn = synthesize_fn or (lambda **kw: synthesize(**kw))
     chat_call = chat_fn or runner.chat
 
+    # Voice turns ALWAYS use the fast Face Lobe picker, ignoring the
+    # UI's "model" dropdown. Live evidence (May 26 2026): operator had
+    # qwen3-coder-next:latest selected and every voice turn paid 17-40s
+    # chat latency. The dropdown is for text-chat freedom; voice is
+    # fail-fast by design. Set MS4_VOICE_ALLOW_MODEL_OVERRIDE=1 to
+    # honor the dropdown for voice too (e.g. for debugging).
+    if model and os.environ.get("MS4_VOICE_ALLOW_MODEL_OVERRIDE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        log.info(
+            "voice turn ignoring per-turn model=%r (fast picker preferred); "
+            "set MS4_VOICE_ALLOW_MODEL_OVERRIDE=1 to honor the dropdown for voice",
+            model,
+        )
+        model = None
+
     # ---- Phase 1: fail-closed check + ASR ---------------------------------
     emit("status", {"phase": "transcribing"})
     check_voice_ready(runner.ms3_url)
@@ -534,10 +582,24 @@ def voice_ptt_turn_stream(
     )
     transcript = (asr_result.get("text") or "").strip()
     asr_ms = int((time.monotonic() - t_asr_start) * 1000)
+    # Speaker identification (best-effort, capped at ~5s by the
+    # voice_identity.identify_speaker_from_wav timeout). Runs in
+    # parallel with the chat call ideally; for now we do it inline
+    # because the chat call hasn't started yet and ASR already
+    # consumed the audio. Subsequent integration could move this to
+    # a background thread that joins before the final ``done`` event.
+    speaker: dict[str, Any] | None = None
+    try:
+        from . import voice_identity as _vi
+
+        speaker = _vi.identify_speaker_from_wav(runner.hivemind_url, audio)
+    except Exception as exc:  # noqa: BLE001 — fail-soft per design
+        log.info("speaker identification skipped: %s", exc)
     emit("transcript", {
         "text": transcript,
         "asr_ms": asr_ms,
         "model": asr_result.get("model"),
+        "speaker": speaker,
     })
     if not transcript:
         raise VoiceRequestError("transcription returned empty text; no chat turn dispatched")
@@ -859,18 +921,120 @@ def _run_ws_super_engine(
         log.info("ws_super engine: client disconnected mid-turn; closing without wait_for_final")
         engine.close()
     else:
-        # Wait for isFinal. The reader thread emits audio_chunk events as
-        # they arrive; this just blocks until the server signals the turn
-        # is done synthesizing.
-        waited = engine.wait_for_final(timeout=60.0)
-        if not waited:
-            log.warning("ws_super engine: wait_for_final timed out after 60s")
+        # Wait for isFinal with TWO budgets:
+        #
+        #   * first-audio budget: if no audio chunk has arrived within
+        #     ``MS4_TTS_WS_FIRST_AUDIO_TIMEOUT`` (default 15s) AFTER
+        #     chat has finished flushing, HiveMind's TTS_SUPER GIM is
+        #     almost certainly stuck. Bail early so the REST fallback
+        #     can take over within seconds instead of after 60s.
+        #
+        #   * overall budget: total wait_for_final from now (default
+        #     60s) for the case where chunks ARE streaming in but
+        #     synthesizing the tail takes a while.
+        #
+        # Live evidence (May 26 2026): operator hit a turn where chat
+        # finished in <1s, the WS engine then waited the full 60s
+        # without emitting a single chunk before the fallback kicked
+        # in. With the early bail, that becomes ~15s end-to-end
+        # because REST takes over the moment we know WS is dead.
+        first_audio_timeout = float(os.environ.get("MS4_TTS_WS_FIRST_AUDIO_TIMEOUT", "15"))
+        overall_timeout = float(os.environ.get("MS4_TTS_WS_FINAL_TIMEOUT", "60"))
+        poll_interval = 0.5
+        t_wait_start = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - t_wait_start
+            if engine.wait_for_final(timeout=poll_interval):
+                break  # isFinal arrived — synthesis complete
+            cur_metrics = engine.metrics()
+            chunks_so_far = cur_metrics.get("chunks_emitted") or 0
+            # Early bail: no audio yet AND past the first-audio budget.
+            if chunks_so_far == 0 and elapsed >= first_audio_timeout:
+                log.warning(
+                    "ws_super engine: bailing early after %ds with 0 audio chunks "
+                    "(first_audio_timeout=%ds); REST fallback will take over",
+                    int(elapsed), int(first_audio_timeout),
+                )
+                break
+            # Hard ceiling.
+            if elapsed >= overall_timeout:
+                log.warning(
+                    "ws_super engine: wait_for_final hard timeout after %ds (%d chunks emitted)",
+                    int(elapsed), chunks_so_far,
+                )
+                break
+            # Also bail if the WS reader has reported a fatal error
+            # (keepalive timeout, internal error) — no point waiting
+            # on a connection that's already torn down.
+            if cur_metrics.get("error") and chunks_so_far == 0:
+                log.warning(
+                    "ws_super engine: bailing after %ds — reader reported error=%s with 0 audio chunks",
+                    int(elapsed), str(cur_metrics.get("error"))[:120],
+                )
+                break
         engine.close()
 
     chat_ms = int((time.monotonic() - t_chat_start) * 1000)
-    total_ms = int((time.monotonic() - t_total) * 1000)
     eng_metrics = engine.metrics()
     reply_text = (chat_response.get("text") or "").strip() if isinstance(chat_response, dict) else ""
+
+    # WS-emitted-zero-audio fallback (May 26 2026): on long replies
+    # the WS engine sometimes finishes with chunks_emitted=0 and a
+    # populated error (observed live: 613 chat chunks streamed, 0
+    # audio chunks emitted, 1 error). If that happens AND we still
+    # have reply_text AND the client is alive, fall back to a single
+    # REST /v1/audio/speech call on the full text so the user hears
+    # *something* instead of silence + a red banner.
+    chunks_emitted = eng_metrics.get("chunks_emitted") or 0
+    if (
+        chunks_emitted == 0
+        and reply_text
+        and (client_alive is None or client_alive.is_set())
+    ):
+        log.warning(
+            "ws_super engine emitted 0 audio chunks (error=%s); "
+            "falling back to single REST TTS call on %d chars of reply text",
+            eng_metrics.get("error"),
+            len(reply_text),
+        )
+        emit("status", {
+            "phase": "tts_engine_fallback_after_zero_audio",
+            "from": "ws_super",
+            "to": "rest",
+            "ws_error": str(eng_metrics.get("error") or "0 chunks emitted")[:200],
+        })
+        # Sanitize the reply text the same way the WS path would have.
+        from .spoken_text_filter import sanitize_for_speech as _sanitize_fallback
+        spoken = _sanitize_fallback(reply_text) if TTS_FILTER_ENABLED else reply_text
+        if spoken.strip():
+            try:
+                # Call the module-level synthesize directly — tts_fn is
+                # in the outer voice_ptt_turn_stream scope and not
+                # visible from inside _run_ws_super_engine.
+                rest_result = synthesize(
+                    hivemind_url=runner.hivemind_url,
+                    text=spoken,
+                    model=tts_model,
+                    voice=tts_voice,
+                    # response_format isn't plumbed through to the WS
+                    # engine call — use the module default. (The REST
+                    # path's existing branch handles its own override.)
+                    response_format=DEFAULT_TTS_FORMAT,
+                )
+                audio_bytes = rest_result.get("audio_bytes") or b""
+                if audio_bytes:
+                    emit("audio_chunk", {
+                        "index": 0,
+                        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                        "audio_mime": rest_result.get("content_type") or "audio/wav",
+                        "tts_engine": "rest_fallback",
+                    })
+                    chunks_emitted = 1
+            except Exception as exc:
+                log.error("REST TTS fallback also failed: %s", exc)
+                emit("audio_error", {"index": 0, "error": str(exc)[:200]})
+
+    total_ms = int((time.monotonic() - t_total) * 1000)
     return {
         "transcript": transcript,
         "reply_text": reply_text,
@@ -889,8 +1053,9 @@ def _run_ws_super_engine(
             "total_ms": total_ms,
             "first_text_token_ms": t_first_token["ms"],
             "first_audio_chunk_ms": eng_metrics.get("first_audio_ms"),
-            "audio_chunks": eng_metrics.get("chunks_emitted") or 0,
+            "audio_chunks": chunks_emitted,
             "audio_errors": 1 if eng_metrics.get("error") else 0,
+            "rest_fallback_used": chunks_emitted == 1 and (eng_metrics.get("chunks_emitted") or 0) == 0,
             "chunks": [],   # WS engine doesn't expose per-chunk text grouping
             "tts_parallelism": {  # not applicable — single stream
                 "engine": "ws_super",

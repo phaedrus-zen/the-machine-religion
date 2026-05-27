@@ -13,7 +13,19 @@ def test_manifest_lists_all_v1_tools_and_safety_posture():
     assert manifest["schema"] == "Ms4McpManifest.v1"
     assert manifest["endpoint"] == "http://127.0.0.1:9181/mcp"
     assert manifest["safety"]["default_posture"] == "fail_closed"
-    assert len(tool_names) == 27
+    # Count of tools in the manifest. Original v1 had 27; the May-25
+    # 2026 HiveMind catalog expansion added 16 hivemind.* proxy tools,
+    # and the May-26 PsyKyo bridge added 5 more typed wrappers, bringing
+    # the total to 48. Bump this when adding/removing tools so the
+    # manifest + registry never drift.
+    # 27 original v1 + 16 hivemind.* proxies (May 25) + 5 hivemind.psykyo.*
+    # (May 26 PsyKyo round) + 17 hivemind.* admin proxies (May 26 fill-
+    # all-gaps round: oracle, training, adapters, loadout, deploy.gim,
+    # inference, logos.optimize, services.{enable,disable,restart},
+    # jobs.cancel) + 6 hivemind.game.* / hivemind.game_session.* proxies
+    # (May 26 game-session round: ensure_available + plan/run/status/
+    # evidence/cancel). Bump when adding / removing tools.
+    assert len(tool_names) == 71
     assert "ms4.chat.send@v1" in tool_names
     assert "ms4.nibbles.dry_run@v1" in tool_names
     assert "ms4.hermes.tools.list@v1" in tool_names
@@ -43,6 +55,19 @@ def test_manifest_lists_all_v1_tools_and_safety_posture():
         "ms4.double_agent.mark_stale@v1",
     ):
         assert effectful_da in manifest["safety"]["effectful_tools_in_v1"]
+    for psykyo_tool in (
+        "ms4.hivemind.psykyo.benchmark.run@v1",
+        "ms4.hivemind.psykyo.benchmark.gap@v1",
+        "ms4.hivemind.psykyo.benchmark.workqueue@v1",
+        "ms4.hivemind.psykyo.evidence.latest@v1",
+        "ms4.hivemind.psykyo.vlm_consensus@v1",
+    ):
+        assert psykyo_tool in tool_names
+    for effectful_psykyo in (
+        "ms4.hivemind.psykyo.benchmark.run@v1",
+        "ms4.hivemind.psykyo.vlm_consensus@v1",
+    ):
+        assert effectful_psykyo in manifest["safety"]["effectful_tools_in_v1"]
 
 
 def test_client_config_examples_include_cursor_and_jsonrpc_shapes():

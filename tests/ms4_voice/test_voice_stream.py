@@ -261,7 +261,13 @@ def test_metrics_report_per_chunk_timings_and_parallelism(monkeypatch):
 
     m = result["metrics"]
     chunks = m.get("chunks") or []
-    assert len(chunks) == 3, f"expected 3 chunks, got {len(chunks)}"
+    # May 26 2026: chunker drops FIRST_CHUNK_MIN_WORDS 2 → 1 so the
+    # first chunk now ships after the very first word. For the test
+    # input "First short. Second medium length sentence here. Third
+    # one." that produces 4 chunks: ["First", "short.", "Second...",
+    # "Third one."]. Older code emitted 3. The first-word acceleration
+    # is the intended behavior so audio starts sooner.
+    assert len(chunks) == 4, f"expected 4 chunks (first-word + 3 sentences), got {len(chunks)}"
     # Every per-chunk record has the fields we promised.
     for c in chunks:
         assert {"index", "text_len", "scheduled_ms", "tts_completed_ms", "emitted_ms", "tts_ms", "held_for_inorder_ms"} <= set(c.keys())

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -13,6 +14,29 @@ from typing import Any
 
 
 log = logging.getLogger("ms4.gateway.hermes_runner")
+
+
+def _try_cluster_time_now(hivemind_url: str) -> str | None:
+    """Best-effort cluster-time lookup via ``hivemind.time.now@v1``.
+
+    Returns the cluster's ISO timestamp string when reachable, ``None``
+    on any failure (offline cluster, missing tool, malformed response).
+    Capped at 2s so it can't delay a chat turn.
+    """
+    try:
+        from . import hivemind_tools
+
+        body = hivemind_tools.time_now(hivemind_url)
+    except Exception:
+        return None
+    if isinstance(body, dict):
+        for key in ("iso", "iso8601", "now", "datetime", "time"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+    if isinstance(body, str):
+        return body
+    return None
 
 
 def _now_local_iso() -> str:
@@ -124,6 +148,13 @@ class Ms4HermesRunner:
         self.hermes_dir = Path(hermes_dir)
         self.hivemind_url = hivemind_url.rstrip("/")
         self.ms3_url = ms3_url.rstrip("/")
+        # Cache the cluster-time probe so we don't pay an MCP round
+        # trip on every chat turn. The probe is best-effort + capped
+        # at ~2s; we cache successful results for 30s and negative
+        # results for 5s so a transiently-offline cluster doesn't
+        # force the slow path on every turn.
+        self._cluster_time_cache: tuple[float, str | None] = (0.0, None)
+        self._cluster_time_lock = threading.Lock()
         self.default_model = default_model
         self._agent_cls = agent_cls
         self._sessions: dict[str, SessionState] = {}
@@ -313,10 +344,21 @@ class Ms4HermesRunner:
             except Exception as exc:
                 dispatched_job = {"error": f"router dispatch failed: {exc}"}
 
-        # Current local date/time as authoritative grounding so simple
+        # Current date/time as authoritative grounding so simple
         # questions like "what is the date?" don't need a dispatch.
+        # Prefer the HiveMind cluster's clock when reachable so
+        # operators running MS4 in a different timezone don't get
+        # answers that disagree with the cluster's own logs/job
+        # timestamps. Local time stays as the fail-soft fallback.
         now_local = _now_local_iso()
-        date_grounding_line = f"current local date/time: {now_local}"
+        cluster_time = self._try_cluster_time()
+        if cluster_time:
+            date_grounding_line = (
+                f"current cluster date/time: {cluster_time} "
+                f"(local: {now_local})"
+            )
+        else:
+            date_grounding_line = f"current local date/time: {now_local}"
         dispatched_job_id = (
             dispatched_job["job_id"]
             if isinstance(dispatched_job, dict) and dispatched_job.get("job_id")
@@ -438,6 +480,27 @@ class Ms4HermesRunner:
             "metrics": metrics,
         })
         return response
+
+    def _try_cluster_time(self) -> str | None:
+        """Cached, fail-soft wrapper around ``hivemind.time.now@v1``.
+
+        Successful probes are cached for 30 s; failures for 5 s so a
+        transiently-offline cluster forces only one slow probe per
+        ~5 s window. The probe itself is capped at ~2 s by
+        :func:`_try_cluster_time_now` and the underlying MCP timeout.
+        """
+        now = time.time()
+        with self._cluster_time_lock:
+            cached_at, cached_value = self._cluster_time_cache
+            age = now - cached_at
+            if cached_value is not None and age < 30.0:
+                return cached_value
+            if cached_value is None and age < 5.0:
+                return None
+        value = _try_cluster_time_now(self.hivemind_url)
+        with self._cluster_time_lock:
+            self._cluster_time_cache = (time.time(), value)
+        return value
 
     def sessions(self) -> list[dict[str, Any]]:
         # Foreground sessions live in face_lobe_chat now; Hermes-backed

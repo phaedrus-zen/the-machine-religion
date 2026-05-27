@@ -248,14 +248,36 @@ def request_voice_service(
     mode: str | None = None,
     backend: str | None = None,
     timeout: int = 30,
+    allow_during_maintenance: bool = False,
 ) -> dict[str, Any]:
     """Ask HiveMind to provision a voice capability.
 
     Returns immediately with ``status: 'provisioning'`` (or 'running'
     if the service was already up). The caller polls
     :func:`get_provision_status` to track the transition.
+
+    Maintenance check (May 25 2026): if ``hivemind.service_health@v1``
+    reports the service is in a maintenance window, this raises
+    :class:`VoiceAdminError` unless the caller passes
+    ``allow_during_maintenance=True``. The Settings UI sets that
+    flag when the operator clicks "Provision anyway" on the
+    maintenance pill. Best-effort: the check itself is fail-soft
+    (an error querying maintenance state never blocks provisioning).
     """
     svc = _normalize_service_name(service)
+    if not allow_during_maintenance:
+        try:
+            from . import hivemind_tools as _tools
+
+            if _tools.is_service_in_maintenance(hivemind_url, svc):
+                raise VoiceAdminError(
+                    f"{svc} is in a HiveMind maintenance window; "
+                    f"pass allow_during_maintenance=True to override"
+                )
+        except VoiceAdminError:
+            raise
+        except Exception as exc:
+            log.warning("maintenance probe failed (ignoring): %s", exc)
     capability = SERVICE_TO_CAPABILITY[svc]
     arguments: dict[str, Any] = {"capability": capability}
     if model:

@@ -51,18 +51,22 @@ def test_picker_prefers_coherent_4b_face_lobe_model(monkeypatch):
     assert choice.source == "loaded"
 
 
-def test_picker_prefers_phi4mini_when_loaded(monkeypatch):
-    """phi4-mini sits at the top of the priority list — it's a 3.8B
-    instruct model with strong system-prompt adherence, fast enough on
-    consumer hardware via direct chat-completion."""
+def test_picker_prefers_8b_instruct_when_loaded(monkeypatch):
+    """7B-8B instruct models are now #1 priority (May 26 2026): live
+    evidence showed phi4-mini can't reliably follow the Face Lobe
+    anti-hallucination contract (denied a dispatched job, fabricated
+    fake `hivemind` Python APIs). The picker now prefers a coherent
+    8B instruct first; phi4-mini stays in the fallback chain."""
     monkeypatch.delenv(MS4_FOREGROUND_MODEL_ENV, raising=False)
     _patch_catalog(monkeypatch, [
         {"id": "phi4-mini", "loaded": True, "available": True},
         {"id": "llama3.1:8b", "loaded": True, "available": True},
+        {"id": "qwen3:8b", "loaded": True, "available": True},
         {"id": "gemma4", "loaded": True, "available": True},
     ])
     choice = choose_foreground_model(hivemind_url="http://hive", force_refresh=True)
-    assert choice.model_id == "phi4-mini"
+    # qwen3:8b is now priority #1 in FOREGROUND_PRIORITY_PATTERNS
+    assert choice.model_id == "qwen3:8b"
     assert choice.source == "loaded"
 
 
@@ -120,13 +124,19 @@ def test_picker_only_uses_available_when_nothing_priority_is_loaded(monkeypatch)
     to the highest-priority *available* entry (still better than the
     static fallback)."""
     monkeypatch.delenv(MS4_FOREGROUND_MODEL_ENV, raising=False)
+    # May 26 2026 picker reorder: 7-8B instruct models come first,
+    # phi4-mini moved down because it can't follow the Face Lobe
+    # anti-hallucination contract reliably. Pin the same set of
+    # candidates the picker would actually see plus include qwen3:8b
+    # (the new #1).
     _patch_catalog(monkeypatch, [
+        {"id": "qwen3:8b", "loaded": False, "available": True},
         {"id": "phi4-mini", "loaded": False, "available": True},
         {"id": "gemma3", "loaded": False, "available": True},
         {"id": "qwen3-coder-next:latest", "loaded": False, "available": True},
     ])
     choice = choose_foreground_model(hivemind_url="http://hive", force_refresh=True)
-    assert choice.model_id == "phi4-mini"  # priority #1 in priority list
+    assert choice.model_id == "qwen3:8b"  # new priority #1
     assert choice.source == "available"
 
 

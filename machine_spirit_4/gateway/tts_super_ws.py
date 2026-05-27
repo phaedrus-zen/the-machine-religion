@@ -190,6 +190,16 @@ class TtsSuperWsEngine:
                 for header_name, header_value in auth.items():
                     merged.append((header_name, header_value))
                 connect_kwargs["additional_headers"] = merged
+        # Disable ping/pong keepalive. Live evidence (May 26 2026):
+        # HiveMind's TTS_SUPER GIM is too busy synthesizing to pong
+        # the client's 20s default keepalive ping, so the connection
+        # gets killed with code 1011 (internal error) keepalive ping
+        # timeout — emitting zero audio chunks. A single-turn TTS
+        # synthesis is short-lived enough that we don't need pings
+        # to detect dead connections; the existing wait_for_final
+        # timeout (60s) bounds the wait either way.
+        connect_kwargs.setdefault("ping_interval", None)
+        connect_kwargs.setdefault("ping_timeout", None)
         self._ws = ws_sync.connect(
             url,
             open_timeout=self.open_timeout,

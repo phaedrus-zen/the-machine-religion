@@ -195,11 +195,23 @@ def test_list_voice_services_returns_all_three_in_order():
         assert all(s["schema"] == "Ms4VoiceServiceStatus.v1" for s in services)
 
 
+def _find_resources_request(calls):
+    """Helper: voice_admin first calls hivemind.service_health@v1 to
+    check the maintenance window (added May 25 2026), then calls
+    hivemind.resources.request@v1. Return the resources.request
+    envelope so the assertions don't break when the maintenance check
+    is enabled."""
+    for envelope in calls:
+        params = envelope.get("params") or {}
+        if params.get("name") == "hivemind.resources.request@v1":
+            return envelope
+    raise AssertionError(f"no hivemind.resources.request@v1 call found in {calls}")
+
+
 def test_request_voice_service_sends_correct_mcp_envelope():
     with _FakeHive() as hive:
         result = request_voice_service(hive.url, "ASR", tier="balanced")
-    assert len(hive.mcp_calls) == 1
-    envelope = hive.mcp_calls[0]
+    envelope = _find_resources_request(hive.mcp_calls)
     assert envelope["jsonrpc"] == "2.0"
     assert envelope["method"] == "tools/call"
     assert envelope["params"]["name"] == "hivemind.resources.request@v1"
@@ -216,7 +228,8 @@ def test_request_voice_service_sends_correct_mcp_envelope():
 def test_request_voice_service_tts_super_maps_to_superskill_capability():
     with _FakeHive() as hive:
         request_voice_service(hive.url, "TTS_SUPER")
-    args = hive.mcp_calls[0]["params"]["arguments"]
+    envelope = _find_resources_request(hive.mcp_calls)
+    args = envelope["params"]["arguments"]
     assert args["capability"] == "superskill:tts_super"
 
 

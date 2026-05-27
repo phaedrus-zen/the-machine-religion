@@ -193,6 +193,35 @@
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/active` | Live `hivemind.jobs.active@v1` snapshot (inference + pulls + scatter + training) |
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/load` | Live `hivemind.cluster.load@v1` admission-control snapshot |
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/state` | Combined `Ms4HivemindState.v1` snapshot (active jobs + load + service health + auth/mcp endpoints) |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/time` | Authoritative cluster time via `hivemind.time.now@v1` |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/capability_matrix` | Per-node capabilities via `hivemind.capability.matrix@v1` |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/vms` | VM inventory + GPU assignments; per-VM POST start/stop/force_stop/delete/deploy/undeploy + GET screenshot/gpus |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/apps` | Cluster app snapshot; per-app POST start/stop/status/metrics |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/storage` | Pools/volumes/snapshots snapshot; POST volume + snapshot lifecycle |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/network` | Networks/bridges/interfaces/attachments snapshot; per-network POST attach/detach/isolate/delete |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/gpu` | GPU mode capabilities + vGPU status + availability; POST gpu/mode + gpu/vgpu |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/voice_identities` | Enrolled speakers; POST enroll + per-id delete/refine |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/approval/request` | POST: request human approval; GET `/hivemind/approval/status/<id>` to poll |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/maintenance/<svc>/enter\|clear` | POST: declare / clear a maintenance window for a service |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/api_keys` | Redacted API-key status via `hivemind.api_keys.status@v1` |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/ollama/tags` | Local Ollama models; POST `/hivemind/ollama/control` to start/stop/restart |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/crown` | Crown headset snapshot (status + latest + signal quality) |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/oracle/{status\|configure\|chat}` | HiveMind Oracle planner: status snapshot, runtime configure, planning chat (`POST {message}`). Reply lands in MS4 chat as `🔮 Oracle:`. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/training` | Snapshot of HiveMind training backends + active jobs. `POST /hivemind/training/start` to start a job; `GET /hivemind/training/status/<id>` to poll. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/adapters` | LoRA / PEFT adapter list; `POST /hivemind/adapters/deploy` attaches one to a model runtime. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/loadout` | Model loadout profiles; `POST /hivemind/loadout/apply` loads/unloads models to match the profile. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/deploy/gim` | `POST {gim_name}` to deploy a HiveMind GIM by name. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/inference/{models\|chat}` | MCP-native resilient model catalog + direct chat completion (OpenAI shape). |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/logos/*` | Logos Machina prompt optimizer surface: `prompts` list/get, `prompts/<id>/fork`, `optimize`, `candidates/<id>/promote`. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/services` (+ `<name>/{enable\|disable\|restart}`) | All Warden-managed services + per-service lifecycle. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/jobs/cancel` | `POST {confirm:true}` to cancel inference jobs. WARNING: resets ALL active jobs per current HiveMind spec. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/games/<game_id>/availability` | `GET` — read-only check whether a game is locally available. Resolves to env override path / default install path / golden VHDX, or returns structured `remediation`. Never installs. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/plan` | `POST {game, client?, quality?, latency?, duration_hint?}` — produce a Phase-1 dry-run Plan + `job_id`. Never reserves resources. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/run` | `POST {job_id}` — walk the simulated state machine; returns when terminal (COMPLETE / FAILED_* / CANCELLED). Phase 1 records `would_call` evidence but never mutates. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/plan-run` | `POST {game, ...}` — convenience: plan → run → fetch evidence in one round-trip. Returns `Ms4GameSession.v1`. Fail-soft per stage. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/status` | `GET` — current state-machine position + transitions + dry_run flag. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/evidence` | `GET` — full per-phase evidence ledger (in-memory only in Phase 1). |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/cancel` | `POST` — move job to CANCELLED. Idempotent. |
 | MS4 Gateway | `http://127.0.0.1:9180/spirit/state` | Combined `Ms4SpiritState.v1` snapshot of MS3 identity / personality / resonance / state |
 | MS4 MCP | `http://127.0.0.1:9181/healthcheck/basic` | Basic MCP health |
 | MS4 MCP | `http://127.0.0.1:9181/api/v1/ms4_mcp/status` | MCP status, protocol, tool count |
@@ -243,6 +272,9 @@
 | `MS4_SPIRIT_ID` | `sister` | Default spirit id for local MS4 validation and plugin boot |
 | `MS4_HIVEMIND_MCP_URL` | _(derives `:6105` from `MS4_HIVEMIND_URL`)_ | Pin the HiveMind MCP base URL. Default tries direct MCP gateway on port 6105 (lower latency, control-plane isolation) and falls back to `MS4_HIVEMIND_URL/v1/mcp` (HLI proxy) on connect failure. |
 | `MS4_HIVEMIND_API_KEY` | _(empty = dev mode)_ | When set, every MS4 → HiveMind HTTP/WebSocket call attaches `Authorization: Bearer <key>` so MS4 works against clusters with `MENTA_API_KEYS` configured. |
+| `MS4_VOICE_IDENTITY_MIN_SCORE` | `0.65` | Score floor for tagging a voice turn with a speaker name via `hivemind.voice_identities.identify@v1`. Below this the UI shows `🎤 <text>`; above it shows `🎤 <SpeakerName>: <text>`. |
+| `MS4_HUMAN_APPROVAL_POLL_SECS` | `2.0` | Poll interval for `human_approval.gate_action_with_human` while waiting for an operator decision. |
+| `MS4_HUMAN_APPROVAL_TIMEOUT_SECS` | `300` | Overall timeout for an approval request before it falls through to `deny` with reason `timeout`. |
 
 ## Portable Psyche (tmr-psyche)
 

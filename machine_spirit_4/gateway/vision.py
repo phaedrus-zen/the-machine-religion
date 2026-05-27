@@ -152,6 +152,70 @@ def _call_hivemind_chat_completions(
     }
 
 
+def _call_hivemind_vlm_chat(
+    *,
+    hivemind_url: str,
+    image_base64: str,
+    mime: str,
+    prompt: str,
+    model: str,
+    prior_messages: list[dict[str, Any]] | None,
+    timeout: int,
+) -> dict[str, Any] | None:
+    """Call the May-2026 ``hivemind.vlm.chat@v1`` tool. Returns the same
+    shape as :func:`_call_hivemind_vlm_mcp` so the caller can swap it
+    in without changing downstream code. Returns ``None`` on any
+    failure so the caller falls back to the single-shot path.
+
+    Useful when the operator is asking a follow-up about an image
+    that was already part of the conversation (e.g. "what's that text
+    in the upper left?"). The single-shot ``describe_image@v1``
+    discards prior context; this path threads it through.
+    """
+    try:
+        from . import hivemind_tools
+
+        data_url = f"data:{mime};base64,{image_base64}"
+        messages = list(prior_messages or [])
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        )
+        body = hivemind_tools.vlm_chat(
+            hivemind_url,
+            messages=messages,
+            model=model,
+            temperature=0.0,
+            max_tokens=900,
+        )
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    text = ""
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+        text = str(message.get("content") or "")
+    if not text:
+        text = str(body.get("text") or body.get("description") or "")
+    if not text.strip():
+        return None
+    return {
+        "model": body.get("model") or model,
+        "text": text,
+        "reasoning_excerpt": None,
+        "raw_response": body,
+        "analysis_source": "hivemind_mcp:hivemind.vlm.chat@v1",
+    }
+
+
 def _model_attempts(selected_model: str) -> list[str]:
     attempts = [selected_model]
     for fallback in FALLBACK_VISION_MODELS:
@@ -179,14 +243,36 @@ def analyze_local_image(
     data_url = f"data:{mime};base64,{image_base64}"
     analysis = None
     failed_attempts: list[dict[str, Any]] = []
+    # Pass order:
+    #   1. hivemind.vlm.chat@v1 (May-2026 multi-turn) — preferred
+    #      because it accepts richer context if we ever pipe in a
+    #      conversation, and HiveMind routes it the same way as the
+    #      OpenAI chat-completions path.
+    #   2. hivemind.vlm.describe_image@v1 (single-shot) — backwards
+    #      compatible fallback.
+    #   3. HiveMind /v1/chat/completions direct (legacy, used pre-
+    #      vlm.describe_image rollout).
+    # Each pass cycles through ``_model_attempts(selected_model)``
+    # so a model that returns empty visible text on pass 1 can be
+    # rescued by another model on pass 2 or 3.
     for attempt_model in _model_attempts(selected_model):
-        analysis = _call_hivemind_vlm_mcp(
+        analysis = _call_hivemind_vlm_chat(
             hivemind_url=hivemind_url,
             image_base64=image_base64,
+            mime=mime,
             prompt=prompt,
             model=attempt_model,
+            prior_messages=None,  # single-shot; multi-turn callers use analyze_local_image_with_history
             timeout=timeout,
         )
+        if analysis is None:
+            analysis = _call_hivemind_vlm_mcp(
+                hivemind_url=hivemind_url,
+                image_base64=image_base64,
+                prompt=prompt,
+                model=attempt_model,
+                timeout=timeout,
+            )
         if analysis is None:
             direct = _call_hivemind_chat_completions(
                 hivemind_url=hivemind_url,

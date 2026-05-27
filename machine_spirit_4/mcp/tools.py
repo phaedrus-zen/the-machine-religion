@@ -336,6 +336,304 @@ def desktop_action(runtime: Any, arguments: dict[str, Any]) -> Any:
     return desktop_controller().act(payload)
 
 
+# ---------------------------------------------------------------------------
+# HiveMind proxy handlers (May 25 2026)
+#
+# Thin pass-through over the gateway admin modules. Errors are mapped
+# to RuntimeError so the MCP framework wraps them as isError replies
+# without leaking transport-level details.
+# ---------------------------------------------------------------------------
+
+
+def hivemind_time(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.time_now(runtime.hivemind_url)
+
+
+def hivemind_capability_matrix(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.capability_matrix(runtime.hivemind_url)
+
+
+def hivemind_vms_list(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import vm_admin
+    return vm_admin.list_with_gpu_assignments(runtime.hivemind_url)
+
+
+def hivemind_vm_start(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import vm_admin
+    return vm_admin.start_vm(runtime.hivemind_url, require_string(arguments, "vm_id"))
+
+
+def hivemind_vm_stop(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import vm_admin
+    return vm_admin.stop_vm(runtime.hivemind_url, require_string(arguments, "vm_id"))
+
+
+def hivemind_vm_screenshot(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import vm_admin
+    return vm_admin.get_screenshot(runtime.hivemind_url, require_string(arguments, "vm_id"))
+
+
+def hivemind_apps_list(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import app_admin
+    return app_admin.list_with_status_and_metrics(runtime.hivemind_url)
+
+
+def hivemind_app_start(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import app_admin
+    return app_admin.start_app(runtime.hivemind_url, require_string(arguments, "app_id"))
+
+
+def hivemind_app_stop(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import app_admin
+    return app_admin.stop_app(runtime.hivemind_url, require_string(arguments, "app_id"))
+
+
+def hivemind_storage_snapshot(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import storage_admin
+    return storage_admin.combined_snapshot(runtime.hivemind_url)
+
+
+def hivemind_network_snapshot(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import network_admin
+    return network_admin.combined_snapshot(runtime.hivemind_url)
+
+
+def hivemind_gpu_snapshot(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import gpu_mode_admin
+    return gpu_mode_admin.combined_snapshot(runtime.hivemind_url)
+
+
+def hivemind_voice_identities_list(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import voice_identity
+    return {
+        "schema": "Ms4VoiceIdentitiesSnapshot.v1",
+        "identities": voice_identity.list_identities(runtime.hivemind_url),
+    }
+
+
+def hivemind_approval_request(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import human_approval
+    return human_approval.request(
+        runtime.hivemind_url,
+        action_id=require_string(arguments, "action_id"),
+        summary=require_string(arguments, "summary"),
+        details=arguments.get("details") if isinstance(arguments.get("details"), dict) else None,
+        risk_level=optional_string(arguments, "risk_level") or "medium",
+        timeout_secs=int(arguments.get("timeout_secs") or human_approval.DEFAULT_OVERALL_TIMEOUT_SECS),
+    )
+
+
+def hivemind_approval_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import human_approval
+    return human_approval.status(runtime.hivemind_url, require_string(arguments, "request_id"))
+
+
+def hivemind_notify(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import human_approval
+    return human_approval.notify(
+        runtime.hivemind_url,
+        channel=optional_string(arguments, "channel") or "log",
+        message=require_string(arguments, "message"),
+        severity=optional_string(arguments, "severity") or "info",
+    )
+
+
+# ---------------------------------------------------------------------------
+# PsyKyo proxy handlers (May 26 2026)
+#
+# Thin pass-through over the gateway hivemind_tools.psykyo_* helpers, which
+# in turn call HiveMind's hivemind.psykyo.* MCP tools. Those tools proxy to
+# the loopback-only PsyKyo MCP gateway (PSYKYO_MCP_BASE, default
+# http://127.0.0.1:6765). Loopback validation lives in the HiveMind MCP
+# gateway dispatcher, so no extra host check is needed here. Errors surface
+# as RuntimeError -> MCP isError replies.
+# ---------------------------------------------------------------------------
+
+
+def hivemind_psykyo_benchmark_run(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.psykyo_benchmark_run(runtime.hivemind_url, **arguments)
+
+
+def hivemind_psykyo_benchmark_gap(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.psykyo_benchmark_gap(runtime.hivemind_url)
+
+
+def hivemind_psykyo_benchmark_workqueue(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.psykyo_benchmark_workqueue(runtime.hivemind_url)
+
+
+def hivemind_psykyo_evidence_latest(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.psykyo_evidence_latest(runtime.hivemind_url)
+
+
+def hivemind_psykyo_vlm_consensus(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    evidence_ref = require_string(arguments, "evidence_ref")
+    models = arguments.get("models")
+    if models is not None and not isinstance(models, list):
+        raise ToolInputError("models must be an array of strings")
+    return _tools.psykyo_vlm_consensus(
+        runtime.hivemind_url,
+        evidence_ref=evidence_ref,
+        models=[str(m) for m in models] if models is not None else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# May 26 2026 — new HiveMind admin proxies (Oracle, training, adapters,
+# loadout, deploy, inference, logos, services lifecycle, jobs.cancel)
+#
+# Each proxy lets OTHER agents drive HiveMind through MS4 so the
+# ethics + audit pipeline applies. Errors propagate as RuntimeError →
+# the MCP framework wraps them as isError replies.
+# ---------------------------------------------------------------------------
+
+
+def hivemind_oracle_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import oracle_admin
+    return oracle_admin.status(runtime.hivemind_url)
+
+
+def hivemind_oracle_chat(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import oracle_admin
+    opts = {k: v for k, v in arguments.items() if k != "message"}
+    return oracle_admin.chat(runtime.hivemind_url, require_string(arguments, "message"), **opts)
+
+
+def hivemind_training_backends(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import training_admin
+    return {"backends": training_admin.list_backends(runtime.hivemind_url)}
+
+
+def hivemind_training_start(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import training_admin
+    return training_admin.start_job(runtime.hivemind_url, require_object(arguments, "recipe"))
+
+
+def hivemind_training_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import training_admin
+    return training_admin.status(runtime.hivemind_url, optional_string(arguments, "job_id"))
+
+
+def hivemind_adapters_list(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import adapter_admin
+    return {"schema": "Ms4AdapterSnapshot.v1", "adapters": adapter_admin.list_adapters(runtime.hivemind_url)}
+
+
+def hivemind_adapters_deploy(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import adapter_admin
+    return adapter_admin.deploy(
+        runtime.hivemind_url,
+        require_string(arguments, "adapter_id"),
+        optional_string(arguments, "target_model"),
+    )
+
+
+def hivemind_loadout_profiles(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import loadout_admin
+    return {"schema": "Ms4LoadoutSnapshot.v1", "profiles": loadout_admin.list_profiles(runtime.hivemind_url)}
+
+
+def hivemind_loadout_apply(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import loadout_admin
+    return loadout_admin.apply(runtime.hivemind_url, require_string(arguments, "profile_id"))
+
+
+def hivemind_deploy_gim(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    gim_name = require_string(arguments, "gim_name")
+    opts = {k: v for k, v in arguments.items() if k != "gim_name"}
+    return _tools.deploy_gim(runtime.hivemind_url, gim_name=gim_name, **opts)
+
+
+def hivemind_inference_models(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.inference_models(runtime.hivemind_url)
+
+
+def hivemind_inference_chat(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    messages = arguments.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ToolInputError("messages (list) required")
+    model = require_string(arguments, "model")
+    opts = {k: v for k, v in arguments.items() if k not in ("messages", "model")}
+    return _tools.inference_chat(runtime.hivemind_url, messages=messages, model=model, **opts)
+
+
+def hivemind_logos_optimize(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    prompt_id = require_string(arguments, "prompt_id")
+    opts = {k: v for k, v in arguments.items() if k != "prompt_id"}
+    return _tools.logos_optimize(runtime.hivemind_url, prompt_id=prompt_id, **opts)
+
+
+def hivemind_services_enable(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.services_enable(runtime.hivemind_url, service_name=require_string(arguments, "service_name"))
+
+
+def hivemind_services_disable(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.services_disable(runtime.hivemind_url, service_name=require_string(arguments, "service_name"))
+
+
+def hivemind_services_restart(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.services_restart(runtime.hivemind_url, service_name=require_string(arguments, "service_name"))
+
+
+def hivemind_game_ensure_available(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    return game_admin.ensure_available(runtime.hivemind_url, require_string(arguments, "game_id"))
+
+
+def hivemind_game_session_plan(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    game = require_string(arguments, "game")
+    kwargs = {k: v for k, v in arguments.items() if k != "game"}
+    return game_admin.plan(runtime.hivemind_url, game=game, **kwargs)
+
+
+def hivemind_game_session_run(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    return game_admin.run(runtime.hivemind_url, require_string(arguments, "job_id"))
+
+
+def hivemind_game_session_status(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    return game_admin.status(runtime.hivemind_url, require_string(arguments, "job_id"))
+
+
+def hivemind_game_session_evidence(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    return game_admin.evidence(runtime.hivemind_url, require_string(arguments, "job_id"))
+
+
+def hivemind_game_session_cancel(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import game_admin
+    return game_admin.cancel(runtime.hivemind_url, require_string(arguments, "job_id"))
+
+
+def hivemind_jobs_cancel(runtime: Any, arguments: dict[str, Any]) -> Any:
+    """NOTE: HiveMind's underlying ``hivemind.jobs.cancel@v1`` resets ALL
+    active inference jobs regardless of ``job_id``. We require the
+    caller to set ``confirm: true`` to acknowledge that."""
+    if not bool(arguments.get("confirm")):
+        raise ToolInputError(
+            "jobs.cancel currently resets ALL active inference jobs (per HiveMind spec — "
+            "per-job cancel is not yet implemented). Pass confirm:true to proceed."
+        )
+    from machine_spirit_4.gateway import hivemind_tools as _tools
+    return _tools.jobs_cancel(runtime.hivemind_url, job_id=optional_string(arguments, "job_id") or "all")
+
+
 def build_tool_registry() -> dict[str, ToolDef]:
     tools = [
         ToolDef(
@@ -565,6 +863,398 @@ def build_tool_registry() -> dict[str, ToolDef]:
             {"type": "object", "required": ["action"], "properties": {"action": {"type": "string"}, "x": {"type": "integer"}, "y": {"type": "integer"}, "text": {"type": "string"}, "keys": {"type": "array", "items": {"type": "string"}}, "seconds": {"type": "number"}}},
             chat_annotations("MS4 desktop action"),
             desktop_action,
+        ),
+        # ----- HiveMind admin proxies (May 25 2026) -----
+        # These let other agents drive HiveMind through MS4 so MS4's
+        # ethics + audit pipeline applies. They are intentionally a
+        # subset — the most operationally useful tools from the
+        # May-2026 HiveMind catalog expansion (143 tools total). All
+        # are thin proxies over the matching gateway module; failures
+        # surface as MCP isError replies via the tool registry.
+        ToolDef(
+            "ms4.hivemind.time@v1",
+            "Authoritative cluster time via hivemind.time.now@v1.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind time"),
+            hivemind_time,
+        ),
+        ToolDef(
+            "ms4.hivemind.capability_matrix@v1",
+            "Per-node capability matrix (GIMs, models, vGPU) via hivemind.capability.matrix@v1.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind capability matrix"),
+            hivemind_capability_matrix,
+        ),
+        ToolDef(
+            "ms4.hivemind.vms@v1",
+            "VM inventory + GPU assignments snapshot (joins hivemind.vm.list@v1 + hivemind.vm.gpus@v1).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind VMs"),
+            hivemind_vms_list,
+        ),
+        ToolDef(
+            "ms4.hivemind.vm.start@v1",
+            "Start a HiveMind VM by id.",
+            {"type": "object", "required": ["vm_id"], "properties": {"vm_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind VM start"),
+            hivemind_vm_start,
+        ),
+        ToolDef(
+            "ms4.hivemind.vm.stop@v1",
+            "Graceful stop of a HiveMind VM (ACPI shutdown).",
+            {"type": "object", "required": ["vm_id"], "properties": {"vm_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind VM stop"),
+            hivemind_vm_stop,
+        ),
+        ToolDef(
+            "ms4.hivemind.vm.screenshot@v1",
+            "Capture a HiveMind VM's display via hivemind.vm.screenshot@v1.",
+            {"type": "object", "required": ["vm_id"], "properties": {"vm_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind VM screenshot"),
+            hivemind_vm_screenshot,
+        ),
+        ToolDef(
+            "ms4.hivemind.apps@v1",
+            "Cluster app inventory with status + metrics joined per-app.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind apps"),
+            hivemind_apps_list,
+        ),
+        ToolDef(
+            "ms4.hivemind.app.start@v1",
+            "Start a HiveMind-registered app by id.",
+            {"type": "object", "required": ["app_id"], "properties": {"app_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind app start"),
+            hivemind_app_start,
+        ),
+        ToolDef(
+            "ms4.hivemind.app.stop@v1",
+            "Stop a HiveMind-registered app by id.",
+            {"type": "object", "required": ["app_id"], "properties": {"app_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind app stop"),
+            hivemind_app_stop,
+        ),
+        ToolDef(
+            "ms4.hivemind.storage@v1",
+            "Storage snapshot: pools + volumes + snapshots + status.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind storage"),
+            hivemind_storage_snapshot,
+        ),
+        ToolDef(
+            "ms4.hivemind.network@v1",
+            "Network snapshot: networks + bridges + interfaces + attachments.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind network"),
+            hivemind_network_snapshot,
+        ),
+        ToolDef(
+            "ms4.hivemind.gpu@v1",
+            "GPU mode capabilities + vGPU status + current availability.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind GPU"),
+            hivemind_gpu_snapshot,
+        ),
+        ToolDef(
+            "ms4.hivemind.voice_identities@v1",
+            "List enrolled voice identities.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind voice identities"),
+            hivemind_voice_identities_list,
+        ),
+        ToolDef(
+            "ms4.hivemind.approval.request@v1",
+            "Request human approval for an action via hivemind.human.approval.request@v1.",
+            {
+                "type": "object",
+                "required": ["action_id", "summary"],
+                "properties": {
+                    "action_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "details": {"type": "object"},
+                    "risk_level": {"type": "string"},
+                    "timeout_secs": {"type": "integer"},
+                },
+            },
+            chat_annotations("MS4 HiveMind approval request"),
+            hivemind_approval_request,
+        ),
+        ToolDef(
+            "ms4.hivemind.approval.status@v1",
+            "Poll a previously-issued human approval request.",
+            {"type": "object", "required": ["request_id"], "properties": {"request_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind approval status"),
+            hivemind_approval_status,
+        ),
+        ToolDef(
+            "ms4.hivemind.notify@v1",
+            "Fire-and-forget operator notification (Telegram / log).",
+            {
+                "type": "object",
+                "required": ["message"],
+                "properties": {
+                    "channel": {"type": "string"},
+                    "message": {"type": "string"},
+                    "severity": {"type": "string"},
+                },
+            },
+            chat_annotations("MS4 HiveMind notify"),
+            hivemind_notify,
+        ),
+        # ----- PsyKyo proxies via HiveMind (May 26 2026) -----
+        # Five wrappers over hivemind.psykyo.*; HiveMind's MCP gateway
+        # enforces loopback-only PSYKYO_MCP_BASE, so MS4 just relays.
+        # benchmark.run drives Cyberpunk 2077 and is gated by PsyKyo's
+        # confirm_actuation_token + vlm_consensus_gate promotion.
+        ToolDef(
+            "ms4.hivemind.psykyo.benchmark.run@v1",
+            "Run the PsyKyo Cyberpunk 2077 benchmark operator via hivemind.psykyo.benchmark.run@v1. Launches the game, drives the in-game settings + Run Benchmark UI, waits ~64s, and returns FPS/variance/thermals through PsyKyo's vlm_consensus_gate promotion.",
+            {
+                "type": "object",
+                "properties": {
+                    "resolution": {"type": "string"},
+                    "preset": {"type": "string"},
+                    "ray_tracing": {"type": "string", "enum": ["off", "on", "psycho", "overdrive"]},
+                    "upscaler": {"type": "string", "enum": ["off", "dlss", "fsr", "xess"]},
+                    "upscaler_quality": {"type": "string", "enum": ["performance", "balanced", "quality", "auto"]},
+                    "runs": {"type": "integer"},
+                    "allow_launch": {"type": "boolean"},
+                    "allow_foreground": {"type": "boolean"},
+                    "allow_capture": {"type": "boolean"},
+                    "confirm_actuation_token": {"type": "string"},
+                },
+            },
+            chat_annotations("MS4 PsyKyo benchmark run"),
+            hivemind_psykyo_benchmark_run,
+        ),
+        ToolDef(
+            "ms4.hivemind.psykyo.benchmark.gap@v1",
+            "PsyKyo benchmark pre-flight gap-gate: confirm the operator is reachable and visual boxes still match the live game UI. Idempotent and side-effect-free; does NOT launch the benchmark.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 PsyKyo benchmark gap"),
+            hivemind_psykyo_benchmark_gap,
+        ),
+        ToolDef(
+            "ms4.hivemind.psykyo.benchmark.workqueue@v1",
+            "List queued PsyKyo gap-gate work items (boxes that need review or replay before benchmark.run can be trusted). Read-only.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 PsyKyo benchmark workqueue"),
+            hivemind_psykyo_benchmark_workqueue,
+        ),
+        ToolDef(
+            "ms4.hivemind.psykyo.evidence.latest@v1",
+            "Stable PsyKyo validation pointers and latest evidence summary. Read-only; safe without confirm_actuation_token.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 PsyKyo evidence latest"),
+            hivemind_psykyo_evidence_latest,
+        ),
+        ToolDef(
+            "ms4.hivemind.psykyo.vlm_consensus@v1",
+            "Reconcile saved HiveMind VLM/OCR sidecar artifacts across models (llama3.2-vision + qwen3-vl MUST agree) before semantic promotion. Read-only consensus check on existing evidence; does not call VLM/OCR live and does not mutate profiles.",
+            {
+                "type": "object",
+                "required": ["evidence_ref"],
+                "properties": {
+                    "evidence_ref": {"type": "string"},
+                    "models": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            chat_annotations("MS4 PsyKyo VLM consensus"),
+            hivemind_psykyo_vlm_consensus,
+        ),
+        # ----- May 26 2026 — new HiveMind admin proxies -----
+        ToolDef(
+            "ms4.hivemind.oracle.status@v1",
+            "HiveMind Oracle planner status snapshot (hivemind.oracle.status).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind Oracle status"),
+            hivemind_oracle_status,
+        ),
+        ToolDef(
+            "ms4.hivemind.oracle.chat@v1",
+            "Ask the HiveMind Oracle planner to plan/reason about a request (hivemind.oracle.chat). Suitable for 'what should I do next?' / capacity-aware coordination workflows.",
+            {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind Oracle chat"),
+            hivemind_oracle_chat,
+        ),
+        ToolDef(
+            "ms4.hivemind.training.backends@v1",
+            "List available HiveMind training backends (hivemind.training.backends@v1).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind training backends"),
+            hivemind_training_backends,
+        ),
+        ToolDef(
+            "ms4.hivemind.training.start@v1",
+            "Start a HiveMind training job (LoRA / PEFT / forge). Recipe is backend-specific.",
+            {
+                "type": "object",
+                "required": ["recipe"],
+                "properties": {"recipe": {"type": "object"}},
+            },
+            chat_annotations("MS4 HiveMind training start"),
+            hivemind_training_start,
+        ),
+        ToolDef(
+            "ms4.hivemind.training.status@v1",
+            "Poll the status of a HiveMind training job (all or by job_id).",
+            {"type": "object", "properties": {"job_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind training status"),
+            hivemind_training_status,
+        ),
+        ToolDef(
+            "ms4.hivemind.adapters.list@v1",
+            "List HiveMind-known adapters (LoRA outputs from training jobs).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind adapters list"),
+            hivemind_adapters_list,
+        ),
+        ToolDef(
+            "ms4.hivemind.adapters.deploy@v1",
+            "Deploy an adapter to a model runtime so it can be loaded for inference.",
+            {
+                "type": "object",
+                "required": ["adapter_id"],
+                "properties": {"adapter_id": {"type": "string"}, "target_model": {"type": "string"}},
+            },
+            chat_annotations("MS4 HiveMind adapters deploy"),
+            hivemind_adapters_deploy,
+        ),
+        ToolDef(
+            "ms4.hivemind.loadout.profiles@v1",
+            "List configured HiveMind loadout profiles (which models loaded together).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind loadout profiles"),
+            hivemind_loadout_profiles,
+        ),
+        ToolDef(
+            "ms4.hivemind.loadout.apply@v1",
+            "Apply a HiveMind loadout profile (load/unload models to match).",
+            {"type": "object", "required": ["profile_id"], "properties": {"profile_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind loadout apply"),
+            hivemind_loadout_apply,
+        ),
+        ToolDef(
+            "ms4.hivemind.deploy.gim@v1",
+            "Deploy / start a HiveMind GIM by name (hivemind.deploy.gim@v1).",
+            {"type": "object", "required": ["gim_name"], "properties": {"gim_name": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind deploy GIM"),
+            hivemind_deploy_gim,
+        ),
+        ToolDef(
+            "ms4.hivemind.inference.models@v1",
+            "Model catalog via the MCP native resilient handler (hivemind.inference.models@v1).",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind inference models"),
+            hivemind_inference_models,
+        ),
+        ToolDef(
+            "ms4.hivemind.inference.chat@v1",
+            "Direct chat completion through the HiveMind MCP gateway (hivemind.inference.chat@v1). Messages follow OpenAI shape.",
+            {
+                "type": "object",
+                "required": ["messages", "model"],
+                "properties": {
+                    "messages": {"type": "array"},
+                    "model": {"type": "string"},
+                    "temperature": {"type": "number"},
+                    "max_tokens": {"type": "integer"},
+                },
+            },
+            chat_annotations("MS4 HiveMind inference chat"),
+            hivemind_inference_chat,
+        ),
+        ToolDef(
+            "ms4.hivemind.logos.optimize@v1",
+            "Run the Logos Machina prompt optimizer on a managed prompt (hivemind.logos.optimize@v1).",
+            {"type": "object", "required": ["prompt_id"], "properties": {"prompt_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind Logos optimize"),
+            hivemind_logos_optimize,
+        ),
+        ToolDef(
+            "ms4.hivemind.services.enable@v1",
+            "Enable a disabled Warden-managed service by name.",
+            {"type": "object", "required": ["service_name"], "properties": {"service_name": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind service enable"),
+            hivemind_services_enable,
+        ),
+        ToolDef(
+            "ms4.hivemind.services.disable@v1",
+            "Disable a running Warden-managed service by name.",
+            {"type": "object", "required": ["service_name"], "properties": {"service_name": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind service disable"),
+            hivemind_services_disable,
+        ),
+        ToolDef(
+            "ms4.hivemind.services.restart@v1",
+            "Restart a Warden-managed service by name (Warden's restart route).",
+            {"type": "object", "required": ["service_name"], "properties": {"service_name": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind service restart"),
+            hivemind_services_restart,
+        ),
+        ToolDef(
+            "ms4.hivemind.jobs.cancel@v1",
+            "Cancel inference jobs. WARNING: per HiveMind spec this currently resets ALL active jobs regardless of job_id. Requires confirm:true.",
+            {
+                "type": "object",
+                "required": ["confirm"],
+                "properties": {"confirm": {"type": "boolean"}, "job_id": {"type": "string"}},
+            },
+            chat_annotations("MS4 HiveMind jobs cancel"),
+            hivemind_jobs_cancel,
+        ),
+        # ----- Game session orchestration (Phase 1 dry-run) -----
+        ToolDef(
+            "ms4.hivemind.game.ensure_available@v1",
+            "Read-only availability check for a game id (e.g. 'cyberpunk-2077'). Resolves to env override path / default install / golden VHDX. Returns 'available + path' or 'unavailable + remediation'. Never installs.",
+            {"type": "object", "required": ["game_id"], "properties": {"game_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind game availability"),
+            hivemind_game_ensure_available,
+        ),
+        ToolDef(
+            "ms4.hivemind.game_session.plan@v1",
+            "Produce a dry-run Plan for a game-streaming workload intent. Probes hosts/GPU/VMs when reachable, falls back to a synthetic demo plan. Never reserves resources. Returns {job_id, plan}.",
+            {
+                "type": "object",
+                "required": ["game"],
+                "properties": {
+                    "game": {"type": "string"},
+                    "client": {"type": "string"},
+                    "duration_hint": {"type": "string"},
+                    "latency": {"type": "string"},
+                    "quality": {"type": "string"},
+                },
+            },
+            read_only_annotations("MS4 HiveMind game_session plan"),
+            hivemind_game_session_plan,
+        ),
+        ToolDef(
+            "ms4.hivemind.game_session.run@v1",
+            "Walk the simulated state machine for a planned game_session job. Pure dry-run in Phase 1: every phase records 'would_call <hivemind.vm.X@v1>' evidence but never mutates. Returns when terminal (COMPLETE/FAILED_*/CANCELLED).",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind game_session run"),
+            hivemind_game_session_run,
+        ),
+        ToolDef(
+            "ms4.hivemind.game_session.status@v1",
+            "Current state-machine position for a game_session job_id + per-phase transitions + dry_run flag.",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind game_session status"),
+            hivemind_game_session_status,
+        ),
+        ToolDef(
+            "ms4.hivemind.game_session.evidence@v1",
+            "Full per-phase evidence ledger for a game_session job_id (transitions, simulated actions, planner inputs, last_error). In-memory only in Phase 1.",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            read_only_annotations("MS4 HiveMind game_session evidence"),
+            hivemind_game_session_evidence,
+        ),
+        ToolDef(
+            "ms4.hivemind.game_session.cancel@v1",
+            "Move a game_session job to CANCELLED. Idempotent. Dry-run only in Phase 1.",
+            {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
+            chat_annotations("MS4 HiveMind game_session cancel"),
+            hivemind_game_session_cancel,
         ),
     ]
     return {tool.name: tool for tool in tools}

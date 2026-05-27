@@ -69,17 +69,27 @@ MODELS_TTL_SECS = 60.0
 # Operators who specifically want a tiny model can set
 # ``MS4_FOREGROUND_MODEL=qwen2.5:0.5b`` to override.
 FOREGROUND_PRIORITY_PATTERNS: tuple[str, ...] = (
+    # 7B–8B instruct models first. phi4-mini (3.8B) was promoted to #1
+    # in May 22's "fast picker" round, but live evidence on May 26 2026
+    # showed it can't reliably follow the Face Lobe anti-hallucination
+    # contract — the operator hit a turn where the router correctly
+    # dispatched a Depth Lobe job but phi4-mini still said "I don't
+    # have direct access" and then fabricated fake `hivemind` Python
+    # API calls (tool_manager.run_async, ServerSideToolManager).
+    # Reordered so a coherent 7-8B model wins by default; phi4-mini
+    # stays in the fallback chain for hardware that can't run 8B fast.
+    "qwen3:8b",
+    "llama3.1:8b",
+    "llama3.2:8b",
+    "qwen2.5:7b",
+    "dolphin-llama3",
+    "llama3.1",
+    "qwen3",
     "phi4-mini",
     "phi3.5",
     "gemma4",
     "gemma3",
     "gemma2",
-    "llama3.1:8b",
-    "llama3.2:8b",
-    "dolphin-llama3",
-    "llama3.1",
-    "qwen3:8b",
-    "qwen3",
     "gemma",
     "qwen3-coder-next:latest",
 )
@@ -267,6 +277,54 @@ def _pick_from_catalog(catalog: list[dict[str, Any]]) -> ForegroundChoice | None
     return None
 
 
+def _try_hivemind_recommend(hivemind_url: str) -> ForegroundChoice | None:
+    """Attempt to resolve the foreground model via
+    ``hivemind.models.recommend@v1``.
+
+    Returns a ForegroundChoice with ``source='hivemind.models.recommend'``
+    when HiveMind returned a sensible recommendation, ``None`` on any
+    failure (missing tool, transport error, empty result). The caller
+    falls back to the hand-rolled catalog pick in either case so the
+    integration is strictly additive — turning HiveMind's recommend
+    tool off cannot break MS4.
+    """
+    try:
+        from machine_spirit_4.gateway import hivemind_tools
+
+        body = hivemind_tools.models_recommend(
+            hivemind_url,
+            workload="foreground_chat_small",
+            constraints={
+                # Mirror what FaceLobeChat actually does: a 4-8B
+                # instruct-tuned model with tool-calling capable enough
+                # to handle our anti-hallucination system prompt.
+                "max_size_b": 8,
+                "min_size_b": 2,
+                "instruct": True,
+                "tool_use": True,
+            },
+        )
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    candidates = body.get("recommended") or body.get("models") or []
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    top = candidates[0] if isinstance(candidates[0], dict) else None
+    if not top:
+        return None
+    model_id = str(top.get("model_id") or top.get("id") or top.get("model") or "")
+    if not model_id:
+        return None
+    reason = str(top.get("reason") or top.get("score") or "")
+    return ForegroundChoice(
+        model_id=model_id,
+        source="hivemind.models.recommend",
+        detail=f"recommend@v1 picked {model_id} ({reason})" if reason else f"recommend@v1 picked {model_id}",
+    )
+
+
 def choose_foreground_model(
     *,
     hivemind_url: str,
@@ -297,21 +355,28 @@ def choose_foreground_model(
             detail=f"MS4_FOREGROUND_MODEL env var set",
         )
     else:
-        try:
-            catalog = _http_get_models(hivemind_url)
-            choice = _pick_from_catalog(catalog)
-            if choice is None:
+        # Pass 1: ask HiveMind directly via hivemind.models.recommend@v1.
+        # Cluster-aware recommendation beats our hand-rolled priority
+        # list when HiveMind has visibility we don't (cold/hot model
+        # state, current load, VRAM headroom). Best-effort — any failure
+        # falls through to the local pick below.
+        choice = _try_hivemind_recommend(hivemind_url)
+        if choice is None:
+            try:
+                catalog = _http_get_models(hivemind_url)
+                choice = _pick_from_catalog(catalog)
+                if choice is None:
+                    choice = ForegroundChoice(
+                        model_id=fallback_model,
+                        source="fallback",
+                        detail="no matching priority pattern in HiveMind catalog",
+                    )
+            except RuntimeError as exc:
                 choice = ForegroundChoice(
                     model_id=fallback_model,
-                    source="fallback",
-                    detail="no matching priority pattern in HiveMind catalog",
+                    source="error",
+                    detail=str(exc),
                 )
-        except RuntimeError as exc:
-            choice = ForegroundChoice(
-                model_id=fallback_model,
-                source="error",
-                detail=str(exc),
-            )
 
     with _CACHE_LOCK:
         _CACHE["choice"] = choice

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import threading
+
+log = logging.getLogger("ms4.gateway.server")
 import time
 import urllib.error
 import urllib.request
@@ -61,6 +64,34 @@ from .hivemind_state import (
     get_combined_snapshot as get_hivemind_snapshot,
     get_service_health,
 )
+from . import (
+    adapter_admin,
+    app_admin,
+    game_admin,
+    gpu_mode_admin,
+    hivemind_tools,
+    human_approval,
+    loadout_admin,
+    network_admin,
+    oracle_admin,
+    storage_admin,
+    training_admin,
+    vm_admin,
+    voice_identity,
+)
+from .adapter_admin import AdapterAdminError
+from .app_admin import AppAdminError
+from .game_admin import GameAdminError
+from .gpu_mode_admin import GpuModeAdminError
+from .hivemind_tools import HivemindToolError
+from .human_approval import HumanApprovalError
+from .loadout_admin import LoadoutAdminError
+from .network_admin import NetworkAdminError
+from .oracle_admin import OracleAdminError
+from .storage_admin import StorageAdminError
+from .training_admin import TrainingAdminError
+from .vm_admin import VmAdminError
+from .voice_identity import VoiceIdentityError
 from .spirit_state import (
     SpiritStateError,
     get_state_snapshot,
@@ -357,6 +388,102 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if self.path == "/hivemind/state":
             self._hivemind_state_get()
             return
+        if self.path.startswith("/voice/recent-turns"):
+            self._voice_recent_turns_get()
+            return
+        # ---- Pure-MCP read routes (no HLI dependency, work even when
+        # the inference gateway is down). Each route returns a stable
+        # UI-friendly snapshot via the per-domain admin module.
+        if self.path == "/hivemind/time":
+            self._hivemind_time_get()
+            return
+        if self.path == "/hivemind/capability_matrix":
+            self._hivemind_capability_matrix_get()
+            return
+        if self.path == "/hivemind/vms":
+            self._hivemind_vms_get()
+            return
+        if self.path.startswith("/hivemind/vms/") and self.path.endswith("/gpus"):
+            self._hivemind_vm_gpus_get(self.path[len("/hivemind/vms/"):-len("/gpus")])
+            return
+        if self.path.startswith("/hivemind/vms/") and self.path.endswith("/screenshot"):
+            self._hivemind_vm_screenshot(self.path[len("/hivemind/vms/"):-len("/screenshot")])
+            return
+        if self.path == "/hivemind/apps":
+            self._hivemind_apps_get()
+            return
+        if self.path.startswith("/hivemind/apps/"):
+            tail = self.path[len("/hivemind/apps/"):]
+            self._hivemind_app_get(tail)
+            return
+        if self.path == "/hivemind/storage":
+            self._hivemind_storage_get()
+            return
+        if self.path == "/hivemind/network":
+            self._hivemind_network_get()
+            return
+        if self.path == "/hivemind/gpu":
+            self._hivemind_gpu_get()
+            return
+        if self.path == "/hivemind/voice_identities":
+            self._hivemind_voice_identities_get()
+            return
+        if self.path.startswith("/hivemind/approval/status/"):
+            request_id = self.path[len("/hivemind/approval/status/"):]
+            self._hivemind_approval_status_get(request_id)
+            return
+        if self.path == "/hivemind/api_keys":
+            self._hivemind_api_keys_get()
+            return
+        if self.path == "/hivemind/ollama/tags":
+            self._hivemind_ollama_tags_get()
+            return
+        if self.path == "/hivemind/crown":
+            self._hivemind_crown_get()
+            return
+        # ---- New admin domains (May 26 2026 expansion) ----
+        if self.path == "/hivemind/oracle/status":
+            self._hivemind_oracle_status_get()
+            return
+        if self.path == "/hivemind/training":
+            self._hivemind_training_get()
+            return
+        if self.path.startswith("/hivemind/training/status/"):
+            job_id = self.path[len("/hivemind/training/status/"):]
+            self._hivemind_training_status_get(job_id)
+            return
+        if self.path == "/hivemind/adapters":
+            self._hivemind_adapters_get()
+            return
+        if self.path == "/hivemind/loadout":
+            self._hivemind_loadout_get()
+            return
+        if self.path == "/hivemind/inference/models":
+            self._hivemind_inference_models_get()
+            return
+        if self.path == "/hivemind/logos/prompts":
+            self._hivemind_logos_prompts_get()
+            return
+        if self.path.startswith("/hivemind/logos/prompts/"):
+            prompt_id = self.path[len("/hivemind/logos/prompts/"):]
+            self._hivemind_logos_prompt_get(prompt_id)
+            return
+        if self.path == "/hivemind/services":
+            self._hivemind_services_list_get()
+            return
+        # ---- Game-session orchestration (May 26 2026 Phase 1 dry-run) ----
+        if self.path.startswith("/hivemind/games/") and self.path.endswith("/availability"):
+            game_id = self.path[len("/hivemind/games/"):-len("/availability")]
+            self._hivemind_game_availability_get(game_id)
+            return
+        if self.path.startswith("/hivemind/game-sessions/") and self.path.endswith("/status"):
+            job_id = self.path[len("/hivemind/game-sessions/"):-len("/status")]
+            self._hivemind_game_session_status_get(job_id)
+            return
+        if self.path.startswith("/hivemind/game-sessions/") and self.path.endswith("/evidence"):
+            job_id = self.path[len("/hivemind/game-sessions/"):-len("/evidence")]
+            self._hivemind_game_session_evidence_get(job_id)
+            return
         if self.path == "/voice/status":
             status, payload = _proxy_json(f"{self.runner.ms3_url}/voice/status", timeout=15)
             _json_response(self, status, payload if isinstance(payload, dict) else {"voice": payload})
@@ -418,6 +545,142 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/spirit/heartbeat":
             self._spirit_heartbeat()
+            return
+        # ---- HiveMind admin POSTs (mutations). Each route is audit-
+        # logged; destructive ones (delete / force_stop / restore)
+        # require body {"confirm": true} to guard against accidental
+        # UI clicks.
+        if self.path.startswith("/hivemind/vms/"):
+            tail = self.path[len("/hivemind/vms/"):]
+            vm_id, _, action = tail.partition("/")
+            if action and self._dispatch_vm_action(vm_id, action):
+                return
+        if self.path.startswith("/hivemind/apps/"):
+            tail = self.path[len("/hivemind/apps/"):]
+            app_id, _, action = tail.partition("/")
+            if action and self._dispatch_app_action(app_id, action):
+                return
+        if self.path == "/hivemind/vms/create_prebuilt":
+            self._hivemind_vm_create_prebuilt()
+            return
+        if self.path == "/hivemind/storage/volumes":
+            self._hivemind_storage_create_volume()
+            return
+        if self.path.startswith("/hivemind/storage/volumes/"):
+            tail = self.path[len("/hivemind/storage/volumes/"):]
+            volume_id, _, action = tail.partition("/")
+            if action and self._dispatch_volume_action(volume_id, action):
+                return
+        if self.path.startswith("/hivemind/storage/snapshots/"):
+            tail = self.path[len("/hivemind/storage/snapshots/"):]
+            snapshot_id, _, action = tail.partition("/")
+            if action and self._dispatch_snapshot_action(snapshot_id, action):
+                return
+        if self.path == "/hivemind/storage/snapshots":
+            self._hivemind_storage_create_snapshot()
+            return
+        if self.path == "/hivemind/network":
+            self._hivemind_network_create()
+            return
+        if self.path.startswith("/hivemind/network/"):
+            tail = self.path[len("/hivemind/network/"):]
+            network_id, _, action = tail.partition("/")
+            if action and self._dispatch_network_action(network_id, action):
+                return
+        if self.path == "/hivemind/gpu/mode":
+            self._hivemind_gpu_set_mode()
+            return
+        if self.path == "/hivemind/gpu/vgpu":
+            self._hivemind_gpu_create_vgpu()
+            return
+        if self.path == "/hivemind/voice_identities/enroll":
+            self._hivemind_voice_identity_enroll()
+            return
+        if self.path.startswith("/hivemind/voice_identities/"):
+            tail = self.path[len("/hivemind/voice_identities/"):]
+            identity_id, _, action = tail.partition("/")
+            if action and self._dispatch_voice_identity_action(identity_id, action):
+                return
+        if self.path == "/hivemind/approval/request":
+            self._hivemind_approval_request()
+            return
+        if self.path == "/hivemind/approval/notify":
+            self._hivemind_approval_notify()
+            return
+        if self.path.startswith("/hivemind/maintenance/"):
+            tail = self.path[len("/hivemind/maintenance/"):]
+            service_name, _, action = tail.partition("/")
+            if action == "enter":
+                self._hivemind_maintenance_enter(service_name)
+                return
+            if action == "clear":
+                self._hivemind_maintenance_clear(service_name)
+                return
+        if self.path == "/hivemind/ollama/control":
+            self._hivemind_ollama_control()
+            return
+        # ---- New admin domains POST (May 26 2026) ----
+        if self.path == "/hivemind/oracle/chat":
+            self._hivemind_oracle_chat()
+            return
+        if self.path == "/hivemind/oracle/configure":
+            self._hivemind_oracle_configure()
+            return
+        if self.path == "/hivemind/training/start":
+            self._hivemind_training_start()
+            return
+        if self.path == "/hivemind/adapters/deploy":
+            self._hivemind_adapter_deploy()
+            return
+        if self.path == "/hivemind/loadout/apply":
+            self._hivemind_loadout_apply()
+            return
+        if self.path == "/hivemind/deploy/gim":
+            self._hivemind_deploy_gim()
+            return
+        if self.path == "/hivemind/inference/chat":
+            self._hivemind_inference_chat()
+            return
+        if self.path == "/hivemind/logos/optimize":
+            self._hivemind_logos_optimize()
+            return
+        if self.path.startswith("/hivemind/logos/prompts/") and self.path.endswith("/fork"):
+            prompt_id = self.path[len("/hivemind/logos/prompts/"):-len("/fork")]
+            self._hivemind_logos_prompt_fork(prompt_id)
+            return
+        if self.path.startswith("/hivemind/logos/candidates/") and self.path.endswith("/promote"):
+            candidate_id = self.path[len("/hivemind/logos/candidates/"):-len("/promote")]
+            self._hivemind_logos_candidate_promote(candidate_id)
+            return
+        if self.path.startswith("/hivemind/services/"):
+            tail = self.path[len("/hivemind/services/"):]
+            svc, _, action = tail.partition("/")
+            if action == "enable":
+                self._hivemind_service_enable(svc)
+                return
+            if action == "disable":
+                self._hivemind_service_disable(svc)
+                return
+            if action == "restart":
+                self._hivemind_service_restart(svc)
+                return
+        if self.path == "/hivemind/jobs/cancel":
+            self._hivemind_jobs_cancel()
+            return
+        # ---- Game-session POST (May 26 2026) ----
+        if self.path == "/hivemind/game-sessions/plan":
+            self._hivemind_game_session_plan()
+            return
+        if self.path == "/hivemind/game-sessions/run":
+            self._hivemind_game_session_run()
+            return
+        if self.path == "/hivemind/game-sessions/plan-run":
+            # Convenience: plan + run + collect evidence in one call.
+            self._hivemind_game_session_plan_run()
+            return
+        if self.path.startswith("/hivemind/game-sessions/") and self.path.endswith("/cancel"):
+            job_id = self.path[len("/hivemind/game-sessions/"):-len("/cancel")]
+            self._hivemind_game_session_cancel(job_id)
             return
         if self.path.startswith("/voice/services/"):
             tail = self.path[len("/voice/services/"):]
@@ -722,12 +985,49 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     emit=emit,
                     client_alive=client_alive,
                 )
+                # Per-turn structured log: everything an operator needs
+                # to debug a slow / wrong / silent turn after the fact.
+                # Written to the audit log (jsonl) so `/audit?limit=N`
+                # and the Settings "Recent voice turns" panel surface
+                # it. Keep the payload small — full per-chunk timings
+                # live in result["metrics"] which we drop here.
+                try:
+                    metrics = (result or {}).get("metrics") or {}
+                    append_event("voice_turn_complete", {
+                        "session_id": (result or {}).get("session_id"),
+                        "transcript": (result or {}).get("transcript", "")[:200],
+                        "reply_text_preview": (result or {}).get("reply_text", "")[:200],
+                        "reply_text_chars": len((result or {}).get("reply_text", "") or ""),
+                        "engine": metrics.get("engine"),
+                        "asr_ms": metrics.get("asr_ms"),
+                        "chat_ms": metrics.get("chat_ms"),
+                        "total_ms": metrics.get("total_ms"),
+                        "first_text_token_ms": metrics.get("first_text_token_ms"),
+                        "first_audio_chunk_ms": metrics.get("first_audio_chunk_ms"),
+                        "audio_chunks": metrics.get("audio_chunks"),
+                        "audio_errors": metrics.get("audio_errors"),
+                        "rest_fallback_used": metrics.get("rest_fallback_used"),
+                        "tts_parallelism_speedup": (metrics.get("tts_parallelism") or {}).get("speedup_ratio"),
+                        "any_held_for_inorder": (metrics.get("tts_parallelism") or {}).get("any_held_for_inorder"),
+                        "max_held_for_inorder_ms": (metrics.get("tts_parallelism") or {}).get("max_held_for_inorder_ms"),
+                        "foreground_model": (result or {}).get("foreground_model"),
+                        "router": (result or {}).get("router"),
+                        "dispatched_job": (result or {}).get("dispatched_job"),
+                        "grounding_source": (result or {}).get("grounding_source"),
+                        "tts_model": (result or {}).get("tts_model"),
+                        "transcription_model": (result or {}).get("transcription_model"),
+                    })
+                except Exception as exc:
+                    log.warning("voice_turn_complete audit log failed: %s", exc)
                 events.put(("done", result))
             except VoiceRequestError as exc:
+                append_event("voice_turn_failed", {"kind": "request_error", "error": str(exc)})
                 events.put(("error", {"error": str(exc)}))
             except VoiceUnavailable as exc:
+                append_event("voice_turn_failed", {"kind": "fail_closed", "error": str(exc)})
                 events.put(("error", {"error": str(exc), "fail_closed": True}))
             except Exception as exc:
+                append_event("voice_turn_failed", {"kind": "exception", "error": str(exc)})
                 events.put(("error", {"error": str(exc)}))
 
         _sse_start(self)
@@ -1257,6 +1557,989 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if snapshot.get("errors"):
             append_event("hivemind_state_partial_failure", {"errors": snapshot["errors"]})
         _json_response(self, 200, snapshot)
+
+    # ------------------------------------------------------------------
+    # /voice/recent-turns — per-turn diagnostics for the Settings UI
+    # ------------------------------------------------------------------
+
+    def _voice_recent_turns_get(self) -> None:
+        """Return the most recent ``voice_turn_complete`` and
+        ``voice_turn_failed`` audit events so the UI can render a
+        per-turn diagnostics panel. Tail-only, newest first."""
+        try:
+            limit = 25
+            if "?" in self.path:
+                qs = self.path.split("?", 1)[1]
+                for part in qs.split("&"):
+                    key, _, value = part.partition("=")
+                    if key == "limit":
+                        try:
+                            limit = max(1, min(200, int(value)))
+                        except ValueError:
+                            limit = 25
+            # Pull a generous slice from the audit log (events are
+            # heterogeneous), then filter to voice events.
+            events = read_events(limit=limit * 8)
+            voice_events = [
+                e for e in events
+                if isinstance(e, dict)
+                and e.get("event") in ("voice_turn_complete", "voice_turn_failed")
+            ]
+            voice_events.reverse()  # newest first
+            _json_response(self, 200, {
+                "schema": "Ms4VoiceRecentTurns.v1",
+                "turns": voice_events[:limit],
+                "limit": limit,
+            })
+        except Exception as exc:
+            _json_response(self, 500, {"error": str(exc)})
+
+    # ------------------------------------------------------------------
+    # HiveMind admin shared error mapping
+    # ------------------------------------------------------------------
+
+    def _emit_admin_error(self, exc: Exception) -> None:
+        """Map any of the HiveMind admin error types to a 502 (transport
+        / cluster) or 500 (programmer error). The UI shows the message
+        as a red banner, so keep it actionable.
+        """
+        if isinstance(exc, (HivemindToolError, VmAdminError, AppAdminError,
+                            StorageAdminError, NetworkAdminError,
+                            GpuModeAdminError, VoiceIdentityError,
+                            HumanApprovalError, OracleAdminError,
+                            TrainingAdminError, AdapterAdminError,
+                            LoadoutAdminError, GameAdminError)):
+            _json_response(self, 502, {"error": str(exc)})
+            return
+        if isinstance(exc, ValueError):
+            _json_response(self, 400, {"error": str(exc)})
+            return
+        _json_response(self, 500, {"error": str(exc)})
+
+    # ------------------------------------------------------------------
+    # /hivemind/time — authoritative cluster time
+    # ------------------------------------------------------------------
+
+    def _hivemind_time_get(self) -> None:
+        try:
+            body = hivemind_tools.time_now(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"raw": body})
+
+    def _hivemind_capability_matrix_get(self) -> None:
+        try:
+            body = hivemind_tools.capability_matrix(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"matrix": body})
+
+    # ------------------------------------------------------------------
+    # /hivemind/vms — VM lifecycle (read + actions)
+    # ------------------------------------------------------------------
+
+    def _hivemind_vms_get(self) -> None:
+        try:
+            snapshot = vm_admin.list_with_gpu_assignments(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snapshot.get("errors"):
+            append_event("hivemind_vms_partial_failure", {"errors": snapshot["errors"]})
+        _json_response(self, 200, snapshot)
+
+    def _hivemind_vm_gpus_get(self, vm_id: str) -> None:
+        try:
+            body = hivemind_tools.vm_gpus(self.runner.hivemind_url, vm_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"gpus": body})
+
+    def _hivemind_vm_screenshot(self, vm_id: str) -> None:
+        try:
+            body = vm_admin.get_screenshot(self.runner.hivemind_url, vm_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"raw": body})
+
+    def _dispatch_vm_action(self, vm_id: str, action: str) -> bool:
+        """Return True if we handled the action; False if the caller
+        should fall through to the 404 default. Body must be JSON
+        (possibly empty); destructive actions require ``confirm: true``.
+        """
+        try:
+            body = _read_json(self) or {}
+            confirm = bool(body.get("confirm"))
+            if action == "start":
+                result = vm_admin.start_vm(self.runner.hivemind_url, vm_id)
+                append_event("hivemind_vm_start", {"vm_id": vm_id})
+            elif action == "stop":
+                result = vm_admin.stop_vm(self.runner.hivemind_url, vm_id)
+                append_event("hivemind_vm_stop", {"vm_id": vm_id})
+            elif action == "force_stop":
+                result = vm_admin.force_stop_vm(self.runner.hivemind_url, vm_id, confirm=confirm)
+                append_event("hivemind_vm_force_stop", {"vm_id": vm_id})
+            elif action == "delete":
+                result = vm_admin.delete_vm(self.runner.hivemind_url, vm_id, confirm=confirm)
+                append_event("hivemind_vm_delete", {"vm_id": vm_id})
+            elif action == "deploy":
+                target_node = body.get("target_node")
+                result = vm_admin.deploy_vm(self.runner.hivemind_url, vm_id, target_node)
+                append_event("hivemind_vm_deploy", {"vm_id": vm_id, "target_node": target_node})
+            elif action == "undeploy":
+                result = vm_admin.undeploy_vm(self.runner.hivemind_url, vm_id)
+                append_event("hivemind_vm_undeploy", {"vm_id": vm_id})
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    def _hivemind_vm_create_prebuilt(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            template = body.pop("template", None)
+            if not template:
+                _json_response(self, 400, {"error": "template is required"})
+                return
+            result = vm_admin.create_prebuilt(self.runner.hivemind_url, str(template), **body)
+            append_event("hivemind_vm_create_prebuilt", {"template": template, "opts": body})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/apps
+    # ------------------------------------------------------------------
+
+    def _hivemind_apps_get(self) -> None:
+        try:
+            snapshot = app_admin.list_with_status_and_metrics(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snapshot.get("errors"):
+            append_event("hivemind_apps_partial_failure", {"errors": snapshot["errors"]})
+        _json_response(self, 200, snapshot)
+
+    def _hivemind_app_get(self, app_id: str) -> None:
+        try:
+            body = app_admin.get_app(self.runner.hivemind_url, app_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body)
+
+    def _dispatch_app_action(self, app_id: str, action: str) -> bool:
+        try:
+            if action == "start":
+                result = app_admin.start_app(self.runner.hivemind_url, app_id)
+                append_event("hivemind_app_start", {"app_id": app_id})
+            elif action == "stop":
+                result = app_admin.stop_app(self.runner.hivemind_url, app_id)
+                append_event("hivemind_app_stop", {"app_id": app_id})
+            elif action == "status":
+                result = app_admin.get_app_status(self.runner.hivemind_url, app_id)
+            elif action == "metrics":
+                result = app_admin.get_app_metrics(self.runner.hivemind_url, app_id)
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    # ------------------------------------------------------------------
+    # /hivemind/storage
+    # ------------------------------------------------------------------
+
+    def _hivemind_storage_get(self) -> None:
+        try:
+            snapshot = storage_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snapshot.get("errors"):
+            append_event("hivemind_storage_partial_failure", {"errors": snapshot["errors"]})
+        _json_response(self, 200, snapshot)
+
+    def _hivemind_storage_create_volume(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            result = storage_admin.create_volume(self.runner.hivemind_url, **body)
+            append_event("hivemind_storage_volume_create", {"opts": body})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _dispatch_volume_action(self, volume_id: str, action: str) -> bool:
+        try:
+            body = _read_json(self) or {}
+            confirm = bool(body.get("confirm"))
+            if action == "delete":
+                result = storage_admin.delete_volume(self.runner.hivemind_url, volume_id, confirm=confirm)
+                append_event("hivemind_storage_volume_delete", {"volume_id": volume_id})
+            elif action == "attach":
+                target = body.get("target")
+                if not target:
+                    _json_response(self, 400, {"error": "target required"})
+                    return True
+                result = storage_admin.attach_volume(self.runner.hivemind_url, volume_id, str(target))
+                append_event("hivemind_storage_volume_attach", {"volume_id": volume_id, "target": target})
+            elif action == "detach":
+                result = storage_admin.detach_volume(self.runner.hivemind_url, volume_id)
+                append_event("hivemind_storage_volume_detach", {"volume_id": volume_id})
+            elif action == "resize":
+                new_size = int(body.get("new_size_bytes") or 0)
+                result = storage_admin.resize_volume(self.runner.hivemind_url, volume_id, new_size)
+                append_event("hivemind_storage_volume_resize", {"volume_id": volume_id, "new_size_bytes": new_size})
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    def _hivemind_storage_create_snapshot(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            volume_id = body.get("volume_id")
+            if not volume_id:
+                _json_response(self, 400, {"error": "volume_id required"})
+                return
+            label = body.get("label")
+            result = storage_admin.create_snapshot(self.runner.hivemind_url, str(volume_id), label)
+            append_event("hivemind_storage_snapshot_create", {"volume_id": volume_id, "label": label})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _dispatch_snapshot_action(self, snapshot_id: str, action: str) -> bool:
+        try:
+            body = _read_json(self) or {}
+            confirm = bool(body.get("confirm"))
+            if action == "delete":
+                result = storage_admin.delete_snapshot(self.runner.hivemind_url, snapshot_id, confirm=confirm)
+                append_event("hivemind_storage_snapshot_delete", {"snapshot_id": snapshot_id})
+            elif action == "restore":
+                result = storage_admin.restore_snapshot(self.runner.hivemind_url, snapshot_id, confirm=confirm)
+                append_event("hivemind_storage_snapshot_restore", {"snapshot_id": snapshot_id})
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    # ------------------------------------------------------------------
+    # /hivemind/network
+    # ------------------------------------------------------------------
+
+    def _hivemind_network_get(self) -> None:
+        try:
+            snapshot = network_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snapshot.get("errors"):
+            append_event("hivemind_network_partial_failure", {"errors": snapshot["errors"]})
+        _json_response(self, 200, snapshot)
+
+    def _hivemind_network_create(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            result = network_admin.create_network(self.runner.hivemind_url, **body)
+            append_event("hivemind_network_create", {"opts": body})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _dispatch_network_action(self, network_id: str, action: str) -> bool:
+        try:
+            body = _read_json(self) or {}
+            confirm = bool(body.get("confirm"))
+            if action == "delete":
+                result = network_admin.delete_network(self.runner.hivemind_url, network_id, confirm=confirm)
+                append_event("hivemind_network_delete", {"network_id": network_id})
+            elif action == "attach":
+                target = body.get("target")
+                if not target:
+                    _json_response(self, 400, {"error": "target required"})
+                    return True
+                result = network_admin.attach(self.runner.hivemind_url, network_id, str(target))
+                append_event("hivemind_network_attach", {"network_id": network_id, "target": target})
+            elif action == "detach":
+                target = body.get("target")
+                if not target:
+                    _json_response(self, 400, {"error": "target required"})
+                    return True
+                result = network_admin.detach(self.runner.hivemind_url, network_id, str(target))
+                append_event("hivemind_network_detach", {"network_id": network_id, "target": target})
+            elif action == "isolate":
+                isolated = bool(body.get("isolated", True))
+                result = network_admin.set_isolation(self.runner.hivemind_url, network_id, isolated)
+                append_event("hivemind_network_isolate", {"network_id": network_id, "isolated": isolated})
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    # ------------------------------------------------------------------
+    # /hivemind/gpu
+    # ------------------------------------------------------------------
+
+    def _hivemind_gpu_get(self) -> None:
+        try:
+            snapshot = gpu_mode_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snapshot.get("errors"):
+            append_event("hivemind_gpu_partial_failure", {"errors": snapshot["errors"]})
+        _json_response(self, 200, snapshot)
+
+    def _hivemind_gpu_set_mode(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            node_id = str(body.get("node_id") or "")
+            gpu_id = str(body.get("gpu_id") or "")
+            mode = str(body.get("mode") or "")
+            if not (node_id and gpu_id and mode):
+                _json_response(self, 400, {"error": "node_id, gpu_id, mode all required"})
+                return
+            result = gpu_mode_admin.set_mode(self.runner.hivemind_url, node_id=node_id, gpu_id=gpu_id, mode=mode)
+            append_event("hivemind_gpu_set_mode", {"node_id": node_id, "gpu_id": gpu_id, "mode": mode})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_gpu_create_vgpu(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            node_id = str(body.get("node_id") or "")
+            gpu_id = str(body.get("gpu_id") or "")
+            profile = str(body.get("profile") or "")
+            if not (node_id and gpu_id and profile):
+                _json_response(self, 400, {"error": "node_id, gpu_id, profile all required"})
+                return
+            result = gpu_mode_admin.create_vgpu(self.runner.hivemind_url, node_id=node_id, gpu_id=gpu_id, profile=profile)
+            append_event("hivemind_gpu_create_vgpu", {"node_id": node_id, "gpu_id": gpu_id, "profile": profile})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/voice_identities
+    # ------------------------------------------------------------------
+
+    def _hivemind_voice_identities_get(self) -> None:
+        try:
+            identities = voice_identity.list_identities(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, {
+            "schema": "Ms4VoiceIdentitiesSnapshot.v1",
+            "identities": identities,
+        })
+
+    def _hivemind_voice_identity_enroll(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            name = str(body.get("name") or "")
+            audio_b64 = body.get("audio_base64") or ""
+            if not name or not audio_b64:
+                _json_response(self, 400, {"error": "name and audio_base64 required"})
+                return
+            import base64 as _b64
+            audio = _b64.b64decode(audio_b64)
+            metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else None
+            result = voice_identity.enroll(
+                self.runner.hivemind_url, name=name, audio=audio, metadata=metadata
+            )
+            append_event("hivemind_voice_identity_enroll", {"name": name, "audio_bytes": len(audio)})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _dispatch_voice_identity_action(self, identity_id: str, action: str) -> bool:
+        try:
+            body = _read_json(self) or {}
+            if action == "delete":
+                result = voice_identity.delete(self.runner.hivemind_url, identity_id)
+                append_event("hivemind_voice_identity_delete", {"identity_id": identity_id})
+            elif action == "refine":
+                audio_b64 = body.get("audio_base64") or ""
+                if not audio_b64:
+                    _json_response(self, 400, {"error": "audio_base64 required"})
+                    return True
+                import base64 as _b64
+                audio = _b64.b64decode(audio_b64)
+                result = voice_identity.refine(self.runner.hivemind_url, identity_id=identity_id, audio=audio)
+                append_event("hivemind_voice_identity_refine", {"identity_id": identity_id, "audio_bytes": len(audio)})
+            else:
+                return False
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return True
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+        return True
+
+    # ------------------------------------------------------------------
+    # /hivemind/approval
+    # ------------------------------------------------------------------
+
+    def _hivemind_approval_request(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            action_id = str(body.get("action_id") or "")
+            summary = str(body.get("summary") or "")
+            if not action_id or not summary:
+                _json_response(self, 400, {"error": "action_id and summary required"})
+                return
+            result = human_approval.request(
+                self.runner.hivemind_url,
+                action_id=action_id,
+                summary=summary,
+                details=body.get("details") if isinstance(body.get("details"), dict) else None,
+                risk_level=str(body.get("risk_level") or "medium"),
+                timeout_secs=int(body.get("timeout_secs") or human_approval.DEFAULT_OVERALL_TIMEOUT_SECS),
+            )
+            append_event("hivemind_approval_request", {"action_id": action_id, "summary": summary[:200]})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_approval_status_get(self, request_id: str) -> None:
+        try:
+            body = human_approval.status(self.runner.hivemind_url, request_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"raw": body})
+
+    def _hivemind_approval_notify(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            channel = str(body.get("channel") or "log")
+            message = str(body.get("message") or "")
+            if not message:
+                _json_response(self, 400, {"error": "message required"})
+                return
+            result = human_approval.notify(
+                self.runner.hivemind_url,
+                channel=channel,
+                message=message,
+                severity=str(body.get("severity") or "info"),
+            )
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/maintenance
+    # ------------------------------------------------------------------
+
+    def _hivemind_maintenance_enter(self, service_name: str) -> None:
+        try:
+            body = _read_json(self) or {}
+            result = hivemind_tools.services_maintenance_enter(
+                self.runner.hivemind_url,
+                service_name=service_name,
+                reason=body.get("reason"),
+                duration_secs=body.get("duration_secs"),
+            )
+            append_event("hivemind_maintenance_enter", {"service_name": service_name, "reason": body.get("reason")})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_maintenance_clear(self, service_name: str) -> None:
+        try:
+            result = hivemind_tools.services_maintenance_clear(self.runner.hivemind_url, service_name)
+            append_event("hivemind_maintenance_clear", {"service_name": service_name})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/api_keys, /hivemind/ollama/*, /hivemind/crown
+    # ------------------------------------------------------------------
+
+    def _hivemind_api_keys_get(self) -> None:
+        try:
+            body = hivemind_tools.api_keys_status(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"raw": body})
+
+    def _hivemind_ollama_tags_get(self) -> None:
+        try:
+            body = hivemind_tools.ollama_tags(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, body if isinstance(body, dict) else {"raw": body})
+
+    def _hivemind_ollama_control(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            action = str(body.get("action") or "")
+            if not action:
+                _json_response(self, 400, {"error": "action required (start|stop|restart)"})
+                return
+            result = hivemind_tools.ollama_service_control(self.runner.hivemind_url, action)
+            append_event("hivemind_ollama_control", {"action": action})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/oracle — planner status / configure / chat
+    # ------------------------------------------------------------------
+
+    def _hivemind_oracle_status_get(self) -> None:
+        try:
+            snap = oracle_admin.status(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, snap)
+
+    def _hivemind_oracle_chat(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            message = str(body.get("message") or "")
+            if not message:
+                _json_response(self, 400, {"error": "message required"})
+                return
+            opts = {k: v for k, v in body.items() if k != "message"}
+            result = oracle_admin.chat(self.runner.hivemind_url, message, **opts)
+            append_event("hivemind_oracle_chat", {"message_preview": message[:200]})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_oracle_configure(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            config = body.get("config") if isinstance(body.get("config"), dict) else None
+            if config is None:
+                _json_response(self, 400, {"error": "config object required"})
+                return
+            result = oracle_admin.configure(self.runner.hivemind_url, config)
+            append_event("hivemind_oracle_configure", {"config_keys": list(config.keys())})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    # ------------------------------------------------------------------
+    # /hivemind/training — fine-tune jobs
+    # ------------------------------------------------------------------
+
+    def _hivemind_training_get(self) -> None:
+        try:
+            snap = training_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snap.get("errors"):
+            append_event("hivemind_training_partial_failure", {"errors": snap["errors"]})
+        _json_response(self, 200, snap)
+
+    def _hivemind_training_status_get(self, job_id: str) -> None:
+        try:
+            result = training_admin.status(self.runner.hivemind_url, job_id=job_id or None)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_training_start(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            recipe = body.get("recipe") if isinstance(body.get("recipe"), dict) else None
+            if not recipe:
+                _json_response(self, 400, {"error": "recipe object required"})
+                return
+            result = training_admin.start_job(self.runner.hivemind_url, recipe)
+            append_event("hivemind_training_start", {"backend": recipe.get("backend"), "model": recipe.get("model")})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    # ------------------------------------------------------------------
+    # /hivemind/adapters
+    # ------------------------------------------------------------------
+
+    def _hivemind_adapters_get(self) -> None:
+        try:
+            snap = adapter_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, snap)
+
+    def _hivemind_adapter_deploy(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            adapter_id = str(body.get("adapter_id") or "")
+            target_model = body.get("target_model")
+            if not adapter_id:
+                _json_response(self, 400, {"error": "adapter_id required"})
+                return
+            result = adapter_admin.deploy(self.runner.hivemind_url, adapter_id, target_model)
+            append_event("hivemind_adapter_deploy", {"adapter_id": adapter_id, "target_model": target_model})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    # ------------------------------------------------------------------
+    # /hivemind/loadout
+    # ------------------------------------------------------------------
+
+    def _hivemind_loadout_get(self) -> None:
+        try:
+            snap = loadout_admin.combined_snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, snap)
+
+    def _hivemind_loadout_apply(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            profile_id = str(body.get("profile_id") or "")
+            if not profile_id:
+                _json_response(self, 400, {"error": "profile_id required"})
+                return
+            result = loadout_admin.apply(self.runner.hivemind_url, profile_id)
+            append_event("hivemind_loadout_apply", {"profile_id": profile_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    # ------------------------------------------------------------------
+    # /hivemind/deploy/gim
+    # ------------------------------------------------------------------
+
+    def _hivemind_deploy_gim(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            gim_name = str(body.get("gim_name") or "")
+            if not gim_name:
+                _json_response(self, 400, {"error": "gim_name required"})
+                return
+            opts = {k: v for k, v in body.items() if k != "gim_name"}
+            result = hivemind_tools.deploy_gim(self.runner.hivemind_url, gim_name=gim_name, **opts)
+            append_event("hivemind_deploy_gim", {"gim_name": gim_name, "opts": opts})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/inference
+    # ------------------------------------------------------------------
+
+    def _hivemind_inference_models_get(self) -> None:
+        try:
+            result = hivemind_tools.inference_models(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"models": result})
+
+    def _hivemind_inference_chat(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            messages = body.get("messages") if isinstance(body.get("messages"), list) else None
+            model = str(body.get("model") or "")
+            if not messages or not model:
+                _json_response(self, 400, {"error": "messages (list) and model (string) required"})
+                return
+            opts = {k: v for k, v in body.items() if k not in ("messages", "model")}
+            result = hivemind_tools.inference_chat(
+                self.runner.hivemind_url, messages=messages, model=model, **opts
+            )
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/logos — prompt optimization
+    # ------------------------------------------------------------------
+
+    def _hivemind_logos_prompts_get(self) -> None:
+        try:
+            result = hivemind_tools.logos_prompts_list(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"prompts": result})
+
+    def _hivemind_logos_prompt_get(self, prompt_id: str) -> None:
+        try:
+            result = hivemind_tools.logos_prompts_get(self.runner.hivemind_url, prompt_id=prompt_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_logos_optimize(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            prompt_id = str(body.get("prompt_id") or "")
+            if not prompt_id:
+                _json_response(self, 400, {"error": "prompt_id required"})
+                return
+            opts = {k: v for k, v in body.items() if k != "prompt_id"}
+            result = hivemind_tools.logos_optimize(self.runner.hivemind_url, prompt_id=prompt_id, **opts)
+            append_event("hivemind_logos_optimize", {"prompt_id": prompt_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_logos_prompt_fork(self, prompt_id: str) -> None:
+        try:
+            body = _read_json(self) or {}
+            opts = body or {}
+            result = hivemind_tools.logos_prompts_fork(self.runner.hivemind_url, prompt_id=prompt_id, **opts)
+            append_event("hivemind_logos_fork", {"prompt_id": prompt_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_logos_candidate_promote(self, candidate_id: str) -> None:
+        try:
+            result = hivemind_tools.logos_candidates_promote(
+                self.runner.hivemind_url, candidate_id=candidate_id
+            )
+            append_event("hivemind_logos_promote", {"candidate_id": candidate_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/services lifecycle (enable / disable / restart / list)
+    # ------------------------------------------------------------------
+
+    def _hivemind_services_list_get(self) -> None:
+        try:
+            result = hivemind_tools.services_list(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"services": result})
+
+    def _hivemind_service_enable(self, service_name: str) -> None:
+        try:
+            result = hivemind_tools.services_enable(self.runner.hivemind_url, service_name=service_name)
+            append_event("hivemind_service_enable", {"service_name": service_name})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_service_disable(self, service_name: str) -> None:
+        try:
+            result = hivemind_tools.services_disable(self.runner.hivemind_url, service_name=service_name)
+            append_event("hivemind_service_disable", {"service_name": service_name})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    def _hivemind_service_restart(self, service_name: str) -> None:
+        try:
+            result = hivemind_tools.services_restart(self.runner.hivemind_url, service_name=service_name)
+            append_event("hivemind_service_restart", {"service_name": service_name})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/jobs/cancel — destructive (resets all active jobs per spec)
+    # ------------------------------------------------------------------
+
+    def _hivemind_jobs_cancel(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            confirm = bool(body.get("confirm"))
+            if not confirm:
+                _json_response(self, 400, {
+                    "error": "jobs.cancel currently resets ALL active inference jobs "
+                             "(per HiveMind spec — per-job cancel is not yet implemented). "
+                             "Pass {\"confirm\": true} to proceed."
+                })
+                return
+            job_id = str(body.get("job_id") or "all")
+            result = hivemind_tools.jobs_cancel(self.runner.hivemind_url, job_id=job_id)
+            append_event("hivemind_jobs_cancel_all", {"job_id_requested": job_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/games + /hivemind/game-sessions — Phase 1 dry-run
+    # orchestration shipped upstream May 26 2026
+    # ------------------------------------------------------------------
+
+    def _hivemind_game_availability_get(self, game_id: str) -> None:
+        try:
+            result = game_admin.ensure_available(self.runner.hivemind_url, game_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_plan(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            game = str(body.get("game") or "")
+            if not game:
+                _json_response(self, 400, {"error": "game required"})
+                return
+            kwargs = {k: v for k, v in body.items() if k != "game"}
+            result = game_admin.plan(self.runner.hivemind_url, game=game, **kwargs)
+            append_event("hivemind_game_session_plan", {
+                "game": game,
+                "client": body.get("client"),
+                "quality": body.get("quality"),
+                "job_id": result.get("job_id") if isinstance(result, dict) else None,
+            })
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_run(self) -> None:
+        try:
+            body = _read_json(self) or {}
+            job_id = str(body.get("job_id") or "")
+            if not job_id:
+                _json_response(self, 400, {"error": "job_id required"})
+                return
+            result = game_admin.run(self.runner.hivemind_url, job_id)
+            append_event("hivemind_game_session_run", {"job_id": job_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_status_get(self, job_id: str) -> None:
+        try:
+            result = game_admin.status(self.runner.hivemind_url, job_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_evidence_get(self, job_id: str) -> None:
+        try:
+            result = game_admin.evidence(self.runner.hivemind_url, job_id)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_cancel(self, job_id: str) -> None:
+        try:
+            result = game_admin.cancel(self.runner.hivemind_url, job_id)
+            append_event("hivemind_game_session_cancel", {"job_id": job_id})
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_game_session_plan_run(self) -> None:
+        """Convenience: plan → run → fetch evidence in one call.
+        Returns ``Ms4GameSession.v1``. Fail-soft per stage."""
+        try:
+            body = _read_json(self) or {}
+            game = str(body.get("game") or "")
+            if not game:
+                _json_response(self, 400, {"error": "game required"})
+                return
+            result = game_admin.plan_run_and_collect(
+                self.runner.hivemind_url,
+                game=game,
+                client=body.get("client"),
+                quality=body.get("quality"),
+                latency=body.get("latency"),
+                duration_hint=body.get("duration_hint"),
+            )
+            append_event("hivemind_game_session_plan_run", {
+                "game": game,
+                "job_id": result.get("job_id"),
+                "errors": result.get("errors", []),
+            })
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    # ------------------------------------------------------------------
+    # Admin error mapping for the new modules
+    # ------------------------------------------------------------------
+
+    def _hivemind_crown_get(self) -> None:
+        """Combined Crown snapshot: status + latest event + signal
+        quality. Useful for the Settings panel even when MS4 doesn't
+        drive Crown itself."""
+        snap: dict[str, Any] = {
+            "schema": "Ms4CrownSnapshot.v1",
+            "status": None,
+            "latest": None,
+            "signal_quality": None,
+            "errors": [],
+        }
+        for key, fn in (
+            ("status", hivemind_tools.crown_status),
+            ("latest", hivemind_tools.crown_latest),
+            ("signal_quality", hivemind_tools.crown_signal_quality),
+        ):
+            try:
+                snap[key] = fn(self.runner.hivemind_url)
+            except HivemindToolError as exc:
+                snap["errors"].append(f"{key}: {exc}")
+        _json_response(self, 200, snap)
 
     def _settings_clear_grounding_cache(self) -> None:
         """Drop every cached grounding entry. Cheap, idempotent. Useful

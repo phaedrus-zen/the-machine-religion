@@ -50,6 +50,79 @@ from . import safety
 log = logging.getLogger("ms4.double_agent.runner")
 
 
+# Short-continuation phrases that should NOT stale an in-flight Depth
+# Lobe job. When the user says one of these, they're asking the
+# background work to keep going / surface its result, not to start a
+# new line of thought.
+#
+# Matching contract:
+#  * lowercased, stripped of trailing punctuation
+#  * exact match against the whole message (so "do it" doesn't also
+#    fire on "do it differently") OR the message starts with the
+#    phrase followed by a connector (please / sir / now / etc).
+#  * length-capped so a long sentence containing "yes" as a word
+#    doesn't accidentally count.
+_CONTINUATION_PHRASES: tuple[str, ...] = (
+    "do that",
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "ok",
+    "okay",
+    "sure",
+    "go ahead",
+    "go on",
+    "continue",
+    "keep going",
+    "please do",
+    "do it",
+    "please continue",
+    "and?",
+    "and then?",
+    "what next",
+    "what's next",
+    "and after",
+    "any update",
+    "any updates",
+    "do you have an update",
+    "any progress",
+    "what's the status",
+    "status update",
+)
+_CONTINUATION_MAX_LEN = 50
+# Words allowed AFTER a continuation phrase without flipping it into
+# a new-direction message. E.g. "yes please", "do it now", "ok thanks".
+_CONTINUATION_TAIL_TOKENS: tuple[str, ...] = (
+    "please", "now", "thanks", "thank you", "sir", "ma'am",
+    "if you can", "if you could", "for me", "go", "do",
+)
+
+
+def _is_short_continuation(message: str) -> bool:
+    """Return True when the message looks like a follow-up that wants
+    in-flight work to keep going, not a new direction."""
+    if not message:
+        return False
+    # Strip trailing punctuation + whitespace and lowercase.
+    text = message.strip().lower().rstrip(".!?,;: \t\n")
+    if not text or len(text) > _CONTINUATION_MAX_LEN:
+        return False
+    for phrase in _CONTINUATION_PHRASES:
+        if text == phrase:
+            return True
+        # "<phrase> please" / "<phrase> now" / etc.
+        if text.startswith(phrase + " "):
+            tail = text[len(phrase) + 1:].strip()
+            if tail in _CONTINUATION_TAIL_TOKENS:
+                return True
+            # Also accept a tail that's itself another continuation
+            # phrase ("yes please continue") — recurse once.
+            if any(tail == p or tail.startswith(p + " ") for p in _CONTINUATION_PHRASES):
+                return True
+    return False
+
+
 class RunnerError(RuntimeError):
     pass
 
@@ -338,6 +411,20 @@ class JobRunner:
             conversation_id,
             user_message_excerpt=user_message_excerpt,
         )
+        # Continuation-aware staling (May 26 2026): when the new user
+        # message is a short continuation ("do that", "yes", "ok",
+        # "go on", "and?"), the user is WAITING for the in-flight
+        # background work — staling those jobs is exactly the wrong
+        # thing. Live evidence: operator hit a turn where a Depth
+        # Lobe job got dispatched, then they said "ok, then do that"
+        # and the dispatched job was killed mid-stream by the
+        # revision bump. Skip the stale step for those phrases.
+        if _is_short_continuation(user_message_excerpt):
+            return {
+                "revision": revision.to_dict(),
+                "marked_stale": [],
+                "continuation_detected": True,
+            }
         stale_ids = self.blackboard.mark_stale_jobs_for_revision(
             conversation_id, revision.revision_id
         )

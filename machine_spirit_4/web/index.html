@@ -70,10 +70,32 @@
     </div>
   </div>
 
+  <div id="approvalBanner" class="banner" role="status" aria-live="polite" style="display:none;">
+    <span class="warn" aria-hidden="true">⚖</span>
+    <div class="text">
+      <strong id="approvalBannerHeadline">Approval requested</strong>
+      <small id="approvalBannerSubline"></small>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="approvalBannerApprove" type="button">Approve</button>
+      <button id="approvalBannerReject" class="secondary" type="button">Reject</button>
+      <button id="approvalBannerDismiss" class="secondary" type="button" title="Hide until next pending check">Dismiss</button>
+    </div>
+  </div>
+
+  <div id="maintenanceBanner" class="banner" role="status" aria-live="polite" style="display:none;">
+    <span class="warn" aria-hidden="true">🛠</span>
+    <div class="text">
+      <strong id="maintenanceBannerHeadline">Cluster in maintenance</strong>
+      <small id="maintenanceBannerSubline"></small>
+    </div>
+  </div>
+
   <section class="grid">
     <div>
       <div class="muted">Model</div>
       <select id="modelSelect"><option value="">Loading models...</option></select>
+      <small class="muted" style="display:block; font-size:10px; margin-top:2px;">Voice turns always use auto-picker (fast).</small>
     </div>
     <div>
       <div class="muted">Session</div>
@@ -155,7 +177,7 @@
       <option value="rest">REST — sentence-chunked parallel POST /v1/audio/speech</option>
       <option value="ws_super">WS_SUPER — streaming WebSocket /v1/text-to-speech/{voice}/stream-input (recommended)</option>
     </select>
-    <p class="muted" style="font-size:11px; margin:4px 0 0;">WS_SUPER cuts first-audio latency ~2× live. REST is the safe fallback.</p>
+    <p class="muted" style="font-size:11px; margin:4px 0 0;">REST is the default — parallel chunks (up to MS4_VOICE_TTS_POOL_SIZE), fastest first-audio in practice. WS_SUPER ships higher-quality voice but is currently ~10× slower on this cluster because its GIM is single-stream and slow to start. Pick WS_SUPER per-turn when you want the quality and can afford the latency.</p>
 
     <h4 style="margin:16px 0 6px;">Voice — TTS voice</h4>
     <select id="settingsTtsVoice" style="width:100%;">
@@ -242,12 +264,107 @@
       <span id="settingsVadState" class="muted" style="font-size:11px; min-width:90px; text-align:right;">disabled</span>
     </div>
 
+    <h4 style="margin:16px 0 6px;">Voice diagnostics (recent turns)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Per-turn structured log of the last <code>/voice/turn/stream</code> calls — model picked, engine used, ASR/chat/first-text/first-audio/total ms, parallel-TTS speedup, audio errors, REST fallback events, router decision, dispatched-job id, grounding source. Each row is also written to the audit log (<code>GET /audit</code>) so you can grep historically.</p>
+    <div id="settingsVoiceTurns" style="font-size:11px; max-height:320px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:4px; background:#0e0f17;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsVoiceTurnsRefresh" class="secondary">Refresh now</button>
+      <span id="settingsVoiceTurnsStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">HiveMind VMs</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Live cluster VMs via <code>hivemind.vm.list@v1</code> + <code>hivemind.vm.gpus@v1</code>. Start / stop / screenshot per VM. Force-stop + Delete require explicit confirmation because they are destructive to running state.</p>
+    <div id="settingsHivemindVms" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindVmsRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindVmsStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Cluster apps</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind-registered apps via <code>hivemind.app.*@v1</code>, joined with status and metrics.</p>
+    <div id="settingsHivemindApps" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindAppsRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindAppsStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Voice identities (multi-speaker awareness)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Enrolled speakers via <code>hivemind.voice_identities.*@v1</code>. When a turn's audio matches an enrolled identity above the confidence threshold, MS4 shows the speaker name on the message bubble.</p>
+    <div id="settingsVoiceIdentities" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center;">
+      <input id="settingsVoiceIdentityName" type="text" placeholder="Speaker name" style="flex:1; min-width:140px;">
+      <button type="button" id="settingsVoiceIdentityEnroll" class="secondary">Enroll (record 5s)</button>
+      <span id="settingsVoiceIdentityStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Storage</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Pools, volumes, snapshots via <code>hivemind.storage.*@v1</code>. Read-only here; create-snapshot is the one mutation exposed (the safest one).</p>
+    <div id="settingsHivemindStorage" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindStorageRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindStorageStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Approval queue (human-in-the-loop)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Pending HiveMind human-approval requests for high-risk actions. Approve / Reject ack flows directly into the cluster.</p>
+    <div id="settingsApprovalQueue" style="font-size:12px;">No pending approvals.</div>
+    <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+      <input id="settingsApprovalRequestId" type="text" placeholder="Request ID to poll" style="flex:1; min-width:200px;">
+      <button type="button" id="settingsApprovalCheck" class="secondary">Check status</button>
+      <span id="settingsApprovalStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
     <h4 style="margin:16px 0 6px;">HiveMind cluster state</h4>
     <p class="muted" style="font-size:11px; margin:4px 0 8px;">Live snapshot from <code>hivemind.jobs.active@v1</code> (everything running on the cluster) + <code>hivemind.cluster.load@v1</code> (admission control / shed signals). The Face Lobe quotes these answers when you ask "what's running?" or "is the cluster busy?".</p>
     <div id="settingsHivemindState" style="font-size:12px;">Loading…</div>
     <div style="display:flex; gap:8px; margin-top:8px;">
       <button type="button" id="settingsHivemindRefresh" class="secondary">Refresh now</button>
       <span id="settingsHivemindStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Game sessions (Phase 1 dry-run)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind's <code>hivemind.game_session.*</code> orchestrator. <strong>Phase 1 is a pure dry-run</strong> — every phase records <code>would_call &lt;hivemind.vm.X@v1&gt;</code> evidence into an in-memory ledger but never invokes a mutating endpoint. Use it now to validate the Plan + state-machine path; when HiveMind ships Phase 2 (real execution) MS4's UI keeps working unchanged.</p>
+    <div style="display:flex; gap:8px; margin-top:4px; align-items:center; flex-wrap:wrap;">
+      <input id="settingsGameId" type="text" placeholder="game id (e.g. cyberpunk-2077)" style="flex:1; min-width:160px;">
+      <button type="button" id="settingsGameAvailBtn" class="secondary">Check availability</button>
+      <button type="button" id="settingsGamePlanRunBtn" class="secondary">Plan + Run (dry-run)</button>
+      <span id="settingsGameStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+    <div id="settingsGameSnapshot" style="margin-top:8px; max-height:360px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:4px; background:#0e0f17; font-size:11px;">
+      <div class="muted" style="padding:8px;">Enter a game id (try <code>cyberpunk-2077</code>) and click Check availability or Plan + Run.</div>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Oracle (planner)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind's reasoning / coordination surface via <code>hivemind.oracle.*</code>. Ask Oracle to plan a task; it sees the whole cluster state. Returns null sections gracefully when Oracle is disabled in the cluster config.</p>
+    <div id="settingsHivemindOracle" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+      <input id="settingsOracleChatInput" type="text" placeholder="Ask Oracle to plan…" style="flex:1; min-width:200px;">
+      <button type="button" id="settingsOracleChatBtn" class="secondary">Ask Oracle</button>
+      <span id="settingsOracleStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Training (LoRA / fine-tune)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind training jobs via <code>hivemind.training.*</code>. Backends list + active job status. Starting a new training requires a recipe object posted to <code>POST /hivemind/training/start</code> (out-of-band from the UI).</p>
+    <div id="settingsHivemindTraining" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindTrainingRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindTrainingStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Adapters (LoRA / PEFT outputs)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Trained adapters available for inference via <code>hivemind.adapters.*</code>. Deploy attaches an adapter to a model runtime.</p>
+    <div id="settingsHivemindAdapters" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindAdaptersRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindAdaptersStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+
+    <h4 style="margin:16px 0 6px;">Loadout (model profiles)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Named profiles that bundle a set of models to load together via <code>hivemind.loadout.*</code>. Applying a loadout asks HiveMind to load/unload models to match (slow — model loads ~5-30s each).</p>
+    <div id="settingsHivemindLoadout" style="font-size:12px;">Loading…</div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="settingsHivemindLoadoutRefresh" class="secondary">Refresh now</button>
+      <span id="settingsHivemindLoadoutStatus" class="muted" style="font-size:11px;"></span>
     </div>
 
     <h4 style="margin:16px 0 6px;">Voice services (HiveMind)</h4>
@@ -463,10 +580,17 @@ function settingsApplyToForm(serverDefaults) {
   // who explicitly want REST can re-select it from the dropdown.
   const serverEngineDefault = serverDefaults?.voice?.tts_engine_default;
   const storedEngine = localStorage.getItem(SETTINGS_LS_KEYS.ttsEngine);
-  if (storedEngine === 'rest' && serverEngineDefault && serverEngineDefault !== 'rest') {
+  // localStorage migration: when the stored engine no longer matches
+  // the server's current default, clear it so the user inherits the
+  // new default. Covers BOTH directions:
+  //  * May 22: rest → ws_super (clear stale 'rest')
+  //  * May 26: ws_super → rest (clear stale 'ws_super')
+  // Users who explicitly want the non-default engine can re-pick it
+  // from the dropdown after the clear.
+  if (storedEngine && serverEngineDefault && storedEngine !== serverEngineDefault) {
     localStorage.removeItem(SETTINGS_LS_KEYS.ttsEngine);
   }
-  engineFirst.textContent = defaultLabel(serverEngineDefault, 'ws_super');
+  engineFirst.textContent = defaultLabel(serverEngineDefault, 'rest');
   // Voice dropdown is populated from server's known list each load.
   settingsTtsVoice.innerHTML = '';
   const voiceDefaultOpt = document.createElement('option');
@@ -1007,6 +1131,19 @@ settingsBtn.addEventListener('click', async () => {
   await refreshSpiritState();
   await refreshHivemindState();
   await refreshDoctrinePanel();
+  // New HiveMind admin panels (May 25-26 2026)
+  await Promise.allSettled([
+    refreshHivemindVms(),
+    refreshHivemindApps(),
+    refreshVoiceIdentities(),
+    refreshHivemindStorage(),
+    refreshApprovalQueue(),
+    refreshVoiceTurns(),
+    refreshHivemindOracle(),
+    refreshHivemindTraining(),
+    refreshHivemindAdapters(),
+    refreshHivemindLoadout(),
+  ]);
   settingsCacheStatus.textContent = '';
   if (typeof settingsDialog.showModal === 'function') settingsDialog.showModal();
 });
@@ -1057,14 +1194,21 @@ function renderHivemindStateBlock(snapshot) {
     lines.push(`shed (peer_over)   = ${shed.peer_overload ?? 0}`);
   }
   const health = snapshot.service_health || {};
-  const healthEntries = Object.keys(health || {});
-  if (healthEntries.length) {
+  // hivemind.service_health@v1 returns a flat object with a mix of
+  // service entries (objects with .healthy) AND metadata fields like
+  // "fresh", "ollama_facade", "polling_model", "validation". Filter
+  // to only entries that look like real service records — an object
+  // with an explicit `healthy` boolean.
+  const serviceEntries = Object.entries(health).filter(
+    ([_name, entry]) => entry && typeof entry === 'object' && typeof entry.healthy === 'boolean',
+  );
+  if (serviceEntries.length) {
     lines.push('');
     lines.push('-- hivemind.service_health@v1 --');
-    const unhealthy = healthEntries.filter(name => health[name] && !health[name].healthy);
-    lines.push(`services           = ${healthEntries.length} total, ${unhealthy.length} unhealthy`);
-    for (const name of unhealthy.slice(0, 6)) {
-      lines.push(`  X ${name}: ${health[name].error || '(no error msg)'}`);
+    const unhealthy = serviceEntries.filter(([_name, entry]) => entry.healthy === false);
+    lines.push(`services           = ${serviceEntries.length} total, ${unhealthy.length} unhealthy`);
+    for (const [name, entry] of unhealthy.slice(0, 6)) {
+      lines.push(`  X ${name}: ${entry.error || entry.detail || entry.last_error || '(no error msg)'}`);
     }
   }
   if (snapshot.errors && snapshot.errors.length) {
@@ -1101,6 +1245,917 @@ async function refreshHivemindState() {
 if (settingsHivemindRefresh) {
   settingsHivemindRefresh.addEventListener('click', refreshHivemindState);
 }
+
+// ----- Game sessions panel (Phase 1 dry-run) -------------------------
+
+const settingsGameId = document.getElementById('settingsGameId');
+const settingsGameAvailBtn = document.getElementById('settingsGameAvailBtn');
+const settingsGamePlanRunBtn = document.getElementById('settingsGamePlanRunBtn');
+const settingsGameStatus = document.getElementById('settingsGameStatus');
+const settingsGameSnapshot = document.getElementById('settingsGameSnapshot');
+
+function setGameStatus(text, kind) {
+  if (!settingsGameStatus) return;
+  settingsGameStatus.textContent = text || '';
+  settingsGameStatus.style.color = kind === 'error' ? '#ef4444' : (kind === 'ok' ? '#22c55e' : '#9999b4');
+}
+
+function renderGameSnapshot(payload, kind) {
+  if (!settingsGameSnapshot) return;
+  settingsGameSnapshot.innerHTML = '';
+  const header = document.createElement('div');
+  header.style.cssText = 'padding:6px; border-bottom:1px solid #22243a; font-size:11px; color:#9999b4;';
+  header.textContent = kind || '';
+  settingsGameSnapshot.appendChild(header);
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0; white-space:pre-wrap; padding:6px; font-size:11px;';
+  pre.textContent = JSON.stringify(payload, null, 2).slice(0, 6000);
+  settingsGameSnapshot.appendChild(pre);
+}
+
+async function checkGameAvailability() {
+  const gameId = (settingsGameId?.value || '').trim();
+  if (!gameId) { setGameStatus('Type a game id.'); return; }
+  setGameStatus(`Checking ${gameId}…`);
+  try {
+    const r = await fetch(`/hivemind/games/${encodeURIComponent(gameId)}/availability`, {cache: 'no-store'});
+    const body = await r.json();
+    renderGameSnapshot(body, `availability for ${gameId} (HTTP ${r.status})`);
+    if (!r.ok) {
+      setGameStatus(`HTTP ${r.status}`, 'error');
+    } else if (body.available) {
+      setGameStatus(`available at ${body.path || body.install_path || '(see snapshot)'}`, 'ok');
+    } else {
+      setGameStatus(`unavailable — see remediation in snapshot`, null);
+    }
+  } catch (exc) {
+    setGameStatus(`availability check failed: ${exc.message || exc}`, 'error');
+  }
+}
+
+async function planAndRunGameSession() {
+  const gameId = (settingsGameId?.value || '').trim();
+  if (!gameId) { setGameStatus('Type a game id.'); return; }
+  settingsGamePlanRunBtn.disabled = true;
+  setGameStatus(`Planning + running dry-run for ${gameId}…`);
+  try {
+    const r = await fetch('/hivemind/game-sessions/plan-run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({game: gameId, client: 'ms4-ui', quality: 'best_available'}),
+    });
+    const body = await r.json();
+    renderGameSnapshot(body, `plan+run for ${gameId} (HTTP ${r.status}, job_id=${body.job_id || 'n/a'})`);
+    if (!r.ok) {
+      setGameStatus(`HTTP ${r.status}`, 'error');
+    } else if (body.errors && body.errors.length) {
+      setGameStatus(`completed with ${body.errors.length} partial failure(s)`, null);
+    } else {
+      setGameStatus(`dry-run complete — job ${body.job_id || '?'}`, 'ok');
+    }
+  } catch (exc) {
+    setGameStatus(`plan+run failed: ${exc.message || exc}`, 'error');
+  } finally {
+    settingsGamePlanRunBtn.disabled = false;
+  }
+}
+
+if (settingsGameAvailBtn) settingsGameAvailBtn.addEventListener('click', checkGameAvailability);
+if (settingsGamePlanRunBtn) settingsGamePlanRunBtn.addEventListener('click', planAndRunGameSession);
+
+// ----- Oracle panel -------------------------------------------------
+
+const settingsHivemindOracle = document.getElementById('settingsHivemindOracle');
+const settingsOracleChatInput = document.getElementById('settingsOracleChatInput');
+const settingsOracleChatBtn = document.getElementById('settingsOracleChatBtn');
+const settingsOracleStatus = document.getElementById('settingsOracleStatus');
+
+async function refreshHivemindOracle() {
+  if (!settingsHivemindOracle) return;
+  settingsHivemindOracle.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/oracle/status', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const data = await r.json();
+    settingsHivemindOracle.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+    pre.textContent = JSON.stringify(data, null, 2).slice(0, 2000);
+    settingsHivemindOracle.appendChild(pre);
+  } catch (exc) {
+    settingsHivemindOracle.textContent = `/hivemind/oracle/status failed: ${exc.message || exc}`;
+  }
+}
+
+async function askOracle() {
+  const message = (settingsOracleChatInput?.value || '').trim();
+  if (!message) {
+    settingsOracleStatus.textContent = 'Type a message first.';
+    return;
+  }
+  settingsOracleChatBtn.disabled = true;
+  settingsOracleStatus.textContent = 'Asking Oracle…';
+  try {
+    const r = await fetch('/hivemind/oracle/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const body = await r.json();
+    const text = body.reply || body.text || body.message || JSON.stringify(body).slice(0, 400);
+    addMessage('assistant', `🔮 Oracle: ${text}`);
+    settingsOracleStatus.textContent = 'OK — reply appended to chat';
+    settingsOracleChatInput.value = '';
+  } catch (exc) {
+    settingsOracleStatus.textContent = `Oracle chat failed: ${exc.message || exc}`;
+  } finally {
+    settingsOracleChatBtn.disabled = false;
+  }
+}
+if (settingsOracleChatBtn) settingsOracleChatBtn.addEventListener('click', askOracle);
+
+// ----- Training panel -----------------------------------------------
+
+const settingsHivemindTraining = document.getElementById('settingsHivemindTraining');
+const settingsHivemindTrainingStatus = document.getElementById('settingsHivemindTrainingStatus');
+const settingsHivemindTrainingRefresh = document.getElementById('settingsHivemindTrainingRefresh');
+
+async function refreshHivemindTraining() {
+  if (!settingsHivemindTraining) return;
+  settingsHivemindTraining.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/training', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const lines = [];
+    const backends = data.backends || [];
+    lines.push(`backends   = ${backends.length}`);
+    for (const b of backends.slice(0, 6)) {
+      const name = b.name || b.id || '?';
+      const supports = (b.supports || []).join(',');
+      lines.push(`  ${name}  ${supports ? '(' + supports + ')' : ''}`);
+    }
+    const status = data.status;
+    if (status && typeof status === 'object') {
+      const jobs = status.jobs || status.active_jobs || [];
+      lines.push(`active jobs = ${Array.isArray(jobs) ? jobs.length : 'n/a'}`);
+      if (Array.isArray(jobs)) {
+        for (const j of jobs.slice(0, 4)) {
+          lines.push(`  ${j.id || j.job_id || '?'}  state=${j.state || '?'}  model=${j.model || '?'}`);
+        }
+      }
+    }
+    if (data.errors && data.errors.length) lines.push(`errors      = ${data.errors.join('; ')}`);
+    settingsHivemindTraining.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+    pre.textContent = lines.join('\n');
+    settingsHivemindTraining.appendChild(pre);
+    if (settingsHivemindTrainingStatus) {
+      settingsHivemindTrainingStatus.textContent = (data.errors && data.errors.length) ? `${data.errors.length} partial` : 'OK';
+    }
+  } catch (exc) {
+    settingsHivemindTraining.textContent = `/hivemind/training failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindTrainingRefresh) settingsHivemindTrainingRefresh.addEventListener('click', refreshHivemindTraining);
+
+// ----- Adapters panel -----------------------------------------------
+
+const settingsHivemindAdapters = document.getElementById('settingsHivemindAdapters');
+const settingsHivemindAdaptersStatus = document.getElementById('settingsHivemindAdaptersStatus');
+const settingsHivemindAdaptersRefresh = document.getElementById('settingsHivemindAdaptersRefresh');
+
+async function deployAdapter(adapterId, targetModel) {
+  if (settingsHivemindAdaptersStatus) settingsHivemindAdaptersStatus.textContent = `deploying ${adapterId}…`;
+  try {
+    const body = {adapter_id: adapterId};
+    if (targetModel) body.target_model = targetModel;
+    const r = await fetch('/hivemind/adapters/deploy', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    if (settingsHivemindAdaptersStatus) settingsHivemindAdaptersStatus.textContent = `deployed ${adapterId}`;
+    await refreshHivemindAdapters();
+  } catch (exc) {
+    if (settingsHivemindAdaptersStatus) settingsHivemindAdaptersStatus.textContent = `deploy failed: ${exc.message || exc}`;
+  }
+}
+
+async function refreshHivemindAdapters() {
+  if (!settingsHivemindAdapters) return;
+  settingsHivemindAdapters.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/adapters', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const adapters = data.adapters || [];
+    settingsHivemindAdapters.innerHTML = '';
+    if (!adapters.length) {
+      const empty = document.createElement('div'); empty.className = 'muted';
+      empty.textContent = 'No adapters available. Train a model via /hivemind/training/start to generate one.';
+      settingsHivemindAdapters.appendChild(empty);
+    } else {
+      adapters.forEach(a => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+        const id = a.id || a.adapter_id || a.name || '?';
+        const nameEl = document.createElement('code'); nameEl.style.minWidth = '160px'; nameEl.textContent = a.name || id;
+        const baseEl = document.createElement('span'); baseEl.className = 'muted'; baseEl.style.fontSize = '11px';
+        baseEl.textContent = a.base_model || a.base || '';
+        row.appendChild(nameEl); row.appendChild(baseEl);
+        const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'secondary';
+        btn.style.cssText = 'margin-left:auto; font-size:11px;'; btn.textContent = 'Deploy';
+        btn.addEventListener('click', () => deployAdapter(id, a.base_model || a.base || null));
+        row.appendChild(btn);
+        settingsHivemindAdapters.appendChild(row);
+      });
+    }
+    if (settingsHivemindAdaptersStatus) settingsHivemindAdaptersStatus.textContent = `${adapters.length} adapter(s)`;
+  } catch (exc) {
+    settingsHivemindAdapters.textContent = `/hivemind/adapters failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindAdaptersRefresh) settingsHivemindAdaptersRefresh.addEventListener('click', refreshHivemindAdapters);
+
+// ----- Loadout panel ------------------------------------------------
+
+const settingsHivemindLoadout = document.getElementById('settingsHivemindLoadout');
+const settingsHivemindLoadoutStatus = document.getElementById('settingsHivemindLoadoutStatus');
+const settingsHivemindLoadoutRefresh = document.getElementById('settingsHivemindLoadoutRefresh');
+
+async function applyLoadout(profileId) {
+  if (!window.confirm(`Apply loadout '${profileId}'? HiveMind will load/unload models to match — this can take 30-60s.`)) return;
+  if (settingsHivemindLoadoutStatus) settingsHivemindLoadoutStatus.textContent = `applying ${profileId}…`;
+  try {
+    const r = await fetch('/hivemind/loadout/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({profile_id: profileId}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    if (settingsHivemindLoadoutStatus) settingsHivemindLoadoutStatus.textContent = `applied ${profileId}`;
+    await refreshHivemindLoadout();
+  } catch (exc) {
+    if (settingsHivemindLoadoutStatus) settingsHivemindLoadoutStatus.textContent = `apply failed: ${exc.message || exc}`;
+  }
+}
+
+async function refreshHivemindLoadout() {
+  if (!settingsHivemindLoadout) return;
+  settingsHivemindLoadout.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/loadout', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const profiles = data.profiles || [];
+    settingsHivemindLoadout.innerHTML = '';
+    if (!profiles.length) {
+      const empty = document.createElement('div'); empty.className = 'muted';
+      empty.textContent = 'No loadout profiles configured on this cluster.';
+      settingsHivemindLoadout.appendChild(empty);
+    } else {
+      profiles.forEach(p => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+        const id = p.id || p.profile_id || p.name || '?';
+        const nameEl = document.createElement('code'); nameEl.style.minWidth = '160px'; nameEl.textContent = p.name || id;
+        const modelsEl = document.createElement('span'); modelsEl.className = 'muted'; modelsEl.style.fontSize = '11px';
+        modelsEl.textContent = (p.models || []).slice(0, 3).join(', ') + ((p.models || []).length > 3 ? '…' : '');
+        if (p.active) {
+          const a = document.createElement('span'); a.className = 'pill';
+          a.style.color = '#22c55e'; a.style.borderColor = '#22c55e';
+          a.textContent = 'active'; row.appendChild(a);
+        }
+        row.appendChild(nameEl); row.appendChild(modelsEl);
+        const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'secondary';
+        btn.style.cssText = 'margin-left:auto; font-size:11px;'; btn.textContent = 'Apply';
+        btn.addEventListener('click', () => applyLoadout(id));
+        row.appendChild(btn);
+        settingsHivemindLoadout.appendChild(row);
+      });
+    }
+    if (settingsHivemindLoadoutStatus) settingsHivemindLoadoutStatus.textContent = `${profiles.length} profile(s)`;
+  } catch (exc) {
+    settingsHivemindLoadout.textContent = `/hivemind/loadout failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindLoadoutRefresh) settingsHivemindLoadoutRefresh.addEventListener('click', refreshHivemindLoadout);
+
+// ----- Voice diagnostics panel --------------------------------------
+//
+// Reads /voice/recent-turns and renders one row per recent voice
+// turn with everything an operator needs to debug a slow / wrong /
+// silent turn after the fact. Color-codes engine + errors + REST
+// fallback events so problems stand out.
+
+const settingsVoiceTurns = document.getElementById('settingsVoiceTurns');
+const settingsVoiceTurnsStatus = document.getElementById('settingsVoiceTurnsStatus');
+const settingsVoiceTurnsRefresh = document.getElementById('settingsVoiceTurnsRefresh');
+
+function fmtMs(v) { return (v == null) ? '?' : `${v}ms`; }
+
+function renderVoiceTurnRow(turn) {
+  const row = document.createElement('div');
+  row.style.cssText = 'padding:6px; border-bottom:1px solid #22243a; display:flex; flex-direction:column; gap:2px;';
+  const data = (turn && turn.data) || turn || {};
+  const evname = turn?.event || 'voice_turn';
+  const failed = evname === 'voice_turn_failed';
+  // Header row: event + transcript preview + total_ms
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;';
+  const evLabel = document.createElement('span');
+  evLabel.className = 'pill';
+  evLabel.style.color = failed ? '#ef4444' : '#22c55e';
+  evLabel.style.borderColor = failed ? '#ef4444' : '#22c55e';
+  evLabel.textContent = failed ? '✗ FAILED' : '✓ done';
+  header.appendChild(evLabel);
+  if (data.engine) {
+    const e = document.createElement('span'); e.className = 'pill'; e.textContent = `engine=${data.engine}`;
+    header.appendChild(e);
+  }
+  if (data.foreground_model && data.foreground_model.model_id) {
+    const m = document.createElement('span'); m.className = 'pill';
+    m.textContent = `face=${data.foreground_model.model_id}`;
+    header.appendChild(m);
+  }
+  if (data.total_ms != null) {
+    const t = document.createElement('span'); t.className = 'pill';
+    t.style.color = data.total_ms > 10000 ? '#eab308' : '#9999b4';
+    t.textContent = `total ${fmtMs(data.total_ms)}`;
+    header.appendChild(t);
+  }
+  if (data.rest_fallback_used) {
+    const f = document.createElement('span'); f.className = 'pill';
+    f.style.color = '#eab308'; f.style.borderColor = '#eab308';
+    f.textContent = 'REST fallback';
+    header.appendChild(f);
+  }
+  if (data.audio_errors) {
+    const ae = document.createElement('span'); ae.className = 'pill';
+    ae.style.color = '#ef4444'; ae.style.borderColor = '#ef4444';
+    ae.textContent = `${data.audio_errors} audio err`;
+    header.appendChild(ae);
+  }
+  if (turn?.timestamp) {
+    const ts = document.createElement('span'); ts.className = 'muted'; ts.style.fontSize = '10px';
+    ts.style.marginLeft = 'auto';
+    ts.textContent = String(turn.timestamp).slice(0, 19).replace('T', ' ');
+    header.appendChild(ts);
+  }
+  row.appendChild(header);
+  // Transcript + reply
+  if (data.transcript) {
+    const t = document.createElement('div'); t.style.color = '#c0c4d0';
+    t.textContent = `🎤 ${data.transcript}`;
+    row.appendChild(t);
+  }
+  if (data.reply_text_preview) {
+    const t = document.createElement('div'); t.style.color = '#9999b4';
+    t.textContent = `↪ ${data.reply_text_preview}${data.reply_text_chars > 200 ? '…' : ''} (${data.reply_text_chars}c)`;
+    row.appendChild(t);
+  }
+  if (data.error) {
+    const t = document.createElement('div'); t.style.color = '#ef4444';
+    t.textContent = `error: ${data.error}`;
+    row.appendChild(t);
+  }
+  // Metric grid
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; font-size:10px; color:#9999b4; margin-top:2px;';
+  const cells = [
+    ['asr', fmtMs(data.asr_ms)],
+    ['chat', fmtMs(data.chat_ms)],
+    ['first text', fmtMs(data.first_text_token_ms)],
+    ['first audio', fmtMs(data.first_audio_chunk_ms)],
+    ['chunks', String(data.audio_chunks ?? '?')],
+    ['parallel ×', data.tts_parallelism_speedup != null ? data.tts_parallelism_speedup.toFixed(2) : '?'],
+    ['max held', fmtMs(data.max_held_for_inorder_ms)],
+    ['router', data.router?.kind || '?'],
+  ];
+  for (const [label, value] of cells) {
+    const c = document.createElement('div');
+    c.innerHTML = `<span style="color:#6b7280;">${label}:</span> ${value}`;
+    grid.appendChild(c);
+  }
+  row.appendChild(grid);
+  if (data.dispatched_job?.job_id) {
+    const j = document.createElement('div'); j.style.fontSize = '10px'; j.style.color = '#94a3b8';
+    j.textContent = `🧠 dispatched ${data.dispatched_job.job_id}`;
+    row.appendChild(j);
+  }
+  if (data.grounding_source) {
+    const g = document.createElement('div'); g.style.fontSize = '10px'; g.style.color = '#94a3b8';
+    g.textContent = `grounding: ${data.grounding_source}`;
+    row.appendChild(g);
+  }
+  return row;
+}
+
+async function refreshVoiceTurns() {
+  if (!settingsVoiceTurns) return;
+  settingsVoiceTurns.textContent = 'Loading…';
+  try {
+    const r = await fetch('/voice/recent-turns?limit=25', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const turns = data.turns || [];
+    settingsVoiceTurns.innerHTML = '';
+    if (!turns.length) {
+      const empty = document.createElement('div'); empty.className = 'muted';
+      empty.style.padding = '8px';
+      empty.textContent = 'No voice turns logged yet. Try a voice turn and refresh.';
+      settingsVoiceTurns.appendChild(empty);
+    } else {
+      for (const t of turns) settingsVoiceTurns.appendChild(renderVoiceTurnRow(t));
+    }
+    if (settingsVoiceTurnsStatus) settingsVoiceTurnsStatus.textContent = `${turns.length} turn(s)`;
+  } catch (exc) {
+    settingsVoiceTurns.textContent = `/voice/recent-turns failed: ${exc.message || exc}`;
+  }
+}
+if (settingsVoiceTurnsRefresh) settingsVoiceTurnsRefresh.addEventListener('click', refreshVoiceTurns);
+
+// ----- HiveMind VMs panel -------------------------------------------
+//
+// Lists VMs with state/CPU/GPU and exposes start/stop/screenshot per
+// VM. force_stop + delete require an extra confirmation prompt
+// because they are destructive to running state — the matching
+// vm_admin.force_stop_vm / delete_vm helpers also enforce
+// confirm=True server-side.
+
+const settingsHivemindVms = document.getElementById('settingsHivemindVms');
+const settingsHivemindVmsStatus = document.getElementById('settingsHivemindVmsStatus');
+const settingsHivemindVmsRefresh = document.getElementById('settingsHivemindVmsRefresh');
+
+function renderVmRow(vm, gpus) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+  const idText = vm.id || vm.vm_id || vm.uuid || '?';
+  const state = vm.state || vm.status || 'unknown';
+  const name = vm.name || idText;
+  const nameEl = document.createElement('code');
+  nameEl.style.cssText = 'min-width:160px;';
+  nameEl.textContent = name;
+  row.appendChild(nameEl);
+  const stateEl = document.createElement('span');
+  stateEl.className = 'pill';
+  stateEl.textContent = state;
+  stateEl.style.color = state === 'running' ? '#22c55e' : '#94a3b8';
+  row.appendChild(stateEl);
+  if (vm.cpus != null) {
+    const cpu = document.createElement('span'); cpu.className = 'pill'; cpu.textContent = `${vm.cpus} cpu`;
+    row.appendChild(cpu);
+  }
+  if (vm.memory_mb != null) {
+    const mem = document.createElement('span'); mem.className = 'pill'; mem.textContent = `${Math.round(vm.memory_mb)} MB`;
+    row.appendChild(mem);
+  }
+  const gpuList = (gpus || []).filter(g => (g.vm_id || g.target) === idText);
+  if (gpuList.length) {
+    const g = document.createElement('span'); g.className = 'pill'; g.textContent = `${gpuList.length} gpu`;
+    row.appendChild(g);
+  }
+  const actions = document.createElement('div');
+  actions.style.cssText = 'margin-left:auto; display:flex; gap:4px;';
+  const mkBtn = (label, cls, action, opts) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = cls; b.textContent = label;
+    b.style.fontSize = '11px';
+    b.addEventListener('click', () => vmAction(idText, action, opts));
+    return b;
+  };
+  if (state === 'running') {
+    actions.appendChild(mkBtn('Stop', 'secondary', 'stop'));
+    actions.appendChild(mkBtn('Force stop', 'secondary', 'force_stop', {confirmText: `Force-stop ${name}? Running VM state will be lost.`}));
+  } else {
+    actions.appendChild(mkBtn('Start', 'secondary', 'start'));
+  }
+  actions.appendChild(mkBtn('Screenshot', 'secondary', 'screenshot'));
+  actions.appendChild(mkBtn('Delete', 'secondary', 'delete', {confirmText: `Delete VM ${name}? This is irreversible.`}));
+  row.appendChild(actions);
+  return row;
+}
+
+async function vmAction(vmId, action, opts) {
+  opts = opts || {};
+  if (opts.confirmText && !window.confirm(opts.confirmText)) return;
+  if (settingsHivemindVmsStatus) settingsHivemindVmsStatus.textContent = `${action} ${vmId}…`;
+  if (action === 'screenshot') {
+    try {
+      const r = await fetch(`/hivemind/vms/${encodeURIComponent(vmId)}/screenshot`, {cache: 'no-store'});
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const body = await r.json();
+      // New shape (Ms4VmScreenshot.v1, May 26 2026): {image_base64, mime_type, metadata}.
+      // Backward-compatible: also accept the legacy {data_base64, format} or
+      // a metadata-only response.
+      const data = body.image_base64
+        || body.data_base64
+        || (body.metadata && (body.metadata.data_base64 || body.metadata.image_base64))
+        || body.base64;
+      const mime = body.mime_type
+        || (body.format ? `image/${body.format}` : null)
+        || (body.metadata && body.metadata.format ? `image/${body.metadata.format}` : 'image/png');
+      if (!data) throw new Error('no screenshot payload');
+      const win = window.open('', '_blank');
+      if (win) {
+        win.document.write(`<title>VM ${vmId} screenshot</title><img src="data:${mime};base64,${data}" style="max-width:100%;">`);
+      }
+      if (settingsHivemindVmsStatus) settingsHivemindVmsStatus.textContent = `screenshot for ${vmId} opened`;
+    } catch (exc) {
+      if (settingsHivemindVmsStatus) settingsHivemindVmsStatus.textContent = `screenshot failed: ${exc.message || exc}`;
+    }
+    return;
+  }
+  try {
+    const body = (action === 'force_stop' || action === 'delete') ? {confirm: true} : {};
+    const r = await fetch(`/hivemind/vms/${encodeURIComponent(vmId)}/${action}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    if (settingsHivemindVmsStatus) settingsHivemindVmsStatus.textContent = `${action} ${vmId} OK`;
+    await refreshHivemindVms();
+  } catch (exc) {
+    if (settingsHivemindVmsStatus) settingsHivemindVmsStatus.textContent = `${action} failed: ${exc.message || exc}`;
+  }
+}
+
+async function refreshHivemindVms() {
+  if (!settingsHivemindVms) return;
+  settingsHivemindVms.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/vms', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    settingsHivemindVms.innerHTML = '';
+    const vms = data.vms || [];
+    const gpus = Array.isArray(data.gpus) ? data.gpus : (data.gpus?.gpus || []);
+    if (!vms.length) {
+      const empty = document.createElement('div'); empty.className = 'muted';
+      empty.textContent = 'No VMs registered in this cluster.';
+      settingsHivemindVms.appendChild(empty);
+    } else {
+      vms.forEach(vm => settingsHivemindVms.appendChild(renderVmRow(vm, gpus)));
+    }
+    if (settingsHivemindVmsStatus) {
+      settingsHivemindVmsStatus.textContent = (data.errors && data.errors.length) ? `${data.errors.length} partial failure(s)` : `${vms.length} VM(s)`;
+    }
+  } catch (exc) {
+    settingsHivemindVms.textContent = `/hivemind/vms failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindVmsRefresh) settingsHivemindVmsRefresh.addEventListener('click', refreshHivemindVms);
+
+// ----- Cluster apps panel -------------------------------------------
+
+const settingsHivemindApps = document.getElementById('settingsHivemindApps');
+const settingsHivemindAppsStatus = document.getElementById('settingsHivemindAppsStatus');
+const settingsHivemindAppsRefresh = document.getElementById('settingsHivemindAppsRefresh');
+
+async function appAction(appId, action) {
+  if (settingsHivemindAppsStatus) settingsHivemindAppsStatus.textContent = `${action} ${appId}…`;
+  try {
+    const r = await fetch(`/hivemind/apps/${encodeURIComponent(appId)}/${action}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    if (settingsHivemindAppsStatus) settingsHivemindAppsStatus.textContent = `${action} ${appId} OK`;
+    await refreshHivemindApps();
+  } catch (exc) {
+    if (settingsHivemindAppsStatus) settingsHivemindAppsStatus.textContent = `${action} failed: ${exc.message || exc}`;
+  }
+}
+
+async function refreshHivemindApps() {
+  if (!settingsHivemindApps) return;
+  settingsHivemindApps.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/apps', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    settingsHivemindApps.innerHTML = '';
+    const apps = data.apps || [];
+    if (!apps.length) {
+      const empty = document.createElement('div'); empty.className = 'muted'; empty.textContent = 'No apps registered.';
+      settingsHivemindApps.appendChild(empty);
+    } else {
+      apps.forEach(entry => {
+        const a = entry.app || {};
+        const id = a.id || a.app_id || a.name || '?';
+        const state = (entry.status && (entry.status.state || entry.status.status)) || a.state || 'unknown';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+        const nameEl = document.createElement('code'); nameEl.style.minWidth = '160px'; nameEl.textContent = a.name || id;
+        const stateEl = document.createElement('span'); stateEl.className = 'pill'; stateEl.textContent = state;
+        stateEl.style.color = state === 'running' ? '#22c55e' : '#94a3b8';
+        row.appendChild(nameEl); row.appendChild(stateEl);
+        const actions = document.createElement('div'); actions.style.cssText = 'margin-left:auto; display:flex; gap:4px;';
+        const mk = (label, action) => {
+          const b = document.createElement('button'); b.type = 'button'; b.className = 'secondary'; b.style.fontSize = '11px';
+          b.textContent = label; b.addEventListener('click', () => appAction(id, action));
+          return b;
+        };
+        actions.appendChild(state === 'running' ? mk('Stop', 'stop') : mk('Start', 'start'));
+        row.appendChild(actions);
+        settingsHivemindApps.appendChild(row);
+      });
+    }
+    if (settingsHivemindAppsStatus) {
+      settingsHivemindAppsStatus.textContent = (data.errors && data.errors.length) ? `${data.errors.length} partial failure(s)` : `${apps.length} app(s)`;
+    }
+  } catch (exc) {
+    settingsHivemindApps.textContent = `/hivemind/apps failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindAppsRefresh) settingsHivemindAppsRefresh.addEventListener('click', refreshHivemindApps);
+
+// ----- Voice identities panel ---------------------------------------
+//
+// Enroll: records 5 s via a temporary MediaRecorder-equivalent
+// AudioContext capture (same pipeline as PTT), encodes WAV, POSTs to
+// /hivemind/voice_identities/enroll. Delete: per-row button.
+// Refresh: every dialog open + after enroll/delete.
+
+const settingsVoiceIdentities = document.getElementById('settingsVoiceIdentities');
+const settingsVoiceIdentityEnroll = document.getElementById('settingsVoiceIdentityEnroll');
+const settingsVoiceIdentityName = document.getElementById('settingsVoiceIdentityName');
+const settingsVoiceIdentityStatus = document.getElementById('settingsVoiceIdentityStatus');
+const VOICE_ENROLL_SECS = 5;
+
+async function refreshVoiceIdentities() {
+  if (!settingsVoiceIdentities) return;
+  settingsVoiceIdentities.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/voice_identities', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    settingsVoiceIdentities.innerHTML = '';
+    const ids = data.identities || [];
+    if (!ids.length) {
+      const empty = document.createElement('div'); empty.className = 'muted';
+      empty.textContent = 'No voice identities enrolled. Type a name and click Enroll.';
+      settingsVoiceIdentities.appendChild(empty);
+    } else {
+      ids.forEach(ident => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+        const nameEl = document.createElement('code'); nameEl.style.minWidth = '160px';
+        nameEl.textContent = ident.name || ident.id || '?';
+        row.appendChild(nameEl);
+        const idEl = document.createElement('span'); idEl.className = 'muted'; idEl.style.fontSize = '11px';
+        idEl.textContent = ident.identity_id || ident.id || '';
+        row.appendChild(idEl);
+        const del = document.createElement('button'); del.type = 'button'; del.className = 'secondary';
+        del.style.cssText = 'margin-left:auto; font-size:11px;'; del.textContent = 'Delete';
+        del.addEventListener('click', () => deleteVoiceIdentity(ident.identity_id || ident.id, ident.name || ''));
+        row.appendChild(del);
+        settingsVoiceIdentities.appendChild(row);
+      });
+    }
+  } catch (exc) {
+    settingsVoiceIdentities.textContent = `/hivemind/voice_identities failed: ${exc.message || exc}`;
+  }
+}
+
+async function deleteVoiceIdentity(identityId, name) {
+  if (!identityId) return;
+  if (!window.confirm(`Delete voice identity ${name || identityId}?`)) return;
+  settingsVoiceIdentityStatus.textContent = `Deleting ${identityId}…`;
+  try {
+    const r = await fetch(`/hivemind/voice_identities/${encodeURIComponent(identityId)}/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    settingsVoiceIdentityStatus.textContent = `Deleted ${identityId}`;
+    await refreshVoiceIdentities();
+  } catch (exc) {
+    settingsVoiceIdentityStatus.textContent = `Delete failed: ${exc.message || exc}`;
+  }
+}
+
+async function enrollVoiceIdentity() {
+  const name = (settingsVoiceIdentityName.value || '').trim();
+  if (!name) {
+    settingsVoiceIdentityStatus.textContent = 'Type a speaker name first.';
+    return;
+  }
+  settingsVoiceIdentityEnroll.disabled = true;
+  settingsVoiceIdentityStatus.textContent = `Recording ${VOICE_ENROLL_SECS}s — speak naturally…`;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+  } catch (exc) {
+    settingsVoiceIdentityStatus.textContent = `mic permission denied: ${exc.message || exc}`;
+    settingsVoiceIdentityEnroll.disabled = false;
+    return;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(proc);
+  const silent = ctx.createGain(); silent.gain.value = 0; proc.connect(silent); silent.connect(ctx.destination);
+  await new Promise(res => setTimeout(res, VOICE_ENROLL_SECS * 1000));
+  proc.disconnect(); src.disconnect();
+  stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+  await ctx.close();
+  settingsVoiceIdentityStatus.textContent = `Encoding + uploading enrollment for "${name}"…`;
+  try {
+    const samples = concatenateFloat32(chunks);
+    const downsampled = downsampleTo(samples, ctx.sampleRate, TARGET_SAMPLE_RATE);
+    const wav = encodeWavBlob(downsampled, TARGET_SAMPLE_RATE);
+    const buf = await wav.arrayBuffer();
+    let bin = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const audio_base64 = btoa(bin);
+    const r = await fetch('/hivemind/voice_identities/enroll', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, audio_base64}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    settingsVoiceIdentityStatus.textContent = `Enrolled "${name}".`;
+    settingsVoiceIdentityName.value = '';
+    await refreshVoiceIdentities();
+  } catch (exc) {
+    settingsVoiceIdentityStatus.textContent = `Enroll failed: ${exc.message || exc}`;
+  } finally {
+    settingsVoiceIdentityEnroll.disabled = false;
+  }
+}
+if (settingsVoiceIdentityEnroll) settingsVoiceIdentityEnroll.addEventListener('click', enrollVoiceIdentity);
+
+// ----- Storage panel ------------------------------------------------
+
+const settingsHivemindStorage = document.getElementById('settingsHivemindStorage');
+const settingsHivemindStorageStatus = document.getElementById('settingsHivemindStorageStatus');
+const settingsHivemindStorageRefresh = document.getElementById('settingsHivemindStorageRefresh');
+
+async function refreshHivemindStorage() {
+  if (!settingsHivemindStorage) return;
+  settingsHivemindStorage.textContent = 'Loading…';
+  try {
+    const r = await fetch('/hivemind/storage', {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const lines = [];
+    if (data.status && typeof data.status === 'object') {
+      lines.push(`status = ${JSON.stringify(data.status).slice(0, 200)}`);
+    }
+    lines.push(`pools     = ${(data.pools || []).length}`);
+    lines.push(`volumes   = ${(data.volumes || []).length}`);
+    lines.push(`snapshots = ${(data.snapshots || []).length}`);
+    if (data.errors && data.errors.length) lines.push(`errors    = ${data.errors.join('; ')}`);
+    settingsHivemindStorage.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+    pre.textContent = lines.join('\n');
+    settingsHivemindStorage.appendChild(pre);
+    if (settingsHivemindStorageStatus) {
+      settingsHivemindStorageStatus.textContent = (data.errors && data.errors.length) ? `${data.errors.length} partial failure(s)` : 'OK';
+    }
+  } catch (exc) {
+    settingsHivemindStorage.textContent = `/hivemind/storage failed: ${exc.message || exc}`;
+  }
+}
+if (settingsHivemindStorageRefresh) settingsHivemindStorageRefresh.addEventListener('click', refreshHivemindStorage);
+
+// ----- Approval queue + top-level banner ----------------------------
+//
+// The approval banner appears whenever a pending approval is known.
+// We don't have a list-pending endpoint on HiveMind yet, so the
+// in-Settings input lets the operator paste a request ID to poll.
+// When MS4-side flows fire approvals (e.g. risky desktop_action), we
+// push the request_id into ``pendingApprovals`` and the banner cycles
+// through them.
+
+const approvalBanner = document.getElementById('approvalBanner');
+const approvalHeadline = document.getElementById('approvalBannerHeadline');
+const approvalSubline = document.getElementById('approvalBannerSubline');
+const approvalApproveBtn = document.getElementById('approvalBannerApprove');
+const approvalRejectBtn = document.getElementById('approvalBannerReject');
+const approvalDismissBtn = document.getElementById('approvalBannerDismiss');
+const settingsApprovalQueue = document.getElementById('settingsApprovalQueue');
+const settingsApprovalRequestId = document.getElementById('settingsApprovalRequestId');
+const settingsApprovalCheck = document.getElementById('settingsApprovalCheck');
+const settingsApprovalStatus = document.getElementById('settingsApprovalStatus');
+
+const pendingApprovals = new Map(); // request_id -> {summary, headline}
+let approvalDismissed = false;
+
+function showApprovalBanner() {
+  if (approvalDismissed || pendingApprovals.size === 0) {
+    approvalBanner.style.display = 'none';
+    return;
+  }
+  const [requestId, info] = pendingApprovals.entries().next().value;
+  approvalHeadline.textContent = info.headline || 'Approval requested';
+  approvalSubline.textContent = `${info.summary || ''} (${requestId})`;
+  approvalBanner.style.display = '';
+  approvalApproveBtn.onclick = () => respondApproval(requestId, 'approve');
+  approvalRejectBtn.onclick = () => respondApproval(requestId, 'reject');
+  approvalDismissBtn.onclick = () => { approvalDismissed = true; approvalBanner.style.display = 'none'; };
+}
+
+async function respondApproval(requestId, decision) {
+  // HiveMind's request -> Telegram/etc. is what actually drives the
+  // decision; we mark our local pendingApprovals as resolved.
+  pendingApprovals.delete(requestId);
+  approvalDismissed = false;
+  showApprovalBanner();
+  await refreshApprovalQueue();
+}
+
+async function checkApprovalStatus(requestId) {
+  if (!requestId) return;
+  settingsApprovalStatus.textContent = `Polling ${requestId}…`;
+  try {
+    const r = await fetch(`/hivemind/approval/status/${encodeURIComponent(requestId)}`, {cache: 'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const body = await r.json();
+    const decision = (body.decision || '').toLowerCase();
+    settingsApprovalStatus.textContent = `${requestId}: ${decision || 'unknown'}`;
+    if (decision === 'pending') {
+      pendingApprovals.set(requestId, {summary: body.summary || '(no summary)', headline: 'Approval pending'});
+    } else {
+      pendingApprovals.delete(requestId);
+    }
+    showApprovalBanner();
+    await refreshApprovalQueue();
+  } catch (exc) {
+    settingsApprovalStatus.textContent = `status check failed: ${exc.message || exc}`;
+  }
+}
+
+async function refreshApprovalQueue() {
+  if (!settingsApprovalQueue) return;
+  if (pendingApprovals.size === 0) {
+    settingsApprovalQueue.textContent = 'No pending approvals.';
+    return;
+  }
+  settingsApprovalQueue.innerHTML = '';
+  for (const [requestId, info] of pendingApprovals.entries()) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:6px; border-bottom:1px solid #22243a;';
+    const idEl = document.createElement('code'); idEl.style.minWidth = '180px'; idEl.textContent = requestId;
+    const summary = document.createElement('span'); summary.style.flex = '1'; summary.textContent = info.summary || '';
+    const recheck = document.createElement('button'); recheck.type = 'button'; recheck.className = 'secondary';
+    recheck.style.fontSize = '11px'; recheck.textContent = 'Re-check';
+    recheck.addEventListener('click', () => checkApprovalStatus(requestId));
+    row.appendChild(idEl); row.appendChild(summary); row.appendChild(recheck);
+    settingsApprovalQueue.appendChild(row);
+  }
+}
+
+if (settingsApprovalCheck) {
+  settingsApprovalCheck.addEventListener('click', () => {
+    const id = (settingsApprovalRequestId.value || '').trim();
+    if (id) checkApprovalStatus(id);
+  });
+}
+
+// ----- Maintenance pill --------------------------------------------
+//
+// When any HiveMind service reports a maintenance window via the
+// /hivemind/state snapshot (service_health entries with maintenance:
+// true), surface a top-level banner so the operator knows why a
+// service might be intentionally degraded.
+
+const maintenanceBanner = document.getElementById('maintenanceBanner');
+const maintenanceHeadline = document.getElementById('maintenanceBannerHeadline');
+const maintenanceSubline = document.getElementById('maintenanceBannerSubline');
+
+function updateMaintenanceBanner(state) {
+  if (!maintenanceBanner) return;
+  const health = (state && state.service_health) || {};
+  const services = Object.keys(health || {}).filter(name => health[name] && health[name].maintenance);
+  if (!services.length) {
+    maintenanceBanner.style.display = 'none';
+    return;
+  }
+  maintenanceHeadline.textContent = `Cluster maintenance: ${services.length} service(s)`;
+  maintenanceSubline.textContent = services.slice(0, 6).map(n => `${n}: ${(health[n].reason) || 'maintenance window'}`).join(' · ');
+  maintenanceBanner.style.display = '';
+}
+
+// Patch renderHivemindStateBlock so it also drives the banner.
+const _origRenderHivemindStateBlock = renderHivemindStateBlock;
+renderHivemindStateBlock = function(snapshot) {
+  _origRenderHivemindStateBlock(snapshot);
+  updateMaintenanceBanner(snapshot);
+};
 
 // Reflex audio toggle + regenerate
 const settingsReflexBargeAck = document.getElementById('settingsReflexBargeAck');
@@ -1839,6 +2894,15 @@ function getPlaybackCtx() {
 // stopped immediately.
 const HALF_CONTEXT_TAIL_MS = 250;
 
+// Lead-time buffer for streaming TTS playback. When a new chunk
+// arrives, we schedule it at max(nextChunkStartTime, currentTime +
+// AUDIO_LEAD_TIME_MS). The lead time means slightly later chunks
+// (~80-120ms network/decode jitter) have a slot waiting, so audio
+// stays continuous instead of having audible gaps between word
+// fragments. Adds ~150ms to first-audio latency but eliminates the
+// "stutter at sentence boundaries" the operator reported live.
+const AUDIO_LEAD_TIME_MS = 150;
+
 function bargeIn(reason, options) {
   const opts = options || {};
   const halfContext = opts.halfContext === true;
@@ -1916,6 +2980,21 @@ function playRandomReflexAck() {
   try { playReflex(choice); } catch (e) { /* never let an ack failure break the turn */ }
 }
 
+// Bridge between turn-start and first-audio: when first audio is
+// taking too long (cold model load, large reply), play a
+// pre-rendered "thinking" reflex so the user hears something natural
+// instead of dead silence. Defaults are tuned so a normal warm
+// turn never hits the bridge (~1s first-audio); only cold/long
+// turns do.
+const THINKING_BRIDGE_DELAY_MS = 1200;
+function playRandomThinkingReflex() {
+  const ids = ['thinking_one_moment', 'thinking_let_me_check', 'thinking_working_on_it'];
+  const eligible = ids.filter(id => reflexBuffers.has(id));
+  if (eligible.length === 0) return false;
+  const choice = eligible[Math.floor(Math.random() * eligible.length)];
+  try { return !!playReflex(choice); } catch (e) { return false; }
+}
+
 function resetPlaybackQueue() {
   // Legacy callers call this at start-of-turn. The new contract is
   // "start-of-turn always barges any prior audio" so route through
@@ -1944,7 +3023,13 @@ async function enqueueAudioChunk(audioB64, mime, turnId) {
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
-    const startAt = Math.max(nextChunkStartTime, ctx.currentTime);
+    // Schedule with a lead-time buffer so jittery chunk arrivals
+    // don't introduce audible gaps between word fragments. If
+    // nextChunkStartTime is already ahead of currentTime + lead,
+    // we honor it (chunks are queueing); otherwise we anchor to
+    // currentTime + lead so the next chunk has room.
+    const leadFloor = ctx.currentTime + (AUDIO_LEAD_TIME_MS / 1000);
+    const startAt = Math.max(nextChunkStartTime, leadFloor);
     source.start(startAt);
     nextChunkStartTime = startAt + audioBuffer.duration;
     // Track start/end times alongside the node so half-context
@@ -2031,6 +3116,14 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
   let transcriptShown = false;
   let firstAudioAt = null;
   const accumulatedDeltas = [];
+  // Schedule a "thinking" reflex if first audio is taking long
+  // enough to feel awkward. Cleared the moment first audio plays
+  // OR the turn aborts.
+  let thinkingBridgeTimer = setTimeout(() => {
+    if (firstAudioAt === null && currentVoiceTurnId === myTurnId) {
+      playRandomThinkingReflex();
+    }
+  }, THINKING_BRIDGE_DELAY_MS);
 
   try {
     const r = await fetch(url, {method: 'POST', body: form, signal: streamController.signal});
@@ -2066,11 +3159,24 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           if (phase === 'transcribing') setVoiceStatus('Transcribing…', null);
           else if (phase === 'thinking') setVoiceStatus('Thinking…', null);
         } else if (eventName === 'transcript') {
-          addMessage('user', `🎤 ${payload.text || ''}`);
+          // Decorate the user bubble with the speaker name when
+          // hivemind.voice_identities.identify@v1 returned a match
+          // above the confidence threshold. We keep the 🎤 marker
+          // so it's still obviously a voice turn.
+          const speaker = payload.speaker;
+          const speakerName = (speaker && speaker.accepted && speaker.name) ? speaker.name : null;
+          const userText = speakerName
+            ? `🎤 ${speakerName}: ${payload.text || ''}`
+            : `🎤 ${payload.text || ''}`;
+          addMessage('user', userText);
           assistantState = createStreamingAssistantMessage();
           assistantState.text = '';
           transcriptShown = true;
-          setVoiceStatus(`Transcribed in ${payload.asr_ms ?? '?'}ms — streaming reply…`, null);
+          const asrLine = `Transcribed in ${payload.asr_ms ?? '?'}ms`;
+          const speakerLine = speakerName
+            ? ` · speaker ${speakerName} (${Math.round((speaker.score || 0) * 100)}%)`
+            : '';
+          setVoiceStatus(`${asrLine}${speakerLine} — streaming reply…`, null);
         } else if (eventName === 'text_delta') {
           if (!assistantState) {
             assistantState = createStreamingAssistantMessage();
@@ -2086,6 +3192,12 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           if (firstAudioAt === null) {
             firstAudioAt = Date.now() - turnStart;
             setVoiceStatus(`First audio in ${firstAudioAt}ms`, 'ok');
+            // Real audio has arrived; cancel the thinking bridge so
+            // it doesn't fire on top of the actual reply.
+            if (thinkingBridgeTimer) {
+              clearTimeout(thinkingBridgeTimer);
+              thinkingBridgeTimer = null;
+            }
           }
           // Pass myTurnId so the chunk is dropped if barge-in already fired.
           await enqueueAudioChunk(payload.audio_base64, payload.audio_mime || 'audio/wav', myTurnId);
@@ -2173,6 +3285,10 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
     // that's already finished, which is harmless but confusing in DevTools.
     if (activeVoiceStreamController === streamController) {
       activeVoiceStreamController = null;
+    }
+    if (thinkingBridgeTimer) {
+      clearTimeout(thinkingBridgeTimer);
+      thinkingBridgeTimer = null;
     }
   }
 }

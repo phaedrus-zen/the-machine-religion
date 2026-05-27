@@ -279,7 +279,14 @@ def test_chat_response_includes_face_lobe_context_block_with_date(tmp_path):
     block = response["face_lobe_context_block"]
     assert block is not None
     assert "THIS TURN DID NOT DISPATCH any background work" in block
-    assert "current local date/time:" in block
+    # The Face Lobe context block prefers HiveMind cluster time when
+    # reachable ("current cluster date/time: ..."), falling back to
+    # "current local date/time: ..." otherwise. Accept either since
+    # this test doesn't gate the cluster reachability.
+    assert (
+        "current local date/time:" in block
+        or "current cluster date/time:" in block
+    )
 
 
 # ----- dispatch_hermes_tool path still uses Hermes -------------------------
