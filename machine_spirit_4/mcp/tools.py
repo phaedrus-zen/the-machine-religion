@@ -589,6 +589,52 @@ def hivemind_services_restart(runtime: Any, arguments: dict[str, Any]) -> Any:
     return _tools.services_restart(runtime.hivemind_url, service_name=require_string(arguments, "service_name"))
 
 
+def hivemind_gpu_passthrough_snapshot(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import gpu_passthrough
+    return gpu_passthrough.snapshot(runtime.hivemind_url)
+
+
+def hivemind_gpu_passthrough_prepare(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import gpu_passthrough
+    gpu_pci_id = require_string(arguments, "gpu_pci_id")
+    desired_mode = require_string(arguments, "desired_mode")
+    if not arguments.get("confirm"):
+        raise ValueError("confirm: true is required")
+    return gpu_passthrough.prepare_mode(
+        runtime.hivemind_url,
+        gpu_pci_id=gpu_pci_id,
+        desired_mode=desired_mode,
+        vm_uuid=arguments.get("vm_uuid"),
+        confirm=True,
+    )
+
+
+def hivemind_gpu_passthrough_vgpu(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import gpu_passthrough
+    gpu_pci_id = require_string(arguments, "gpu_pci_id")
+    profile = require_string(arguments, "profile")
+    if not arguments.get("confirm"):
+        raise ValueError("confirm: true is required")
+    return gpu_passthrough.create_vgpu(
+        runtime.hivemind_url,
+        gpu_pci_id=gpu_pci_id,
+        profile=profile,
+        count=int(arguments.get("count") or 1),
+        confirm=True,
+    )
+
+
+def hivemind_gpu_passthrough_game_stream_vm(runtime: Any, arguments: dict[str, Any]) -> Any:
+    from machine_spirit_4.gateway import gpu_passthrough
+    name = require_string(arguments, "name")
+    if not arguments.get("confirm"):
+        raise ValueError("confirm: true is required")
+    extra = {k: v for k, v in arguments.items() if k not in ("name", "confirm")}
+    return gpu_passthrough.create_game_stream_vm(
+        runtime.hivemind_url, name=name, confirm=True, **extra
+    )
+
+
 def hivemind_game_ensure_available(runtime: Any, arguments: dict[str, Any]) -> Any:
     from machine_spirit_4.gateway import game_admin
     return game_admin.ensure_available(runtime.hivemind_url, require_string(arguments, "game_id"))
@@ -1255,6 +1301,60 @@ def build_tool_registry() -> dict[str, ToolDef]:
             {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
             chat_annotations("MS4 HiveMind game_session cancel"),
             hivemind_game_session_cancel,
+        ),
+        # ----- GPU passthrough workflow (GPU-P / DDA / vGPU) -----
+        ToolDef(
+            "ms4.hivemind.gpu.passthrough.snapshot@v1",
+            "Combined Ms4GpuPassthroughSnapshot.v1: gpu_mode.capabilities + vm.gpus + gpu_mode.vgpu_status + gpu.availability + per-mode (GPU-P / DDA / vGPU) availability/licensing notes. Read-only.",
+            {"type": "object", "properties": {}},
+            read_only_annotations("MS4 HiveMind GPU passthrough snapshot"),
+            hivemind_gpu_passthrough_snapshot,
+        ),
+        ToolDef(
+            "ms4.hivemind.gpu.passthrough.prepare@v1",
+            "Switch a GPU to 'passthrough' (Hyper-V DDA path; works on consumer SKUs for rebind, requires Windows Server license for actual VM attach) or 'vgpu' (NVIDIA vGPU stack). Driver rebind is destructive — dismounts the GPU from the host. Requires confirm:true.",
+            {
+                "type": "object",
+                "required": ["gpu_pci_id", "desired_mode", "confirm"],
+                "properties": {
+                    "gpu_pci_id": {"type": "string", "description": "PCI address, e.g. '0000:01:00.0'"},
+                    "desired_mode": {"type": "string", "enum": ["passthrough", "vgpu"]},
+                    "vm_uuid": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+            },
+            chat_annotations("MS4 HiveMind GPU passthrough prepare"),
+            hivemind_gpu_passthrough_prepare,
+        ),
+        ToolDef(
+            "ms4.hivemind.gpu.passthrough.vgpu@v1",
+            "Create one or more vGPU mediated device (mdev) instances on a GPU. Requires the GPU to already be in 'vgpu' mode (call passthrough.prepare with desired_mode='vgpu' first) and an NVIDIA vGPU license. Requires confirm:true.",
+            {
+                "type": "object",
+                "required": ["gpu_pci_id", "profile", "confirm"],
+                "properties": {
+                    "gpu_pci_id": {"type": "string"},
+                    "profile": {"type": "string", "description": "Profile name under /sys/.../mdev_supported_types/"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 1},
+                    "confirm": {"type": "boolean"},
+                },
+            },
+            chat_annotations("MS4 HiveMind GPU vGPU create"),
+            hivemind_gpu_passthrough_vgpu,
+        ),
+        ToolDef(
+            "ms4.hivemind.gpu.passthrough.game_stream_vm@v1",
+            "Provision a Windows 11 GPU-P (Hyper-V GPU Partitioning) game-streaming VM via hivemind.vm.create_prebuilt(vm_type='windows_game_stream_prebuilt') + vm.deploy. This is the consumer-licensed path — works on Windows 11 + any modern NVIDIA GPU. Requires confirm:true.",
+            {
+                "type": "object",
+                "required": ["name", "confirm"],
+                "properties": {
+                    "name": {"type": "string", "description": "VM name; must match ^[A-Za-z0-9._-]+$"},
+                    "confirm": {"type": "boolean"},
+                },
+            },
+            chat_annotations("MS4 HiveMind GPU-P game stream VM"),
+            hivemind_gpu_passthrough_game_stream_vm,
         ),
     ]
     return {tool.name: tool for tool in tools}

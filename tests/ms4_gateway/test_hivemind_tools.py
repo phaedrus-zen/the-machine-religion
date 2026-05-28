@@ -123,17 +123,18 @@ def hm_url(fake: _FakeMcp) -> str:
     [
         # apps
         ("app_list", "hivemind.app.list@v1", (), {"apps": [{"id": "a1"}]}, {}),
-        ("app_get", "hivemind.app.get@v1", ("a1",), {"id": "a1"}, {"app_id": "a1"}),
-        ("app_start", "hivemind.app.start@v1", ("a1",), {"ok": True}, {"app_id": "a1"}),
-        ("app_stop", "hivemind.app.stop@v1", ("a1",), {"ok": True}, {"app_id": "a1"}),
+        ("app_get", "hivemind.app.get@v1", ("a1",), {"id": "a1"}, {"id": "a1"}),
+        ("app_start", "hivemind.app.start@v1", ("a1",), {"ok": True}, {"id": "a1"}),
+        ("app_stop", "hivemind.app.stop@v1", ("a1",), {"ok": True}, {"id": "a1"}),
         ("apps_discover", "hivemind.apps.discover@v1", (), {"discovered": []}, {}),
-        # vm
+        # vm — live contract keys the VM by ``name`` (not ``vm_id``);
+        # screenshot additionally requires ``width``+``height``.
         ("vm_list", "hivemind.vm.list@v1", (), {"vms": [{"id": "vm-1"}]}, {}),
-        ("vm_start", "hivemind.vm.start@v1", ("vm-1",), {"ok": True}, {"vm_id": "vm-1"}),
-        ("vm_stop", "hivemind.vm.stop@v1", ("vm-1",), {"ok": True}, {"vm_id": "vm-1"}),
-        ("vm_force_stop", "hivemind.vm.force_stop@v1", ("vm-1",), {"ok": True}, {"vm_id": "vm-1"}),
-        ("vm_delete", "hivemind.vm.delete@v1", ("vm-1",), {"ok": True}, {"vm_id": "vm-1"}),
-        ("vm_screenshot", "hivemind.vm.screenshot@v1", ("vm-1",), {"format": "png", "data_base64": "abc"}, {"vm_id": "vm-1"}),
+        ("vm_start", "hivemind.vm.start@v1", ("vm-1",), {"ok": True}, {"name": "vm-1"}),
+        ("vm_stop", "hivemind.vm.stop@v1", ("vm-1",), {"ok": True}, {"name": "vm-1"}),
+        ("vm_force_stop", "hivemind.vm.force_stop@v1", ("vm-1",), {"ok": True}, {"name": "vm-1"}),
+        ("vm_delete", "hivemind.vm.delete@v1", ("vm-1",), {"ok": True}, {"name": "vm-1"}),
+        ("vm_screenshot", "hivemind.vm.screenshot@v1", ("vm-1",), {"format": "png", "data_base64": "abc"}, {"name": "vm-1", "width": 1280, "height": 720}),
         # storage
         ("storage_status", "hivemind.storage.status@v1", (), {"healthy": True}, {}),
         ("storage_pools", "hivemind.storage.pools@v1", (), {"pools": []}, {}),

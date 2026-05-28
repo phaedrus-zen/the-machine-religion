@@ -86,7 +86,13 @@ def list_with_gpu_assignments(hivemind_url: str) -> dict[str, Any]:
     return snapshot
 
 
-def get_screenshot(hivemind_url: str, vm_id: str) -> dict[str, Any]:
+def get_screenshot(
+    hivemind_url: str,
+    vm_id: str,
+    *,
+    width: int = 1280,
+    height: int = 720,
+) -> dict[str, Any]:
     """Capture a VM's display.
 
     The HiveMind MCP gateway (per CHANGELOG entry ``ace3d899``) now
@@ -99,13 +105,21 @@ def get_screenshot(hivemind_url: str, vm_id: str) -> dict[str, Any]:
       MCP-aware clients (Cursor, Claude Desktop) that render images
       natively in the tool reply.
 
+    May-26 2026 cluster contract requires ``{name, width, height}``;
+    MS4's public API keeps ``vm_id`` for backwards compatibility but
+    translates to ``name`` on the wire. Default 1280x720 matches the
+    sensible "give me a thumbnail" use case from the Settings UI.
+
     Returns ``{schema: 'Ms4VmScreenshot.v1', image_base64, mime_type,
-    metadata: {...original JSON...}}``. Falls back to the legacy text-
-    only shape on clusters that don't emit image content yet.
+    metadata: {...original JSON...}}``. Falls back to the legacy
+    text-only shape on clusters that don't emit image content yet.
     """
     try:
         raw = tools.call_tool_with_image(
-            hivemind_url, "hivemind.vm.screenshot@v1", {"vm_id": vm_id}, timeout=30
+            hivemind_url,
+            "hivemind.vm.screenshot@v1",
+            {"name": vm_id, "width": int(width), "height": int(height)},
+            timeout=30,
         )
     except HivemindToolError as exc:
         raise VmAdminError(f"vm.screenshot {vm_id!r} failed: {exc}") from exc
@@ -173,16 +187,32 @@ def delete_vm(hivemind_url: str, vm_id: str, *, confirm: bool) -> dict[str, Any]
         raise VmAdminError(f"vm.delete {vm_id!r} failed: {exc}") from exc
 
 
-def create_prebuilt(hivemind_url: str, template: str, **opts: Any) -> dict[str, Any]:
+def create_prebuilt(
+    hivemind_url: str,
+    vm_type: str,
+    name: str,
+    **opts: Any,
+) -> dict[str, Any]:
+    """``hivemind.vm.create_prebuilt@v1`` — create a VM definition from
+    a prebuilt template. ``vm_type`` is the template id
+    (``windows_game_stream_prebuilt`` for GPU-P game streaming on
+    consumer hardware; ``linux_inference_prebuilt`` etc.); ``name``
+    is the VM name and must match ``^[A-Za-z0-9._-]+$``."""
     try:
-        return tools.vm_create_prebuilt(hivemind_url, template, **opts)
+        return tools.vm_create_prebuilt(hivemind_url, vm_type, name, **opts)
     except HivemindToolError as exc:
-        raise VmAdminError(f"vm.create_prebuilt {template!r} failed: {exc}") from exc
+        raise VmAdminError(
+            f"vm.create_prebuilt {vm_type!r}/{name!r} failed: {exc}"
+        ) from exc
 
 
-def deploy_vm(hivemind_url: str, vm_id: str, target_node: str | None = None) -> dict[str, Any]:
+def deploy_vm(hivemind_url: str, vm_id: str, **opts: Any) -> dict[str, Any]:
+    """``hivemind.vm.deploy@v1`` — register a VM with its hypervisor.
+    Idempotent. The May-26 2026 cluster contract takes only ``name``
+    (passed as ``vm_id`` here for MS4 API consistency); extra ``opts``
+    forward through for forward-compat."""
     try:
-        return tools.vm_deploy(hivemind_url, vm_id, target_node)
+        return tools.vm_deploy(hivemind_url, vm_id, **opts)
     except HivemindToolError as exc:
         raise VmAdminError(f"vm.deploy {vm_id!r} failed: {exc}") from exc
 

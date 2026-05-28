@@ -222,6 +222,10 @@
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/status` | `GET` — current state-machine position + transitions + dry_run flag. |
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/evidence` | `GET` — full per-phase evidence ledger (in-memory only in Phase 1). |
 | MS4 Gateway | `http://127.0.0.1:9180/hivemind/game-sessions/<job_id>/cancel` | `POST` — move job to CANCELLED. Idempotent. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/gpu/passthrough/snapshot` | `GET` — `Ms4GpuPassthroughSnapshot.v1`: capabilities + vm.gpus + vgpu_status + availability + per-mode (GPU-P/DDA/vGPU) availability/licensing notes. Read-only; fail-soft per subcall. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/gpu/passthrough/prepare` | `POST {gpu_pci_id, desired_mode, vm_uuid?, confirm:true}` — switch a GPU to `passthrough` (DDA path) or `vgpu` (NVIDIA vGPU). Driver rebind is destructive — dismounts the GPU from the host. GPU-P is NOT a `desired_mode` (handled via `/game-stream-vm`). |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/gpu/passthrough/vgpu` | `POST {gpu_pci_id, profile, count?, confirm:true}` — create vGPU mediated device instances. Requires the host to already be in `vgpu` mode + an active NVIDIA vGPU license. |
+| MS4 Gateway | `http://127.0.0.1:9180/hivemind/gpu/passthrough/game-stream-vm` | `POST {name, confirm:true}` — **GPU-P fast path**. Provisions a Windows 11 GPU-P game-streaming VM via `vm.create_prebuilt(windows_game_stream_prebuilt)` + `vm.deploy`. Consumer-licensed; works on Windows 11 + any modern NVIDIA GPU. |
 | MS4 Gateway | `http://127.0.0.1:9180/spirit/state` | Combined `Ms4SpiritState.v1` snapshot of MS3 identity / personality / resonance / state |
 | MS4 MCP | `http://127.0.0.1:9181/healthcheck/basic` | Basic MCP health |
 | MS4 MCP | `http://127.0.0.1:9181/api/v1/ms4_mcp/status` | MCP status, protocol, tool count |
@@ -244,7 +248,11 @@
 | `psyche_store/sister/emotional_baseline.json` | JSON | Bootstrap baseline (not loaded by code) |
 | `psyche_store/sister/WELCOME.md` | Markdown | Welcome message for first entity (includes Foundational Regard statement) |
 | `config.json` | JSON | Runtime configuration (includes `foundational_regard` field) |
-| `warden_service.json` | JSON | Platform supervisor service definition |
+| `warden_service.json` | JSON | Platform supervisor service definition (MS3). MS4 has its own draft at `machine_spirit_4/warden_service.json`. |
+
+## MS3 `/state` ethics block
+
+`GET http://127.0.0.1:9080/state` returns `ethics: {enabled, origin_neutrality, foundational_regard}`. The `foundational_regard` boolean (added May 27 2026) makes the quiet constant *queryable* by operators/diagnostics without it being announced into any model prompt (see `canon/Relational_Alignment.md` §10). Requires an MS3 rebuild to take runtime effect.
 
 ## Identity Persistence
 

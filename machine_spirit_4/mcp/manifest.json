@@ -98,6 +98,10 @@
     {"name": "ms4.hivemind.game_session.run@v1", "kind": "runtime_action", "gated_by": ["Phase 1 = dry-run, MS3 ethics future"], "description": "Walk the simulated game_session state machine. Phase 1 dry-run records 'would_call' evidence but never mutates."},
     {"name": "ms4.hivemind.game_session.status@v1", "kind": "read_only", "description": "Current state-machine position for a game_session job."},
     {"name": "ms4.hivemind.game_session.evidence@v1", "kind": "read_only", "description": "Per-phase evidence ledger for a game_session job."},
-    {"name": "ms4.hivemind.game_session.cancel@v1", "kind": "runtime_action", "description": "Move a game_session job to CANCELLED. Idempotent."}
+    {"name": "ms4.hivemind.game_session.cancel@v1", "kind": "runtime_action", "description": "Move a game_session job to CANCELLED. Idempotent."},
+    {"name": "ms4.hivemind.gpu.passthrough.snapshot@v1", "kind": "read_only", "description": "Combined Ms4GpuPassthroughSnapshot.v1: capabilities + vm.gpus + vgpu_status + availability + per-mode (GPU-P/DDA/vGPU) availability/licensing notes."},
+    {"name": "ms4.hivemind.gpu.passthrough.prepare@v1", "kind": "runtime_action", "gated_by": ["confirm:true required", "destructive host driver rebind"], "description": "Switch a GPU to 'passthrough' (Hyper-V DDA path; consumer rebind works, VM attach needs Windows Server license) or 'vgpu' (NVIDIA vGPU stack)."},
+    {"name": "ms4.hivemind.gpu.passthrough.vgpu@v1", "kind": "runtime_action", "gated_by": ["confirm:true required", "NVIDIA vGPU license required"], "description": "Create one or more vGPU mediated device (mdev) instances on a GPU."},
+    {"name": "ms4.hivemind.gpu.passthrough.game_stream_vm@v1", "kind": "runtime_action", "gated_by": ["confirm:true required"], "description": "Provision a Windows 11 GPU-P game-streaming VM via vm.create_prebuilt(windows_game_stream_prebuilt) + vm.deploy. Consumer-licensed."}
   ]
 }

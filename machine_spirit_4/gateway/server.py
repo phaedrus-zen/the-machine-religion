@@ -69,6 +69,7 @@ from . import (
     app_admin,
     game_admin,
     gpu_mode_admin,
+    gpu_passthrough,
     hivemind_tools,
     human_approval,
     loadout_admin,
@@ -83,6 +84,7 @@ from .adapter_admin import AdapterAdminError
 from .app_admin import AppAdminError
 from .game_admin import GameAdminError
 from .gpu_mode_admin import GpuModeAdminError
+from .gpu_passthrough import GpuPassthroughError
 from .hivemind_tools import HivemindToolError
 from .human_approval import HumanApprovalError
 from .loadout_admin import LoadoutAdminError
@@ -425,6 +427,10 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if self.path == "/hivemind/gpu":
             self._hivemind_gpu_get()
             return
+        # ---- GPU passthrough workflow (May 27 2026: GPU-P / DDA / vGPU) ----
+        if self.path == "/hivemind/gpu/passthrough/snapshot":
+            self._hivemind_gpu_passthrough_snapshot()
+            return
         if self.path == "/hivemind/voice_identities":
             self._hivemind_voice_identities_get()
             return
@@ -592,6 +598,16 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/hivemind/gpu/vgpu":
             self._hivemind_gpu_create_vgpu()
+            return
+        # ---- GPU passthrough workflow (May 27 2026: GPU-P / DDA / vGPU) ----
+        if self.path == "/hivemind/gpu/passthrough/prepare":
+            self._hivemind_gpu_passthrough_prepare()
+            return
+        if self.path == "/hivemind/gpu/passthrough/vgpu":
+            self._hivemind_gpu_passthrough_vgpu()
+            return
+        if self.path == "/hivemind/gpu/passthrough/game-stream-vm":
+            self._hivemind_gpu_passthrough_game_stream_vm()
             return
         if self.path == "/hivemind/voice_identities/enroll":
             self._hivemind_voice_identity_enroll()
@@ -1608,7 +1624,8 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                             GpuModeAdminError, VoiceIdentityError,
                             HumanApprovalError, OracleAdminError,
                             TrainingAdminError, AdapterAdminError,
-                            LoadoutAdminError, GameAdminError)):
+                            LoadoutAdminError, GameAdminError,
+                            GpuPassthroughError)):
             _json_response(self, 502, {"error": str(exc)})
             return
         if isinstance(exc, ValueError):
@@ -1651,16 +1668,53 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         _json_response(self, 200, snapshot)
 
     def _hivemind_vm_gpus_get(self, vm_id: str) -> None:
+        """``hivemind.vm.gpus@v1`` is cluster-wide (no per-VM filter
+        per May-26 2026 contract). We still expose this per-VM route
+        for UI ergonomics — filter client-side after fetching the
+        full list.
+        """
         try:
-            body = hivemind_tools.vm_gpus(self.runner.hivemind_url, vm_id)
+            raw = hivemind_tools.vm_gpus(self.runner.hivemind_url)
         except Exception as exc:
             self._emit_admin_error(exc)
             return
-        _json_response(self, 200, body if isinstance(body, dict) else {"gpus": body})
+        items = []
+        if isinstance(raw, dict):
+            for key in ("gpus", "data", "items"):
+                if isinstance(raw.get(key), list):
+                    items = raw[key]
+                    break
+        elif isinstance(raw, list):
+            items = raw
+        filtered = [g for g in items if isinstance(g, dict) and (
+            g.get("vm") == vm_id or g.get("vm_name") == vm_id or g.get("assigned_to") == vm_id
+        )]
+        _json_response(self, 200, {"vm_id": vm_id, "gpus": filtered, "all_gpus": items})
 
     def _hivemind_vm_screenshot(self, vm_id: str) -> None:
+        """``GET /hivemind/vms/<id>/screenshot?width=1280&height=720`` —
+        optional width/height query string (defaults to 1280x720 per
+        the May-26 2026 cluster contract requirement)."""
         try:
-            body = vm_admin.get_screenshot(self.runner.hivemind_url, vm_id)
+            width = 1280
+            height = 720
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            if qs:
+                import urllib.parse
+                params = urllib.parse.parse_qs(qs)
+                if "width" in params:
+                    try:
+                        width = max(64, min(7680, int(params["width"][0])))
+                    except ValueError:
+                        pass
+                if "height" in params:
+                    try:
+                        height = max(64, min(4320, int(params["height"][0])))
+                    except ValueError:
+                        pass
+            body = vm_admin.get_screenshot(
+                self.runner.hivemind_url, vm_id, width=width, height=height
+            )
         except Exception as exc:
             self._emit_admin_error(exc)
             return
@@ -1687,9 +1741,12 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 result = vm_admin.delete_vm(self.runner.hivemind_url, vm_id, confirm=confirm)
                 append_event("hivemind_vm_delete", {"vm_id": vm_id})
             elif action == "deploy":
-                target_node = body.get("target_node")
-                result = vm_admin.deploy_vm(self.runner.hivemind_url, vm_id, target_node)
-                append_event("hivemind_vm_deploy", {"vm_id": vm_id, "target_node": target_node})
+                # Live HiveMind contract only takes ``name``; ``target_node``
+                # is forwarded as a forward-compat opt (cluster ignores
+                # unknown fields today).
+                deploy_opts = {k: v for k, v in body.items() if k != "confirm"}
+                result = vm_admin.deploy_vm(self.runner.hivemind_url, vm_id, **deploy_opts)
+                append_event("hivemind_vm_deploy", {"vm_id": vm_id, "opts": deploy_opts})
             elif action == "undeploy":
                 result = vm_admin.undeploy_vm(self.runner.hivemind_url, vm_id)
                 append_event("hivemind_vm_undeploy", {"vm_id": vm_id})
@@ -1702,14 +1759,28 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         return True
 
     def _hivemind_vm_create_prebuilt(self) -> None:
+        """``POST /hivemind/vms/create_prebuilt`` — body must include
+        ``vm_type`` (template id) and ``name``. Accepts legacy
+        ``template`` key as an alias for ``vm_type`` so older
+        clients keep working."""
         try:
             body = _read_json(self) or {}
-            template = body.pop("template", None)
-            if not template:
-                _json_response(self, 400, {"error": "template is required"})
+            # Backwards-compat: pre-May-26 clients sent {template, ...}.
+            vm_type = body.pop("vm_type", None) or body.pop("template", None)
+            name = body.pop("name", None)
+            if not vm_type:
+                _json_response(self, 400, {"error": "vm_type is required"})
                 return
-            result = vm_admin.create_prebuilt(self.runner.hivemind_url, str(template), **body)
-            append_event("hivemind_vm_create_prebuilt", {"template": template, "opts": body})
+            if not name:
+                _json_response(self, 400, {"error": "name is required"})
+                return
+            result = vm_admin.create_prebuilt(
+                self.runner.hivemind_url, str(vm_type), str(name), **body
+            )
+            append_event(
+                "hivemind_vm_create_prebuilt",
+                {"vm_type": vm_type, "name": name, "opts": body},
+            )
         except Exception as exc:
             self._emit_admin_error(exc)
             return
@@ -1915,36 +1986,214 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         _json_response(self, 200, snapshot)
 
     def _hivemind_gpu_set_mode(self) -> None:
+        """``POST /hivemind/gpu/mode`` — body
+        ``{gpu_pci_id, desired_mode, vm_uuid?}``. ``desired_mode``
+        must be ``'vgpu'`` or ``'passthrough'`` per the live cluster
+        contract. Accepts legacy ``{node_id, gpu_id, mode}`` keys for
+        backwards compat — ``gpu_id`` is mapped to ``gpu_pci_id`` and
+        ``mode`` is mapped to ``desired_mode``."""
         try:
             body = _read_json(self) or {}
-            node_id = str(body.get("node_id") or "")
-            gpu_id = str(body.get("gpu_id") or "")
-            mode = str(body.get("mode") or "")
-            if not (node_id and gpu_id and mode):
-                _json_response(self, 400, {"error": "node_id, gpu_id, mode all required"})
+            gpu_pci_id = str(
+                body.get("gpu_pci_id") or body.get("gpu_id") or ""
+            )
+            desired_mode = str(
+                body.get("desired_mode") or body.get("mode") or ""
+            )
+            vm_uuid = body.get("vm_uuid")
+            if not (gpu_pci_id and desired_mode):
+                _json_response(
+                    self,
+                    400,
+                    {"error": "gpu_pci_id and desired_mode are required"},
+                )
                 return
-            result = gpu_mode_admin.set_mode(self.runner.hivemind_url, node_id=node_id, gpu_id=gpu_id, mode=mode)
-            append_event("hivemind_gpu_set_mode", {"node_id": node_id, "gpu_id": gpu_id, "mode": mode})
+            if desired_mode not in ("vgpu", "passthrough"):
+                _json_response(
+                    self,
+                    400,
+                    {
+                        "error": "desired_mode must be 'vgpu' or 'passthrough'",
+                        "note": "GPU-P (Hyper-V GPU Partitioning) is NOT a gpu_mode; use POST /hivemind/gpu/passthrough/game-stream-vm instead.",
+                    },
+                )
+                return
+            result = gpu_mode_admin.set_mode(
+                self.runner.hivemind_url,
+                gpu_pci_id=gpu_pci_id,
+                desired_mode=desired_mode,
+                vm_uuid=vm_uuid,
+            )
+            append_event(
+                "hivemind_gpu_set_mode",
+                {
+                    "gpu_pci_id": gpu_pci_id,
+                    "desired_mode": desired_mode,
+                    "vm_uuid": vm_uuid,
+                },
+            )
         except Exception as exc:
             self._emit_admin_error(exc)
             return
         _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
 
     def _hivemind_gpu_create_vgpu(self) -> None:
+        """``POST /hivemind/gpu/vgpu`` — body
+        ``{gpu_pci_id, profile, count?}``. Accepts legacy
+        ``{node_id, gpu_id, profile}`` keys for backwards compat —
+        ``gpu_id`` is mapped to ``gpu_pci_id``."""
         try:
             body = _read_json(self) or {}
-            node_id = str(body.get("node_id") or "")
-            gpu_id = str(body.get("gpu_id") or "")
+            gpu_pci_id = str(
+                body.get("gpu_pci_id") or body.get("gpu_id") or ""
+            )
             profile = str(body.get("profile") or "")
-            if not (node_id and gpu_id and profile):
-                _json_response(self, 400, {"error": "node_id, gpu_id, profile all required"})
+            count = int(body.get("count") or 1)
+            if not (gpu_pci_id and profile):
+                _json_response(
+                    self,
+                    400,
+                    {"error": "gpu_pci_id and profile are required"},
+                )
                 return
-            result = gpu_mode_admin.create_vgpu(self.runner.hivemind_url, node_id=node_id, gpu_id=gpu_id, profile=profile)
-            append_event("hivemind_gpu_create_vgpu", {"node_id": node_id, "gpu_id": gpu_id, "profile": profile})
+            result = gpu_mode_admin.create_vgpu(
+                self.runner.hivemind_url,
+                gpu_pci_id=gpu_pci_id,
+                profile=profile,
+                count=count,
+            )
+            append_event(
+                "hivemind_gpu_create_vgpu",
+                {"gpu_pci_id": gpu_pci_id, "profile": profile, "count": count},
+            )
         except Exception as exc:
             self._emit_admin_error(exc)
             return
         _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
+
+    # ------------------------------------------------------------------
+    # /hivemind/gpu/passthrough — GPU-P / DDA / vGPU workflow
+    # (May 27 2026: GPU-P is the active path on consumer hardware;
+    # DDA wiring is complete so it lights up when WS license arrives)
+    # ------------------------------------------------------------------
+
+    def _hivemind_gpu_passthrough_snapshot(self) -> None:
+        try:
+            snap = gpu_passthrough.snapshot(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snap.get("errors"):
+            append_event(
+                "hivemind_gpu_passthrough_partial_failure",
+                {"errors": snap["errors"]},
+            )
+        _json_response(self, 200, snap)
+
+    def _hivemind_gpu_passthrough_prepare(self) -> None:
+        """``POST /hivemind/gpu/passthrough/prepare`` — switch a GPU
+        to ``passthrough`` (DDA path) or ``vgpu`` mode. Requires
+        ``{gpu_pci_id, desired_mode, confirm:true}``."""
+        try:
+            body = _read_json(self) or {}
+            gpu_pci_id = str(body.get("gpu_pci_id") or "")
+            desired_mode = str(body.get("desired_mode") or "")
+            vm_uuid = body.get("vm_uuid")
+            confirm = bool(body.get("confirm"))
+            if not gpu_pci_id:
+                _json_response(self, 400, {"error": "gpu_pci_id is required"})
+                return
+            if desired_mode not in ("passthrough", "vgpu"):
+                _json_response(
+                    self,
+                    400,
+                    {
+                        "error": "desired_mode must be 'passthrough' or 'vgpu'",
+                        "note": "GPU-P is not a gpu_mode; use POST /hivemind/gpu/passthrough/game-stream-vm",
+                    },
+                )
+                return
+            if not confirm:
+                _json_response(self, 400, {"error": "confirm: true is required (driver rebind dismounts the GPU)"})
+                return
+            result = gpu_passthrough.prepare_mode(
+                self.runner.hivemind_url,
+                gpu_pci_id=gpu_pci_id,
+                desired_mode=desired_mode,
+                vm_uuid=vm_uuid,
+                confirm=True,
+            )
+            append_event(
+                "hivemind_gpu_passthrough_prepare",
+                {
+                    "gpu_pci_id": gpu_pci_id,
+                    "desired_mode": desired_mode,
+                    "vm_uuid": vm_uuid,
+                    "intent": result.get("intent"),
+                },
+            )
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_gpu_passthrough_vgpu(self) -> None:
+        """``POST /hivemind/gpu/passthrough/vgpu`` — create vGPU
+        mediated devices. Requires ``{gpu_pci_id, profile, confirm:true}``."""
+        try:
+            body = _read_json(self) or {}
+            gpu_pci_id = str(body.get("gpu_pci_id") or "")
+            profile = str(body.get("profile") or "")
+            count = int(body.get("count") or 1)
+            confirm = bool(body.get("confirm"))
+            if not gpu_pci_id or not profile:
+                _json_response(self, 400, {"error": "gpu_pci_id and profile are required"})
+                return
+            if not confirm:
+                _json_response(self, 400, {"error": "confirm: true is required"})
+                return
+            result = gpu_passthrough.create_vgpu(
+                self.runner.hivemind_url,
+                gpu_pci_id=gpu_pci_id,
+                profile=profile,
+                count=count,
+                confirm=True,
+            )
+            append_event(
+                "hivemind_gpu_passthrough_vgpu_create",
+                {"gpu_pci_id": gpu_pci_id, "profile": profile, "count": count},
+            )
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
+
+    def _hivemind_gpu_passthrough_game_stream_vm(self) -> None:
+        """``POST /hivemind/gpu/passthrough/game-stream-vm`` —
+        provision a Windows 11 GPU-P game-streaming VM. Requires
+        ``{name, confirm:true}``."""
+        try:
+            body = _read_json(self) or {}
+            name = str(body.get("name") or "")
+            confirm = bool(body.get("confirm"))
+            if not name:
+                _json_response(self, 400, {"error": "name is required (must match ^[A-Za-z0-9._-]+$)"})
+                return
+            if not confirm:
+                _json_response(self, 400, {"error": "confirm: true is required (new VM consumes host resources)"})
+                return
+            extra = {k: v for k, v in body.items() if k not in ("name", "confirm")}
+            result = gpu_passthrough.create_game_stream_vm(
+                self.runner.hivemind_url, name=name, confirm=True, **extra
+            )
+            append_event(
+                "hivemind_gpu_passthrough_game_stream_vm",
+                {"name": name, "opts": extra, "errors": result.get("errors", [])},
+            )
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        _json_response(self, 200, result)
 
     # ------------------------------------------------------------------
     # /hivemind/voice_identities

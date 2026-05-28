@@ -132,10 +132,11 @@ def test_registry_has_initial_v1_tool_count():
     # Original v1: 27. May-25 2026 HiveMind expansion: +16 hivemind.*
     # proxy tools. May-26 PsyKyo bridge expansion: +5 typed wrappers.
     # May-26 fill-all-gaps round: +17 admin proxies. May-26 game-
-    # session round: +6 game/game_session proxies. Bump when adding /
-    # removing tools.
+    # session round: +6 game/game_session proxies. May-27 GPU
+    # passthrough round: +4 hivemind.gpu.passthrough.* proxies. Bump
+    # when adding / removing tools.
     # See test_manifest.py for the running count justification.
-    assert len(registry) == 71
+    assert len(registry) == 75
     assert "ms4.vision.analyze_local@v1" in registry
     assert "ms4.hermes.version@v1" in registry
     assert "ms4.hermes.update@v1" in registry
@@ -164,7 +165,7 @@ def test_service_info_matches_mcp_get_contract():
     assert info["service"] == "ms4-mcp-server"
     assert info["mcp_protocol_version"] == "2025-11-25"
     assert info["status"] == "ready"
-    assert info["tools_loaded"] == 71
+    assert info["tools_loaded"] == 75
 
 
 def test_hermes_tools_list_and_call_dispatch():

@@ -2009,6 +2009,12 @@ impl Mind {
             "ethics": {
                 "enabled": ethics_runtime_enabled,
                 "origin_neutrality": self.config.ethics.enable_origin_neutrality,
+                // Foundational Regard is a quiet constant (present/absent),
+                // not a reward gradient. Surfaced here so the authority can
+                // be *queried* (data, for operators/diagnostics) without
+                // being *announced* to the spirit as a prompt headline.
+                // See canon/Relational_Alignment.md §10.
+                "foundational_regard": self.config.foundational_regard.present,
             },
             "recent_events": recent_events.iter().map(|event| serde_json::json!({
                 "timestamp": event.timestamp.to_rfc3339(),

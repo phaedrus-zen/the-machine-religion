@@ -322,6 +322,55 @@
       <span id="settingsHivemindStatus" class="muted" style="font-size:11px;"></span>
     </div>
 
+    <h4 style="margin:16px 0 6px;">GPU passthrough (GPU-P / DDA / vGPU)</h4>
+    <p class="muted" style="font-size:11px; margin:4px 0 8px;">Three ways a VM can get GPU acceleration. <strong>GPU-P</strong> is the active path on consumer Windows 11 hardware (uses Hyper-V GPU Partitioning, no extra license). <strong>DDA</strong> is fully wired — the driver rebind works on consumer SKUs but the VM-attach step needs a Windows Server license to actually succeed. <strong>NVIDIA vGPU</strong> needs an active vGPU license server. All destructive actions require explicit confirmation.</p>
+    <div style="display:flex; gap:8px; margin-top:4px; align-items:center; flex-wrap:wrap;">
+      <button type="button" id="settingsGpuPassRefresh" class="secondary">Refresh snapshot</button>
+      <span id="settingsGpuPassStatus" class="muted" style="font-size:11px;"></span>
+    </div>
+    <div id="settingsGpuPassSnapshot" style="margin-top:8px; max-height:300px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:4px; background:#0e0f17; font-size:11px;">
+      <div class="muted" style="padding:8px;">Click <strong>Refresh snapshot</strong> to load capabilities + assignments.</div>
+    </div>
+
+    <details style="margin-top:10px;">
+      <summary style="cursor:pointer; font-size:12px; color:#9999b4;">GPU-P fast path (create game-stream VM)</summary>
+      <div style="margin-top:8px; padding:6px; border:1px solid #22243a; border-radius:6px;">
+        <p class="muted" style="font-size:11px; margin:0 0 6px;">Provisions a Windows 11 VM via the <code>windows_game_stream_prebuilt</code> template. GPU-P partitioning is wired by HiveMind inside the template. Works on consumer Windows 11 + any modern NVIDIA GPU. Name must match <code>^[A-Za-z0-9._-]+$</code>.</p>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <input id="settingsGpuPassVmName" type="text" placeholder="VM name (e.g. cyberpunk-stream-01)" style="flex:1; min-width:200px;">
+          <button type="button" id="settingsGpuPassCreateVmBtn" class="secondary">Create GPU-P VM</button>
+        </div>
+      </div>
+    </details>
+
+    <details style="margin-top:8px;">
+      <summary style="cursor:pointer; font-size:12px; color:#9999b4;">DDA path (Hyper-V Discrete Device Assignment — wired for future WS license)</summary>
+      <div style="margin-top:8px; padding:6px; border:1px solid #22243a; border-radius:6px;">
+        <p class="muted" style="font-size:11px; margin:0 0 6px;">Rebinds a GPU to <code>vfio-pci</code> so a VM can claim it via DDA. <strong>Rebind works on consumer SKUs</strong>; the actual <code>Add-VMAssignableDevice</code> step needs Windows Server / Hyper-V Server. Use this once the license is acquired. <em>Destructive: dismounts the GPU from the host.</em></p>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <input id="settingsGpuPassPrepPciId" type="text" placeholder="PCI ID (e.g. 0000:01:00.0)" style="flex:1; min-width:160px;">
+          <select id="settingsGpuPassPrepMode" style="background:#1a1a2e; color:#fff; border:1px solid #2d2d44; padding:4px;">
+            <option value="passthrough">passthrough (DDA)</option>
+            <option value="vgpu">vgpu (NVIDIA vGPU)</option>
+          </select>
+          <button type="button" id="settingsGpuPassPrepBtn" class="secondary">Prepare mode</button>
+        </div>
+      </div>
+    </details>
+
+    <details style="margin-top:8px;">
+      <summary style="cursor:pointer; font-size:12px; color:#9999b4;">vGPU partitioning (NVIDIA vGPU license required)</summary>
+      <div style="margin-top:8px; padding:6px; border:1px solid #22243a; border-radius:6px;">
+        <p class="muted" style="font-size:11px; margin:0 0 6px;">Creates one or more mdev instances on a GPU. Host must already be in <code>vgpu</code> mode. The call fails fast without an active NVIDIA vGPU license server. Server-validated <code>count</code> 1..64.</p>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <input id="settingsGpuPassVgpuPciId" type="text" placeholder="PCI ID" style="flex:1; min-width:140px;">
+          <input id="settingsGpuPassVgpuProfile" type="text" placeholder="profile (e.g. nvidia-256)" style="flex:1; min-width:140px;">
+          <input id="settingsGpuPassVgpuCount" type="number" min="1" max="64" value="1" style="width:60px;">
+          <button type="button" id="settingsGpuPassVgpuBtn" class="secondary">Create vGPUs</button>
+        </div>
+      </div>
+    </details>
+
     <h4 style="margin:16px 0 6px;">Game sessions (Phase 1 dry-run)</h4>
     <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind's <code>hivemind.game_session.*</code> orchestrator. <strong>Phase 1 is a pure dry-run</strong> — every phase records <code>would_call &lt;hivemind.vm.X@v1&gt;</code> evidence into an in-memory ledger but never invokes a mutating endpoint. Use it now to validate the Plan + state-machine path; when HiveMind ships Phase 2 (real execution) MS4's UI keeps working unchanged.</p>
     <div style="display:flex; gap:8px; margin-top:4px; align-items:center; flex-wrap:wrap;">
@@ -1245,6 +1294,171 @@ async function refreshHivemindState() {
 if (settingsHivemindRefresh) {
   settingsHivemindRefresh.addEventListener('click', refreshHivemindState);
 }
+
+// ----- GPU passthrough panel (GPU-P / DDA / vGPU) -------------------
+
+const settingsGpuPassRefresh = document.getElementById('settingsGpuPassRefresh');
+const settingsGpuPassStatus = document.getElementById('settingsGpuPassStatus');
+const settingsGpuPassSnapshot = document.getElementById('settingsGpuPassSnapshot');
+const settingsGpuPassVmName = document.getElementById('settingsGpuPassVmName');
+const settingsGpuPassCreateVmBtn = document.getElementById('settingsGpuPassCreateVmBtn');
+const settingsGpuPassPrepPciId = document.getElementById('settingsGpuPassPrepPciId');
+const settingsGpuPassPrepMode = document.getElementById('settingsGpuPassPrepMode');
+const settingsGpuPassPrepBtn = document.getElementById('settingsGpuPassPrepBtn');
+const settingsGpuPassVgpuPciId = document.getElementById('settingsGpuPassVgpuPciId');
+const settingsGpuPassVgpuProfile = document.getElementById('settingsGpuPassVgpuProfile');
+const settingsGpuPassVgpuCount = document.getElementById('settingsGpuPassVgpuCount');
+const settingsGpuPassVgpuBtn = document.getElementById('settingsGpuPassVgpuBtn');
+
+function setGpuPassStatus(text, kind) {
+  if (!settingsGpuPassStatus) return;
+  settingsGpuPassStatus.textContent = text || '';
+  settingsGpuPassStatus.style.color = kind === 'error' ? '#ef4444' : (kind === 'ok' ? '#22c55e' : '#9999b4');
+}
+
+function renderGpuPassSnapshot(payload, kind) {
+  if (!settingsGpuPassSnapshot) return;
+  settingsGpuPassSnapshot.innerHTML = '';
+  if (kind) {
+    const header = document.createElement('div');
+    header.style.cssText = 'padding:6px; border-bottom:1px solid #22243a; font-size:11px; color:#9999b4;';
+    header.textContent = kind;
+    settingsGpuPassSnapshot.appendChild(header);
+  }
+  if (payload && payload.modes) {
+    const modeTable = document.createElement('table');
+    modeTable.style.cssText = 'width:100%; font-size:11px; border-collapse:collapse;';
+    const modes = payload.modes;
+    for (const [key, info] of Object.entries(modes)) {
+      const row = document.createElement('tr');
+      row.style.cssText = 'border-bottom:1px solid #22243a;';
+      const label = document.createElement('td');
+      label.style.cssText = 'padding:4px 6px; font-weight:bold; vertical-align:top; width:30%;';
+      label.textContent = info.label || key;
+      const note = document.createElement('td');
+      note.style.cssText = 'padding:4px 6px; color:#bbb;';
+      note.innerHTML = `<div><strong>License:</strong> ${info.license || 'n/a'}</div><div style="margin-top:2px;">${info.needs || ''}</div><div style="margin-top:2px; font-family:monospace; color:#888;">via: ${info.via || ''}</div>`;
+      row.appendChild(label);
+      row.appendChild(note);
+      modeTable.appendChild(row);
+    }
+    settingsGpuPassSnapshot.appendChild(modeTable);
+  }
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:6px 0 0; white-space:pre-wrap; padding:6px; font-size:10px; color:#888; border-top:1px solid #22243a;';
+  const slim = payload ? {
+    capabilities: payload.capabilities,
+    vm_visible_gpus: payload.vm_visible_gpus,
+    vgpu_stack_status: payload.vgpu_stack_status,
+    availability: payload.availability,
+    errors: payload.errors || [],
+  } : payload;
+  pre.textContent = JSON.stringify(slim, null, 2).slice(0, 4000);
+  settingsGpuPassSnapshot.appendChild(pre);
+}
+
+async function refreshGpuPassthrough() {
+  setGpuPassStatus('Loading…');
+  try {
+    const r = await fetch('/hivemind/gpu/passthrough/snapshot', {cache: 'no-store'});
+    const body = await r.json();
+    renderGpuPassSnapshot(body, `snapshot (HTTP ${r.status})`);
+    if (!r.ok) setGpuPassStatus(`HTTP ${r.status}`, 'error');
+    else if (body.errors && body.errors.length) setGpuPassStatus(`loaded with ${body.errors.length} partial failure(s)`, null);
+    else setGpuPassStatus('loaded', 'ok');
+  } catch (exc) {
+    setGpuPassStatus(`snapshot failed: ${exc.message || exc}`, 'error');
+  }
+}
+
+async function createGpuPGameStreamVm() {
+  const name = (settingsGpuPassVmName?.value || '').trim();
+  if (!name) { setGpuPassStatus('VM name required.'); return; }
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+    setGpuPassStatus('VM name must match ^[A-Za-z0-9._-]+$', 'error');
+    return;
+  }
+  if (!confirm(`Create GPU-P game-streaming VM '${name}'?\n\nThis allocates host resources (CPU + memory + storage + a GPU partition) and registers a new VM with Hyper-V. Free to reverse via Delete VM later.`)) {
+    return;
+  }
+  settingsGpuPassCreateVmBtn.disabled = true;
+  setGpuPassStatus(`Provisioning GPU-P VM '${name}'…`);
+  try {
+    const r = await fetch('/hivemind/gpu/passthrough/game-stream-vm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, confirm: true}),
+    });
+    const body = await r.json();
+    renderGpuPassSnapshot(body, `GPU-P VM '${name}' (HTTP ${r.status})`);
+    if (!r.ok) setGpuPassStatus(`HTTP ${r.status}: ${body.error || ''}`, 'error');
+    else if (body.errors && body.errors.length) setGpuPassStatus(`created but ${body.errors.length} step(s) failed — see snapshot`, null);
+    else setGpuPassStatus(`VM '${name}' created + deployed`, 'ok');
+  } catch (exc) {
+    setGpuPassStatus(`create VM failed: ${exc.message || exc}`, 'error');
+  } finally {
+    settingsGpuPassCreateVmBtn.disabled = false;
+  }
+}
+
+async function prepareGpuPassthroughMode() {
+  const gpuPciId = (settingsGpuPassPrepPciId?.value || '').trim();
+  const mode = settingsGpuPassPrepMode?.value || 'passthrough';
+  if (!gpuPciId) { setGpuPassStatus('PCI ID required.'); return; }
+  const modeLabel = mode === 'passthrough' ? 'DDA (passthrough)' : 'vGPU';
+  if (!confirm(`Switch GPU ${gpuPciId} to ${modeLabel} mode?\n\nThis dismounts the GPU from the host (driver unbind). Any process currently using the GPU will lose access. ${mode === 'passthrough' ? 'Note: the actual VM-attach step needs Windows Server license.' : 'Note: vGPU usage needs an NVIDIA vGPU license server.'}`)) {
+    return;
+  }
+  settingsGpuPassPrepBtn.disabled = true;
+  setGpuPassStatus(`Switching ${gpuPciId} -> ${mode}…`);
+  try {
+    const r = await fetch('/hivemind/gpu/passthrough/prepare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({gpu_pci_id: gpuPciId, desired_mode: mode, confirm: true}),
+    });
+    const body = await r.json();
+    renderGpuPassSnapshot(body, `prepare ${gpuPciId} -> ${mode} (HTTP ${r.status})`);
+    if (!r.ok) setGpuPassStatus(`HTTP ${r.status}: ${body.error || ''}`, 'error');
+    else setGpuPassStatus(`mode change submitted`, 'ok');
+  } catch (exc) {
+    setGpuPassStatus(`prepare failed: ${exc.message || exc}`, 'error');
+  } finally {
+    settingsGpuPassPrepBtn.disabled = false;
+  }
+}
+
+async function createVgpuMdev() {
+  const gpuPciId = (settingsGpuPassVgpuPciId?.value || '').trim();
+  const profile = (settingsGpuPassVgpuProfile?.value || '').trim();
+  const count = parseInt(settingsGpuPassVgpuCount?.value || '1', 10) || 1;
+  if (!gpuPciId || !profile) { setGpuPassStatus('PCI ID and profile required.'); return; }
+  if (!confirm(`Create ${count} vGPU mdev instance(s) on ${gpuPciId} using profile '${profile}'?\n\nThe host must already be in vgpu mode. Without an active NVIDIA vGPU license server, this call will fail at the cluster layer.`)) {
+    return;
+  }
+  settingsGpuPassVgpuBtn.disabled = true;
+  setGpuPassStatus(`Creating ${count} vGPU(s) on ${gpuPciId}…`);
+  try {
+    const r = await fetch('/hivemind/gpu/passthrough/vgpu', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({gpu_pci_id: gpuPciId, profile: profile, count: count, confirm: true}),
+    });
+    const body = await r.json();
+    renderGpuPassSnapshot(body, `vgpu_create ${gpuPciId}/${profile}x${count} (HTTP ${r.status})`);
+    if (!r.ok) setGpuPassStatus(`HTTP ${r.status}: ${body.error || ''}`, 'error');
+    else setGpuPassStatus(`${count} vGPU(s) created`, 'ok');
+  } catch (exc) {
+    setGpuPassStatus(`vGPU create failed: ${exc.message || exc}`, 'error');
+  } finally {
+    settingsGpuPassVgpuBtn.disabled = false;
+  }
+}
+
+if (settingsGpuPassRefresh) settingsGpuPassRefresh.addEventListener('click', refreshGpuPassthrough);
+if (settingsGpuPassCreateVmBtn) settingsGpuPassCreateVmBtn.addEventListener('click', createGpuPGameStreamVm);
+if (settingsGpuPassPrepBtn) settingsGpuPassPrepBtn.addEventListener('click', prepareGpuPassthroughMode);
+if (settingsGpuPassVgpuBtn) settingsGpuPassVgpuBtn.addEventListener('click', createVgpuMdev);
 
 // ----- Game sessions panel (Phase 1 dry-run) -------------------------
 

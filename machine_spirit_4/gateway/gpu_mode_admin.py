@@ -26,38 +26,77 @@ class GpuModeAdminError(RuntimeError):
 
 
 def capabilities(hivemind_url: str) -> Any:
+    """List NVIDIA GPUs detected on this host (one ``lspci`` line per
+    GPU). Read-only inventory; call before mode switching or vGPU
+    provisioning."""
     try:
         return tools.gpu_mode_capabilities(hivemind_url)
     except HivemindToolError as exc:
         raise GpuModeAdminError(f"gpu_mode.capabilities failed: {exc}") from exc
 
 
-def set_mode(hivemind_url: str, *, node_id: str, gpu_id: str, mode: str) -> dict[str, Any]:
-    """Set a GPU's mode. Mode is typically one of ``passthrough``,
-    ``vgpu``, or ``shared`` (HiveMind defines the exact set per
-    vendor — query ``capabilities()`` first)."""
-    try:
-        return tools.gpu_mode_set(hivemind_url, node_id=node_id, gpu_id=gpu_id, mode=mode)
-    except HivemindToolError as exc:
-        raise GpuModeAdminError(
-            f"gpu_mode.set {node_id!r}/{gpu_id!r}->{mode!r} failed: {exc}"
-        ) from exc
+def set_mode(
+    hivemind_url: str,
+    *,
+    gpu_pci_id: str,
+    desired_mode: str,
+    vm_uuid: str | None = None,
+) -> dict[str, Any]:
+    """Change the driver mode of a GPU.
 
+    ``desired_mode`` must be ``'vgpu'`` or ``'passthrough'``:
 
-def create_vgpu(hivemind_url: str, *, node_id: str, gpu_id: str, profile: str) -> dict[str, Any]:
+    * ``vgpu`` — enable the NVIDIA vGPU stack (requires NVIDIA vGPU
+      license to provision usable virtual GPUs).
+    * ``passthrough`` — unbind the host driver and bind the GPU to
+      ``vfio-pci``. On Windows this is the **Hyper-V DDA (Discrete
+      Device Assignment)** path; the rebind works on consumer SKUs
+      but the actual VM attach requires Windows Server / Hyper-V
+      Server license.
+
+    NB: Hyper-V **GPU-P (GPU Partitioning)** — the consumer-licensed
+    GPU passthrough for game streaming — is NOT exposed as a
+    ``gpu_mode``. It's reached via
+    ``vm.create_prebuilt(vm_type='windows_game_stream_prebuilt')``.
+    See :mod:`gpu_passthrough` for the high-level workflow."""
     try:
-        return tools.gpu_mode_vgpu_create(
-            hivemind_url, node_id=node_id, gpu_id=gpu_id, profile=profile
+        return tools.gpu_mode_set(
+            hivemind_url,
+            gpu_pci_id=gpu_pci_id,
+            desired_mode=desired_mode,
+            vm_uuid=vm_uuid,
         )
     except HivemindToolError as exc:
         raise GpuModeAdminError(
-            f"gpu_mode.vgpu_create {node_id!r}/{gpu_id!r}/{profile!r} failed: {exc}"
+            f"gpu_mode.set {gpu_pci_id!r}->{desired_mode!r} failed: {exc}"
         ) from exc
 
 
-def vgpu_status(hivemind_url: str, vgpu_id: str | None = None) -> Any:
+def create_vgpu(
+    hivemind_url: str,
+    *,
+    gpu_pci_id: str,
+    profile: str,
+    count: int = 1,
+) -> dict[str, Any]:
+    """Create ``count`` vGPU mediated devices on the GPU at
+    ``gpu_pci_id`` using ``profile`` (e.g. ``nvidia-256`` for an
+    A100 1g.5gb slice). Host must already be in ``vgpu`` mode."""
     try:
-        return tools.gpu_mode_vgpu_status(hivemind_url, vgpu_id)
+        return tools.gpu_mode_vgpu_create(
+            hivemind_url, gpu_pci_id=gpu_pci_id, profile=profile, count=count
+        )
+    except HivemindToolError as exc:
+        raise GpuModeAdminError(
+            f"gpu_mode.vgpu_create {gpu_pci_id!r}/{profile!r}x{count} failed: {exc}"
+        ) from exc
+
+
+def vgpu_status(hivemind_url: str) -> Any:
+    """Status of the NVIDIA vGPU stack (``nvidia-vgpu-mgr`` systemd
+    unit + presence of the ``nvidia`` kernel module)."""
+    try:
+        return tools.gpu_mode_vgpu_status(hivemind_url)
     except HivemindToolError as exc:
         raise GpuModeAdminError(f"gpu_mode.vgpu_status failed: {exc}") from exc
 

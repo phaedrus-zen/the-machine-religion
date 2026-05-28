@@ -178,29 +178,35 @@ def app_list(hivemind_url: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.app.list@v1")
 
 
+# NOTE: HiveMind's app.* tools key the app by ``id`` on the wire (live
+# May-27 2026 schema: app.{get,status,metrics,start,stop} all req=['id']).
+# MS4 keeps the historical ``app_id`` Python param for caller stability
+# and translates to ``id`` when building the envelope.
+
+
 def app_get(hivemind_url: str, app_id: str) -> Any:
     """``hivemind.app.get@v1`` — full record for a single app id."""
-    return _call_tool(hivemind_url, "hivemind.app.get@v1", {"app_id": app_id})
+    return _call_tool(hivemind_url, "hivemind.app.get@v1", {"id": app_id})
 
 
 def app_status(hivemind_url: str, app_id: str) -> Any:
     """``hivemind.app.status@v1`` — runtime status (running/stopped/failed)."""
-    return _call_tool(hivemind_url, "hivemind.app.status@v1", {"app_id": app_id})
+    return _call_tool(hivemind_url, "hivemind.app.status@v1", {"id": app_id})
 
 
 def app_metrics(hivemind_url: str, app_id: str) -> Any:
     """``hivemind.app.metrics@v1`` — resource usage snapshot."""
-    return _call_tool(hivemind_url, "hivemind.app.metrics@v1", {"app_id": app_id})
+    return _call_tool(hivemind_url, "hivemind.app.metrics@v1", {"id": app_id})
 
 
 def app_start(hivemind_url: str, app_id: str) -> Any:
     """``hivemind.app.start@v1`` — request app start. Returns dispatch ack."""
-    return _call_tool(hivemind_url, "hivemind.app.start@v1", {"app_id": app_id})
+    return _call_tool(hivemind_url, "hivemind.app.start@v1", {"id": app_id})
 
 
 def app_stop(hivemind_url: str, app_id: str) -> Any:
     """``hivemind.app.stop@v1`` — request app stop. Returns dispatch ack."""
-    return _call_tool(hivemind_url, "hivemind.app.stop@v1", {"app_id": app_id})
+    return _call_tool(hivemind_url, "hivemind.app.stop@v1", {"id": app_id})
 
 
 def app_resolve(hivemind_url: str, name: str) -> Any:
@@ -229,59 +235,102 @@ def vm_list(hivemind_url: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.vm.list@v1")
 
 
-def vm_gpus(hivemind_url: str, vm_id: str | None = None) -> Any:
-    """``hivemind.vm.gpus@v1`` — GPU assignments. Optional vm_id filter."""
-    args = {"vm_id": vm_id} if vm_id else {}
-    return _call_tool(hivemind_url, "hivemind.vm.gpus@v1", args)
+def vm_gpus(hivemind_url: str) -> Any:
+    """``hivemind.vm.gpus@v1`` — list GPUs visible to menta_vm_manager
+    and assignable to VMs (Hyper-V DDA / VFIO passthrough). Returns
+    PCI addresses, vendor/model strings, current driver mode, and
+    assignment state. Takes NO arguments per the May-26 2026 cluster
+    contract — earlier MS4 wrappers passed an optional ``vm_id``
+    filter that the cluster silently ignored."""
+    return _call_tool(hivemind_url, "hivemind.vm.gpus@v1")
+
+
+# NOTE: HiveMind's vm.* mutation tools use ``name`` as the VM
+# identifier on the wire (see live tool schemas). MS4's public Python
+# API keeps the historical ``vm_id`` keyword for backwards
+# compatibility with everything that already imports these helpers;
+# we just translate to ``name`` when building the MCP envelope.
 
 
 def vm_start(hivemind_url: str, vm_id: str) -> Any:
-    """``hivemind.vm.start@v1`` — start a VM by id."""
-    return _call_tool(hivemind_url, "hivemind.vm.start@v1", {"vm_id": vm_id})
+    """``hivemind.vm.start@v1`` — start a VM by name."""
+    return _call_tool(hivemind_url, "hivemind.vm.start@v1", {"name": vm_id})
 
 
 def vm_stop(hivemind_url: str, vm_id: str) -> Any:
     """``hivemind.vm.stop@v1`` — graceful stop (sends ACPI shutdown)."""
-    return _call_tool(hivemind_url, "hivemind.vm.stop@v1", {"vm_id": vm_id})
+    return _call_tool(hivemind_url, "hivemind.vm.stop@v1", {"name": vm_id})
 
 
 def vm_force_stop(hivemind_url: str, vm_id: str) -> Any:
     """``hivemind.vm.force_stop@v1`` — hard power-off. Use as last resort."""
-    return _call_tool(hivemind_url, "hivemind.vm.force_stop@v1", {"vm_id": vm_id})
+    return _call_tool(hivemind_url, "hivemind.vm.force_stop@v1", {"name": vm_id})
 
 
 def vm_delete(hivemind_url: str, vm_id: str) -> Any:
     """``hivemind.vm.delete@v1`` — destroy a VM (irreversible)."""
-    return _call_tool(hivemind_url, "hivemind.vm.delete@v1", {"vm_id": vm_id})
+    return _call_tool(hivemind_url, "hivemind.vm.delete@v1", {"name": vm_id})
 
 
-def vm_screenshot(hivemind_url: str, vm_id: str) -> Any:
-    """``hivemind.vm.screenshot@v1`` — capture VM display. Returns
-    ``{format, data_base64}``."""
+def vm_screenshot(
+    hivemind_url: str,
+    vm_id: str,
+    *,
+    width: int = 1280,
+    height: int = 720,
+) -> Any:
+    """``hivemind.vm.screenshot@v1`` — capture VM display. Live cluster
+    contract requires explicit ``width`` + ``height`` (Hyper-V's
+    screenshot API needs target dimensions; we default to 1280x720
+    which matches the prior implicit shape). Returns ``{format,
+    data_base64, ...}`` plus an MCP-native ``image`` content block
+    (handled via :func:`call_tool_with_image`)."""
     return _call_tool(
-        hivemind_url, "hivemind.vm.screenshot@v1", {"vm_id": vm_id}, timeout=30
+        hivemind_url,
+        "hivemind.vm.screenshot@v1",
+        {"name": vm_id, "width": int(width), "height": int(height)},
+        timeout=30,
     )
 
 
-def vm_create_prebuilt(hivemind_url: str, template: str, **opts: Any) -> Any:
+def vm_create_prebuilt(
+    hivemind_url: str,
+    vm_type: str,
+    name: str,
+    **opts: Any,
+) -> Any:
     """``hivemind.vm.create_prebuilt@v1`` — instantiate a VM from a
-    template name. ``opts`` forwards any extra HiveMind-side
-    template parameters (cpus, memory_mb, gpu_assignments, etc.)."""
-    args = {"template": template, **opts}
+    template name.
+
+    ``vm_type`` is the template id; live cluster enum is
+    ``windows_game_stream_prebuilt`` | ``linux_inference_prebuilt`` |
+    ``home_assistant_prebuilt`` | ``windows_generic_install`` |
+    ``windows_11_install`` | ``ubuntu_server_install`` |
+    ``home_assistant_install``. ``name`` is the VM name and must
+    match ``^[A-Za-z0-9._-]+$`` per HiveMind F33/F35 hardening. Extra
+    ``opts`` forward through to the cluster for forward-compat with
+    future template parameters."""
+    args = {"vm_type": vm_type, "name": name, **opts}
     return _call_tool(hivemind_url, "hivemind.vm.create_prebuilt@v1", args, timeout=60)
 
 
-def vm_deploy(hivemind_url: str, vm_id: str, target_node: str | None = None) -> Any:
-    """``hivemind.vm.deploy@v1`` — deploy/migrate a VM to a node."""
-    args: dict[str, Any] = {"vm_id": vm_id}
-    if target_node:
-        args["target_node"] = target_node
+def vm_deploy(hivemind_url: str, vm_id: str, **opts: Any) -> Any:
+    """``hivemind.vm.deploy@v1`` — register an already-defined VM with
+    the hypervisor (Hyper-V Import-VM on Windows, virsh define on
+    Linux). Required before :func:`vm_start`. Idempotent.
+
+    The live contract only requires ``name``; ``**opts`` is accepted
+    for forward-compat if HiveMind grows the schema (e.g. target
+    node hints) — the cluster ignores unknown fields today."""
+    args = {"name": vm_id, **opts}
     return _call_tool(hivemind_url, "hivemind.vm.deploy@v1", args, timeout=60)
 
 
 def vm_undeploy(hivemind_url: str, vm_id: str) -> Any:
-    """``hivemind.vm.undeploy@v1`` — remove a VM from its current node."""
-    return _call_tool(hivemind_url, "hivemind.vm.undeploy@v1", {"vm_id": vm_id})
+    """``hivemind.vm.undeploy@v1`` — unregister a VM from its
+    hypervisor (Hyper-V Remove-VM on Windows, virsh undefine on
+    Linux)."""
+    return _call_tool(hivemind_url, "hivemind.vm.undeploy@v1", {"name": vm_id})
 
 
 # ===========================================================================
@@ -304,9 +353,16 @@ def storage_pool_create(hivemind_url: str, **opts: Any) -> Any:
     return _call_tool(hivemind_url, "hivemind.storage.pool_create@v1", opts, timeout=30)
 
 
+# NOTE: HiveMind's storage mutation tools key the target by ``id`` on the
+# wire (live May-27 2026: pool_delete/volume_delete/volume_detach/
+# volume_resize/snapshot_* all req=['id']; volume_attach req=['id','vm_id'];
+# volume_resize uses ``size_gb``; snapshot_create uses ``name``). MS4 keeps
+# its descriptive Python params and translates to the live keys here.
+
+
 def storage_pool_delete(hivemind_url: str, pool_id: str) -> Any:
     """``hivemind.storage.pool_delete@v1`` — delete a storage pool."""
-    return _call_tool(hivemind_url, "hivemind.storage.pool_delete@v1", {"pool_id": pool_id})
+    return _call_tool(hivemind_url, "hivemind.storage.pool_delete@v1", {"id": pool_id})
 
 
 def storage_volumes(hivemind_url: str, pool_id: str | None = None) -> Any:
@@ -322,31 +378,34 @@ def storage_volume_create(hivemind_url: str, **opts: Any) -> Any:
 
 def storage_volume_delete(hivemind_url: str, volume_id: str) -> Any:
     """``hivemind.storage.volume_delete@v1`` — delete a volume."""
-    return _call_tool(hivemind_url, "hivemind.storage.volume_delete@v1", {"volume_id": volume_id})
+    return _call_tool(hivemind_url, "hivemind.storage.volume_delete@v1", {"id": volume_id})
 
 
 def storage_volume_attach(hivemind_url: str, volume_id: str, target: str) -> Any:
-    """``hivemind.storage.volume_attach@v1`` — attach a volume to a target
-    (typically a VM or app id)."""
+    """``hivemind.storage.volume_attach@v1`` — attach a volume to a VM.
+    Live contract: ``{id, vm_id}`` (``target`` is the VM identifier)."""
     return _call_tool(
         hivemind_url,
         "hivemind.storage.volume_attach@v1",
-        {"volume_id": volume_id, "target": target},
+        {"id": volume_id, "vm_id": target},
     )
 
 
 def storage_volume_detach(hivemind_url: str, volume_id: str) -> Any:
     """``hivemind.storage.volume_detach@v1`` — detach a volume from its
     current target."""
-    return _call_tool(hivemind_url, "hivemind.storage.volume_detach@v1", {"volume_id": volume_id})
+    return _call_tool(hivemind_url, "hivemind.storage.volume_detach@v1", {"id": volume_id})
 
 
 def storage_volume_resize(hivemind_url: str, volume_id: str, new_size_bytes: int) -> Any:
-    """``hivemind.storage.volume_resize@v1`` — resize a volume."""
+    """``hivemind.storage.volume_resize@v1`` — resize a volume. MS4's
+    public API takes ``new_size_bytes``; the live cluster contract uses
+    ``size_gb``, so we convert (rounding up to at least 1 GiB)."""
+    size_gb = max(1, round(int(new_size_bytes) / (1024 ** 3)))
     return _call_tool(
         hivemind_url,
         "hivemind.storage.volume_resize@v1",
-        {"volume_id": volume_id, "new_size_bytes": new_size_bytes},
+        {"id": volume_id, "size_gb": size_gb},
     )
 
 
@@ -358,17 +417,18 @@ def storage_snapshots(hivemind_url: str, volume_id: str | None = None) -> Any:
 
 
 def storage_snapshot_create(hivemind_url: str, volume_id: str, label: str | None = None) -> Any:
-    """``hivemind.storage.snapshot_create@v1`` — snapshot a volume."""
-    args: dict[str, Any] = {"volume_id": volume_id}
+    """``hivemind.storage.snapshot_create@v1`` — snapshot a volume. Live
+    contract: ``{id}`` (the volume id) + optional ``name``/``description``."""
+    args: dict[str, Any] = {"id": volume_id}
     if label:
-        args["label"] = label
+        args["name"] = label
     return _call_tool(hivemind_url, "hivemind.storage.snapshot_create@v1", args, timeout=30)
 
 
 def storage_snapshot_delete(hivemind_url: str, snapshot_id: str) -> Any:
     """``hivemind.storage.snapshot_delete@v1`` — delete a snapshot."""
     return _call_tool(
-        hivemind_url, "hivemind.storage.snapshot_delete@v1", {"snapshot_id": snapshot_id}
+        hivemind_url, "hivemind.storage.snapshot_delete@v1", {"id": snapshot_id}
     )
 
 
@@ -378,7 +438,7 @@ def storage_snapshot_restore(hivemind_url: str, snapshot_id: str) -> Any:
     return _call_tool(
         hivemind_url,
         "hivemind.storage.snapshot_restore@v1",
-        {"snapshot_id": snapshot_id},
+        {"id": snapshot_id},
         timeout=60,
     )
 
@@ -393,37 +453,47 @@ def network_list(hivemind_url: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.network.list@v1")
 
 
+# NOTE: HiveMind's network mutation tools key the network by ``id`` on the
+# wire (live May-27 2026: delete/attachments/isolate req=['id'];
+# attach/detach req=['id','vm_id']; status takes no args). MS4 keeps its
+# ``network_id``/``target`` Python params and translates here.
+
+
 def network_status(hivemind_url: str, network_id: str | None = None) -> Any:
-    """``hivemind.network.status@v1`` — overall or per-network status."""
-    args = {"network_id": network_id} if network_id else {}
-    return _call_tool(hivemind_url, "hivemind.network.status@v1", args)
+    """``hivemind.network.status@v1`` — overall network status. The live
+    contract takes no arguments; ``network_id`` is accepted for API
+    stability but not sent (filter client-side)."""
+    return _call_tool(hivemind_url, "hivemind.network.status@v1")
 
 
 def network_create(hivemind_url: str, **opts: Any) -> Any:
-    """``hivemind.network.create@v1`` — create a network."""
+    """``hivemind.network.create@v1`` — create a network. Live required
+    fields: ``name``, ``network_type``, ``isolated``, ``enable_dhcp``."""
     return _call_tool(hivemind_url, "hivemind.network.create@v1", opts, timeout=30)
 
 
 def network_delete(hivemind_url: str, network_id: str) -> Any:
     """``hivemind.network.delete@v1`` — delete a network."""
-    return _call_tool(hivemind_url, "hivemind.network.delete@v1", {"network_id": network_id})
+    return _call_tool(hivemind_url, "hivemind.network.delete@v1", {"id": network_id})
 
 
 def network_attach(hivemind_url: str, network_id: str, target: str) -> Any:
-    """``hivemind.network.attach@v1`` — attach a target (VM/app) to a network."""
+    """``hivemind.network.attach@v1`` — attach a VM to a network. Live
+    contract: ``{id, vm_id}`` (``target`` is the VM identifier)."""
     return _call_tool(
         hivemind_url,
         "hivemind.network.attach@v1",
-        {"network_id": network_id, "target": target},
+        {"id": network_id, "vm_id": target},
     )
 
 
 def network_detach(hivemind_url: str, network_id: str, target: str) -> Any:
-    """``hivemind.network.detach@v1`` — detach a target from a network."""
+    """``hivemind.network.detach@v1`` — detach a VM from a network. Live
+    contract: ``{id, vm_id}``."""
     return _call_tool(
         hivemind_url,
         "hivemind.network.detach@v1",
-        {"network_id": network_id, "target": target},
+        {"id": network_id, "vm_id": target},
     )
 
 
@@ -438,18 +508,20 @@ def network_interfaces(hivemind_url: str) -> Any:
 
 
 def network_isolate(hivemind_url: str, network_id: str, isolated: bool = True) -> Any:
-    """``hivemind.network.isolate@v1`` — toggle network isolation."""
+    """``hivemind.network.isolate@v1`` — isolate a network. Live contract:
+    ``{id}`` (``isolated`` kept for API stability; not in the live schema
+    but forwarded harmlessly for forward-compat)."""
     return _call_tool(
         hivemind_url,
         "hivemind.network.isolate@v1",
-        {"network_id": network_id, "isolated": isolated},
+        {"id": network_id, "isolated": isolated},
     )
 
 
-def network_attachments(hivemind_url: str, network_id: str | None = None) -> Any:
-    """``hivemind.network.attachments@v1`` — list attachments per network."""
-    args = {"network_id": network_id} if network_id else {}
-    return _call_tool(hivemind_url, "hivemind.network.attachments@v1", args)
+def network_attachments(hivemind_url: str, network_id: str) -> Any:
+    """``hivemind.network.attachments@v1`` — list attachments for a
+    network. Live contract requires ``{id}``."""
+    return _call_tool(hivemind_url, "hivemind.network.attachments@v1", {"id": network_id})
 
 
 # ===========================================================================
@@ -458,37 +530,82 @@ def network_attachments(hivemind_url: str, network_id: str | None = None) -> Any
 
 
 def gpu_mode_capabilities(hivemind_url: str) -> Any:
-    """``hivemind.gpu_mode.capabilities@v1`` — which nodes/cards support
-    vGPU slicing + which modes."""
+    """``hivemind.gpu_mode.capabilities@v1`` — list NVIDIA GPUs detected
+    on this host (one raw ``lspci`` line per GPU). Read-only inventory;
+    call this BEFORE mode switching or vGPU provisioning."""
     return _call_tool(hivemind_url, "hivemind.gpu_mode.capabilities@v1")
 
 
-def gpu_mode_set(hivemind_url: str, node_id: str, gpu_id: str, mode: str) -> Any:
-    """``hivemind.gpu_mode.set@v1`` — set a GPU's mode (e.g. ``passthrough``,
-    ``vgpu``, ``shared``)."""
-    return _call_tool(
-        hivemind_url,
-        "hivemind.gpu_mode.set@v1",
-        {"node_id": node_id, "gpu_id": gpu_id, "mode": mode},
-        timeout=30,
-    )
+def gpu_mode_set(
+    hivemind_url: str,
+    *,
+    gpu_pci_id: str,
+    desired_mode: str,
+    vm_uuid: str | None = None,
+) -> Any:
+    """``hivemind.gpu_mode.set@v1`` — change the driver mode of a GPU.
+
+    ``desired_mode`` MUST be one of:
+
+    * ``"vgpu"`` — enable the NVIDIA vGPU stack on the device.
+    * ``"passthrough"`` — unbind the NVIDIA driver and bind the
+      device to ``vfio-pci`` so a VM can claim it via DDA/VFIO. On
+      Windows this is Hyper-V Discrete Device Assignment (requires a
+      Windows Server license to actually attach; the rebind itself
+      works on consumer SKUs).
+
+    HiveMind does NOT currently model Hyper-V GPU Partitioning
+    (GPU-P) as a ``gpu_mode``. GPU-P is exposed indirectly via
+    :func:`vm_create_prebuilt` (``vm_type='windows_game_stream_prebuilt'``)
+    which provisions a VM with a partitioned GPU surface.
+
+    ``gpu_pci_id`` is the PCI address (e.g. ``'0000:01:00.0'``).
+    ``vm_uuid`` is an optional informational hint identifying the VM
+    that will receive the GPU after rebind."""
+    if desired_mode not in ("vgpu", "passthrough"):
+        raise ValueError(
+            f"desired_mode must be 'vgpu' or 'passthrough', got {desired_mode!r}"
+        )
+    args: dict[str, Any] = {
+        "gpu_pci_id": gpu_pci_id,
+        "desired_mode": desired_mode,
+    }
+    if vm_uuid:
+        args["vm_uuid"] = vm_uuid
+    return _call_tool(hivemind_url, "hivemind.gpu_mode.set@v1", args, timeout=30)
 
 
-def gpu_mode_vgpu_create(hivemind_url: str, node_id: str, gpu_id: str, profile: str) -> Any:
-    """``hivemind.gpu_mode.vgpu_create@v1`` — create a virtual GPU from a
-    profile."""
+def gpu_mode_vgpu_create(
+    hivemind_url: str,
+    *,
+    gpu_pci_id: str,
+    profile: str,
+    count: int = 1,
+) -> Any:
+    """``hivemind.gpu_mode.vgpu_create@v1`` — create one or more vGPU
+    mediated device (mdev) instances on a GPU using the given
+    profile.
+
+    Writes UUIDs to
+    ``/sys/bus/pci/devices/{gpu_pci_id}/mdev_supported_types/{profile}/create``.
+    ``count`` is server-validated (1..64). The host must already be
+    in ``vgpu`` mode — call :func:`gpu_mode_set` first."""
+    if count < 1 or count > 64:
+        raise ValueError(f"count must be between 1 and 64 (got {count})")
     return _call_tool(
         hivemind_url,
         "hivemind.gpu_mode.vgpu_create@v1",
-        {"node_id": node_id, "gpu_id": gpu_id, "profile": profile},
+        {"gpu_pci_id": gpu_pci_id, "profile": profile, "count": int(count)},
         timeout=30,
     )
 
 
-def gpu_mode_vgpu_status(hivemind_url: str, vgpu_id: str | None = None) -> Any:
-    """``hivemind.gpu_mode.vgpu_status@v1`` — list vGPUs or filter by id."""
-    args = {"vgpu_id": vgpu_id} if vgpu_id else {}
-    return _call_tool(hivemind_url, "hivemind.gpu_mode.vgpu_status@v1", args)
+def gpu_mode_vgpu_status(hivemind_url: str) -> Any:
+    """``hivemind.gpu_mode.vgpu_status@v1`` — status of the NVIDIA vGPU
+    stack (``nvidia-vgpu-mgr`` systemd unit + presence of the
+    ``nvidia`` kernel module). Takes NO arguments per the May-26
+    2026 cluster contract."""
+    return _call_tool(hivemind_url, "hivemind.gpu_mode.vgpu_status@v1")
 
 
 def gpu_availability(hivemind_url: str) -> Any:
@@ -529,13 +646,23 @@ def voice_identities_identify(
     *,
     audio_base64: str,
     top_k: int = 1,
+    threshold: float | None = None,
 ) -> Any:
     """``hivemind.voice_identities.identify@v1`` — match an audio sample to
-    enrolled identities. Returns ``{matches: [{identity_id, name, score}], ...}``."""
+    enrolled identities. Returns ``{matches: [{identity_id, name, score}], ...}``.
+
+    Live contract props: ``audio_base64``/``audio_data``,
+    ``return_embeddings``, ``sample_rate``, ``threshold``. ``top_k`` is
+    NOT a live parameter — kept in the Python signature for caller
+    stability but not sent over the wire (the cluster returns ranked
+    matches; MS4 picks the top one client-side)."""
+    args: dict[str, Any] = {"audio_base64": audio_base64}
+    if threshold is not None:
+        args["threshold"] = threshold
     return _call_tool(
         hivemind_url,
         "hivemind.voice_identities.identify@v1",
-        {"audio_base64": audio_base64, "top_k": top_k},
+        args,
         timeout=15,
     )
 
@@ -544,22 +671,39 @@ def voice_identities_refine(
     hivemind_url: str,
     *,
     identity_id: str,
-    audio_base64: str,
+    audio_base64: str | None = None,
+    embedding: list[float] | None = None,
 ) -> Any:
-    """``hivemind.voice_identities.refine@v1`` — append an audio sample to
-    an existing identity (improves recognition)."""
+    """``hivemind.voice_identities.refine@v1`` — refine an existing
+    identity. Live contract: ``{name, embedding}`` (req=['name','embedding']).
+
+    NOTE / KNOWN GAP: the live cluster refines by *embedding*, not by
+    raw audio — ``audio_base64`` is not a live ``refine`` property
+    (enroll accepts audio, refine does not). MS4 has no local embedding
+    pipeline yet, so refine-by-audio cannot complete against this
+    cluster contract. We translate ``identity_id`` → the live ``name``
+    key and forward an ``embedding`` when one is supplied; passing only
+    audio will surface the cluster's validation error (honest failure)."""
+    args: dict[str, Any] = {"name": identity_id}
+    if embedding is not None:
+        args["embedding"] = embedding
+    if audio_base64 is not None:
+        # Forwarded for forward-compat; current live refine ignores/
+        # rejects audio (see docstring gap note).
+        args["audio_base64"] = audio_base64
     return _call_tool(
         hivemind_url,
         "hivemind.voice_identities.refine@v1",
-        {"identity_id": identity_id, "audio_base64": audio_base64},
+        args,
         timeout=30,
     )
 
 
 def voice_identities_delete(hivemind_url: str, identity_id: str) -> Any:
-    """``hivemind.voice_identities.delete@v1`` — remove an enrolled identity."""
+    """``hivemind.voice_identities.delete@v1`` — remove an enrolled
+    identity. Live contract keys by ``name``."""
     return _call_tool(
-        hivemind_url, "hivemind.voice_identities.delete@v1", {"identity_id": identity_id}
+        hivemind_url, "hivemind.voice_identities.delete@v1", {"name": identity_id}
     )
 
 
@@ -1034,9 +1178,16 @@ def training_backends(hivemind_url: str) -> Any:
 
 
 def training_start(hivemind_url: str, *, recipe: dict[str, Any]) -> Any:
-    """``hivemind.training.start@v1`` — start a training job. ``recipe``
-    is backend-specific (model, dataset, hyperparams)."""
-    return _call_tool(hivemind_url, "hivemind.training.start@v1", {"recipe": recipe}, timeout=30)
+    """``hivemind.training.start@v1`` — start a training job.
+
+    The live cluster contract is FLAT (req=['agent']; props include
+    ``agent``, ``base_model``, ``data_file``, ``data_source``,
+    ``preset``) — NOT a nested ``{recipe: {...}}`` envelope. MS4 keeps
+    ``recipe`` as the operator-facing object and unwraps it to the flat
+    wire shape here."""
+    if not isinstance(recipe, dict) or not recipe:
+        raise ValueError("recipe must be a non-empty object")
+    return _call_tool(hivemind_url, "hivemind.training.start@v1", dict(recipe), timeout=30)
 
 
 def training_status(hivemind_url: str, *, job_id: str | None = None) -> Any:
@@ -1057,9 +1208,14 @@ def adapters_list(hivemind_url: str) -> Any:
 
 
 def adapters_deploy(hivemind_url: str, *, adapter_id: str, target_model: str | None = None) -> Any:
-    """``hivemind.adapters.deploy@v1`` — deploy an adapter to a model
-    runtime so it can be loaded for inference."""
-    args: dict[str, Any] = {"adapter_id": adapter_id}
+    """``hivemind.adapters.deploy@v1`` — deploy an adapter.
+
+    Live contract: req=['name']; props=['backend','name','version'].
+    MS4's ``adapter_id`` maps to the live ``name``. There is no live
+    ``target_model`` concept (deploy registers the named adapter; the
+    runtime loads it); it is forwarded only if supplied, for
+    forward-compat, and ignored by the current cluster."""
+    args: dict[str, Any] = {"name": adapter_id}
     if target_model:
         args["target_model"] = target_model
     return _call_tool(hivemind_url, "hivemind.adapters.deploy@v1", args, timeout=60)
@@ -1075,10 +1231,17 @@ def loadout_profiles(hivemind_url: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.loadout.profiles@v1")
 
 
-def loadout_apply(hivemind_url: str, *, profile_id: str) -> Any:
-    """``hivemind.loadout.apply@v1`` — apply a loadout profile (load /
-    unload models to match)."""
-    return _call_tool(hivemind_url, "hivemind.loadout.apply@v1", {"profile_id": profile_id}, timeout=60)
+def loadout_apply(hivemind_url: str, *, profile_id: str, quality: str | None = None) -> Any:
+    """``hivemind.loadout.apply@v1`` — apply a loadout (load / unload
+    models to match).
+
+    Live contract: req=['tier']; props=['quality','tier']. The live
+    loadout model is tier-based, so MS4's selected ``profile_id`` is
+    sent as the live ``tier`` value, with optional ``quality``."""
+    args: dict[str, Any] = {"tier": profile_id}
+    if quality:
+        args["quality"] = quality
+    return _call_tool(hivemind_url, "hivemind.loadout.apply@v1", args, timeout=60)
 
 
 # ===========================================================================
@@ -1178,12 +1341,18 @@ def services_restart(hivemind_url: str, *, service_name: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.services.restart@v1", {"service_name": service_name}, timeout=60)
 
 
-def jobs_cancel(hivemind_url: str, *, job_id: str = "all") -> Any:
-    """``hivemind.jobs.cancel@v1`` — cancel an inference job. NOTE: per
-    the HiveMind reference, the backend currently resets ALL active
-    jobs regardless of ``job_id`` (per-job cancel not implemented
-    upstream yet)."""
-    return _call_tool(hivemind_url, "hivemind.jobs.cancel@v1", {"job_id": job_id})
+def jobs_cancel(hivemind_url: str, *, job_id: str = "", reason: str | None = None) -> Any:
+    """``hivemind.jobs.cancel@v1`` — cancel a specific inference job.
+
+    Live contract: req=['job_id']; props=['job_id','reason']. Per-job
+    cancel IS now implemented upstream (the older "resets ALL jobs
+    regardless of job_id" behavior is no longer current), so a real
+    ``job_id`` is required; an empty value surfaces the cluster's
+    validation error."""
+    args: dict[str, Any] = {"job_id": job_id}
+    if reason:
+        args["reason"] = reason
+    return _call_tool(hivemind_url, "hivemind.jobs.cancel@v1", args)
 
 
 def math_calculate(hivemind_url: str, *, expression: str) -> Any:

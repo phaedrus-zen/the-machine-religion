@@ -24,8 +24,10 @@ def test_manifest_lists_all_v1_tools_and_safety_posture():
     # inference, logos.optimize, services.{enable,disable,restart},
     # jobs.cancel) + 6 hivemind.game.* / hivemind.game_session.* proxies
     # (May 26 game-session round: ensure_available + plan/run/status/
-    # evidence/cancel). Bump when adding / removing tools.
-    assert len(tool_names) == 71
+    # evidence/cancel) + 4 hivemind.gpu.passthrough.* proxies
+    # (May 27 GPU-P / DDA / vGPU round: snapshot + prepare + vgpu +
+    # game_stream_vm). Bump when adding / removing tools.
+    assert len(tool_names) == 75
     assert "ms4.chat.send@v1" in tool_names
     assert "ms4.nibbles.dry_run@v1" in tool_names
     assert "ms4.hermes.tools.list@v1" in tool_names

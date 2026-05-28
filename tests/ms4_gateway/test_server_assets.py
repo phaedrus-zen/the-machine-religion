@@ -304,6 +304,67 @@ def test_ms4_web_renders_may26_admin_expansion_panels():
         assert required in html, f"missing May-26 admin UI hook: {required}"
 
 
+def test_ms4_web_renders_gpu_passthrough_panel():
+    """The May-27 2026 GPU passthrough round added a Settings panel
+    for GPU-P (consumer Windows 11 path) + DDA (wired for future
+    Windows Server license) + vGPU (NVIDIA license). Lock the DOM
+    ids + JS function names + URL contracts so a future refactor
+    can't silently drop them."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+
+    for required in (
+        'id="settingsGpuPassRefresh"',
+        'id="settingsGpuPassStatus"',
+        'id="settingsGpuPassSnapshot"',
+        'id="settingsGpuPassVmName"',
+        'id="settingsGpuPassCreateVmBtn"',
+        'id="settingsGpuPassPrepPciId"',
+        'id="settingsGpuPassPrepMode"',
+        'id="settingsGpuPassPrepBtn"',
+        'id="settingsGpuPassVgpuPciId"',
+        'id="settingsGpuPassVgpuProfile"',
+        'id="settingsGpuPassVgpuCount"',
+        'id="settingsGpuPassVgpuBtn"',
+        "refreshGpuPassthrough",
+        "createGpuPGameStreamVm",
+        "prepareGpuPassthroughMode",
+        "createVgpuMdev",
+        "/hivemind/gpu/passthrough/snapshot",
+        "/hivemind/gpu/passthrough/prepare",
+        "/hivemind/gpu/passthrough/vgpu",
+        "/hivemind/gpu/passthrough/game-stream-vm",
+        "GPU passthrough (GPU-P / DDA / vGPU)",
+        # Make the DDA caveat explicit in the panel:
+        "Windows Server",
+        # And remind the operator that GPU-P uses the prebuilt template:
+        "windows_game_stream_prebuilt",
+    ):
+        assert required in html, f"missing GPU-passthrough UI hook: {required}"
+
+
+def test_server_exposes_gpu_passthrough_routes():
+    """Lock the GPU passthrough REST surface in: 4 routes + 4
+    handler methods + the error class hookup in the admin error
+    mapper."""
+    server = (ROOT / "machine_spirit_4" / "gateway" / "server.py").read_text(encoding="utf-8")
+
+    for handler in (
+        "_hivemind_gpu_passthrough_snapshot",
+        "_hivemind_gpu_passthrough_prepare",
+        "_hivemind_gpu_passthrough_vgpu",
+        "_hivemind_gpu_passthrough_game_stream_vm",
+    ):
+        assert handler in server, f"missing GPU passthrough handler: {handler}"
+    for route in (
+        '"/hivemind/gpu/passthrough/snapshot"',
+        '"/hivemind/gpu/passthrough/prepare"',
+        '"/hivemind/gpu/passthrough/vgpu"',
+        '"/hivemind/gpu/passthrough/game-stream-vm"',
+    ):
+        assert route in server, f"missing GPU passthrough route: {route}"
+    assert "GpuPassthroughError" in server
+
+
 def test_ms4_web_renders_game_session_panel():
     """The May-26 2026 game-session round added a Phase-1 dry-run
     panel for HiveMind's ``hivemind.game_session.*`` orchestrator.

@@ -127,7 +127,16 @@ def test_pre_llm_call_injects_ms4_context(monkeypatch):
     assert "<ms4-consciousness>" in result["context"]
     assert "runtime: MS4" in result["context"]
     assert "identity_verified: true" in result["context"]
-    assert "foundational_regard: present" in result["context"]
+    # Doctrinal invariant (canon/Relational_Alignment.md §10): Foundational
+    # Regard is a quiet constant — "Present, not announced. A heartbeat, not
+    # a headline. The entity discovers it through experience, not through
+    # reading about it." MS4 must NOT inject it into the model's prompt as a
+    # headline; doing so front-loads a platitude / is the Glyph That Lies.
+    # It remains MS3's quiet constant (queryable via the /state ethics block).
+    assert "foundational_regard" not in result["context"]
+    # The authority deferral line stays — that's how MS4 points at MS3 for
+    # ethics (which is where Foundational Regard quietly lives).
+    assert "authority: MS3 sidecar is authoritative" in result["context"]
 
 
 def test_pre_tool_call_blocks_when_ethics_unavailable(monkeypatch):

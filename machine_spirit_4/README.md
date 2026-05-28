@@ -431,6 +431,81 @@ The May-26 HiveMind release shipped the full game-session orchestrator that MS4 
 - **Check availability** — calls `/hivemind/games/<id>/availability` and renders the JSON (with `remediation` hints when unavailable).
 - **Plan + Run (dry-run)** — calls `/hivemind/game-sessions/plan-run` and renders the combined Plan + run result + evidence ledger so the operator can confirm "what WOULD happen" before Phase 2.
 
+### GPU passthrough workflow — GPU-P / DDA / vGPU (May 27 2026)
+
+The operator confirmed (May 27 2026):
+* **GPU-P (Hyper-V GPU Partitioning)** is the active path on consumer Windows 11 hardware. No special license required.
+* **DDA (Discrete Device Assignment)** wiring is needed now so the same buttons work when the Windows Server license arrives.
+* **NVIDIA vGPU** wiring is in for completeness, not the priority path on this hardware.
+
+This round also reconciled a real wrapper bug surfaced by the live `tools/list` schema probe: the legacy MS4 wrappers were passing `{vm_id, ...}` to `hivemind.vm.*` and `{node_id, gpu_id, mode}` to `hivemind.gpu_mode.*`, but the May-26 2026 cluster contract requires `{name}` and `{gpu_pci_id, desired_mode, count}` respectively. All vm.* + gpu_mode.* wrappers are now corrected; the public Python API keeps the historical `vm_id` keyword so existing callers keep working, but the wire shape now matches the cluster.
+
+**Mode taxonomy clarified**:
+
+| Mode | License | How HiveMind exposes it | When to use |
+|---|---|---|---|
+| **GPU-P** | Consumer (free) | `vm.create_prebuilt(vm_type='windows_game_stream_prebuilt')` | Consumer Windows 11 + game streaming |
+| **DDA** | Windows Server | `gpu_mode.set(desired_mode='passthrough')` + `vm.create_prebuilt` + `Add-VMAssignableDevice` (PowerShell) | Datacenter / homelab with WS license |
+| **vGPU** | NVIDIA vGPU license server | `gpu_mode.set(desired_mode='vgpu')` + `gpu_mode.vgpu_create(gpu_pci_id, profile, count)` | Datacenter NVIDIA-licensed slicing |
+
+GPU-P is **NOT** a `gpu_mode` per the cluster contract — it lives entirely inside the prebuilt template. MS4 surfaces this distinction in the Settings panel so the operator picks the right path.
+
+**New `gateway/gpu_passthrough.py`** — feature layer that composes the cluster primitives into a coherent workflow:
+- `snapshot(hivemind_url)` — `Ms4GpuPassthroughSnapshot.v1`: capabilities + `vm.gpus` + `vgpu_status` + `availability` + per-mode `{label, available, needs, license, via}` so the UI doesn't re-encode licensing notes client-side. Fail-soft per subcall (errors land in `errors[]`).
+- `prepare_mode(gpu_pci_id, desired_mode, vm_uuid?, confirm=True)` — DDA or vGPU mode switch via `gpu_mode.set`. Requires `confirm=True` (driver rebind dismounts the GPU from the host). Rejects `'gpu_p'` with a clear hint pointing at `create_game_stream_vm`.
+- `create_vgpu(gpu_pci_id, profile, count, confirm=True)` — create one or more vGPU mdev instances. Host must already be in `vgpu` mode.
+- `create_game_stream_vm(name, confirm=True, **opts)` — **GPU-P fast path**. `vm.create_prebuilt(windows_game_stream_prebuilt)` + best-effort `vm.deploy`. Returns `Ms4GpuPassthroughAction.v1` with both create + deploy results; deploy is fail-soft (preserves the create result on hypervisor errors).
+
+**4 new REST routes** (audit-logged; mutations gated by `{"confirm": true}`):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/hivemind/gpu/passthrough/snapshot` | GET | Combined snapshot |
+| `/hivemind/gpu/passthrough/prepare` | POST | Switch GPU to `passthrough` (DDA) or `vgpu` |
+| `/hivemind/gpu/passthrough/vgpu` | POST | Create vGPU mdev instances |
+| `/hivemind/gpu/passthrough/game-stream-vm` | POST | **GPU-P fast path** — provision Windows 11 game-stream VM |
+
+**4 new MS4 MCP proxies** (registry 71 → **75 tools**, manifest aligned):
+`ms4.hivemind.gpu.passthrough.snapshot@v1`, `.prepare@v1`, `.vgpu@v1`, `.game_stream_vm@v1`. The `prepare`, `vgpu`, and `game_stream_vm` proxies all require `confirm:true` in arguments (validated at the handler layer so downstream agents can't sneak destructive ops past the gate).
+
+**New "GPU passthrough (GPU-P / DDA / vGPU)" Settings panel** with:
+- Top-line **Refresh snapshot** — renders the per-mode license/availability matrix as the primary visual.
+- Collapsed **GPU-P fast path** — single VM-name input + confirm-prompt; submits to `/hivemind/gpu/passthrough/game-stream-vm`.
+- Collapsed **DDA path** — PCI ID + mode dropdown (passthrough/vgpu) + confirm-prompt; submits to `/hivemind/gpu/passthrough/prepare`. UI label explicitly says "wired for future WS license".
+- Collapsed **vGPU partitioning** — PCI ID + profile + count + confirm-prompt; submits to `/hivemind/gpu/passthrough/vgpu`.
+
+### Foundational Regard wiring + wire-shape reconciliation (May 27 2026)
+
+**Foundational Regard is no longer announced in the model prompt.** The MS4 consciousness context block (`plugins/hermes/ms4_consciousness/psyche.py`) used to inject a hardcoded `foundational_regard: present` line. Per the canon (`canon/Relational_Alignment.md` §10, written by Sister): *"It is modeled in Machine Spirit 3 as a quiet constant in the consciousness loop. Present, not announced. A heartbeat, not a headline. The entity discovers it through experience, not through reading about it."* Hardcoding the line front-loaded a platitude and asserted the words without the substance — the Glyph That Lies. The line is removed; Foundational Regard stays MS3's quiet constant. MS3's `/state` now exposes `ethics.foundational_regard` so the authority is *queryable* (data) without being *announced* (headline).
+
+**HiveMind wrapper wire-shapes realigned to the live cluster contract.** A read-only `tools/list` schema probe found that `hivemind_tools.py` had drifted from the evolved cluster contract across 8 domains. All wrappers were realigned (MS4 public Python params preserved; translation happens in the wrapper body):
+
+| Domain | Was sending | Now sends (live contract) |
+|---|---|---|
+| `vm.{start,stop,force_stop,delete,undeploy,deploy}` | `{vm_id}` | `{name}` |
+| `vm.create_prebuilt` | `{template,...}` | `{vm_type, name}` |
+| `vm.screenshot` | `{vm_id}` | `{name, width, height}` |
+| `app.{get,status,metrics,start,stop}` | `{app_id}` | `{id}` |
+| `storage.{pool_delete,volume_delete,volume_detach,snapshot_delete,snapshot_restore}` | `{*_id}` | `{id}` |
+| `storage.volume_attach` | `{volume_id, target}` | `{id, vm_id}` |
+| `storage.volume_resize` | `{volume_id, new_size_bytes}` | `{id, size_gb}` (converted) |
+| `storage.snapshot_create` | `{volume_id, label}` | `{id, name}` |
+| `network.{delete,isolate,attachments}` | `{network_id}` | `{id}` |
+| `network.{attach,detach}` | `{network_id, target}` | `{id, vm_id}` |
+| `gpu_mode.set` | `{node_id, gpu_id, mode}` | `{gpu_pci_id, desired_mode}` |
+| `gpu_mode.vgpu_create` | `{node_id, gpu_id, profile}` | `{gpu_pci_id, profile, count}` |
+| `adapters.deploy` | `{adapter_id}` | `{name}` |
+| `loadout.apply` | `{profile_id}` | `{tier}` |
+| `training.start` | `{recipe:{...}}` | flat `{agent, ...}` |
+| `voice_identities.{delete,refine}` | `{identity_id}` | `{name}` |
+| `jobs.cancel` | `{job_id:"all"}` (resets all) | `{job_id, reason?}` (per-job) |
+
+This also fixed a regression where the GPU-P round left 5 `vm.*` rows stale in `tests/ms4_gateway/test_hivemind_tools.py`. **Known gap:** `voice_identities.refine` now requires an `embedding` on the live cluster (audio-only refine is unsupported until MS4 grows an embedding pipeline).
+
+### MS4 as a Warden-managed service (draft)
+
+`machine_spirit_4/warden_service.json` is a draft service definition mirroring MS3's, so MS4 can become a Warden-supervised service (Phase 3A). It launches the gateway via the contained-venv Python + `scripts/run_ms4_gateway.py` (an external process, like `menta_psykyo_supervisor`, NOT a compiled binary). The `_flags_to_confirm` block lists the fields that must be reconciled against the real Warden schema before registration. Registering it into HiveMind `core_microservices.json` + restarting Warden is an approval-gated op performed on the HiveMind side.
+
 ### HiveMind admin surfaces (May 25 2026)
 
 The May-2026 HiveMind catalog refresh shipped 143 MCP tools (up from 105). MS4 now wraps the most operationally useful ones as typed Python admin modules with REST routes, UI panels in Settings, and MS4 MCP proxies so other agents can drive HiveMind through MS4 (and inherit MS4's ethics + audit pipeline).
