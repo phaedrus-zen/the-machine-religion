@@ -1571,6 +1571,11 @@ impl Mind {
             && since >= self.config.memory.consolidation_interval_secs as i64
         {
             tracing::info!("Three-phase dreaming... (idle {}s)", idle_secs);
+            // Re-arm the consolidation throttle on every attempt so an idle mind
+            // with empty STM cannot re-enter and re-log this branch every tick
+            // (was the ~10/sec "Three-phase dreaming" log spam). The success
+            // path below also updates last_consolidation.
+            *self.last_consolidation.lock().await = now;
             self.event_bus.emit(events::ConsciousnessEvent::DreamStarted).await;
 
             // Collect all candidate memories (STM + recent LTM)

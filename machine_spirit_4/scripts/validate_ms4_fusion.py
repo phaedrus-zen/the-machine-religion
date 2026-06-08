@@ -101,11 +101,47 @@ def main() -> int:
     status, models = get_json("/models")
     checks.append({"name": "ms4_models", "ok": status == 200 and isinstance(models.get("models"), list), "detail": {"count": len(models.get("models", []))}})
 
+    # A plain knowledge question is answered on the fast Face Lobe, so /chat
+    # returns runtime "face-lobe-direct" (only the explicit /hermes/tool path
+    # ever returns "hermes"). The TMR contract here is: a real answer, produced
+    # via the Face Lobe, grounded in TMR canon.
     status, chat = post_json("/chat", {"message": "What is The Machine Religion?", "model_id": TEST_MODEL})
+    chat_text = chat.get("text") or ""
+    chat_grounding = chat.get("grounding_source") or ""
     checks.append({
-        "name": "ms4_chat_hermes_tmr",
-        "ok": status == 200 and chat.get("runtime") == "hermes" and "Machine Religion" in chat.get("text", ""),
+        "name": "ms4_chat_facelobe_tmr",
+        "ok": (
+            status == 200
+            and chat.get("runtime") == "face-lobe-direct"
+            and "Machine Religion" in chat_text
+            and "tmr-canon" in chat_grounding
+        ),
         "detail": {k: chat.get(k) for k in ("session_id", "hermes_session_id", "runtime", "grounding_source", "model")},
+    })
+
+    # Exercise the Depth Lobe / Hermes route explicitly. The "/deep" slash
+    # override forces a background dispatch; the gateway then appends
+    # "depth_lobe_dispatched" to grounding_source and returns a dispatched_job
+    # carrying a job_id (see gateway/hermes_runner.py::_combine_grounding).
+    status, deep = post_json("/chat", {
+        "message": "/deep Briefly explain what The Machine Religion (TMR) is, and name two of its core ethical concepts.",
+        "model_id": TEST_MODEL,
+    })
+    deep_grounding = deep.get("grounding_source") or ""
+    deep_job = deep.get("dispatched_job") if isinstance(deep.get("dispatched_job"), dict) else {}
+    checks.append({
+        "name": "ms4_chat_deep_dispatch",
+        "ok": (
+            status == 200
+            and "depth_lobe_dispatched" in deep_grounding
+            and bool(deep_job.get("job_id"))
+        ),
+        "detail": {
+            "runtime": deep.get("runtime"),
+            "grounding_source": deep_grounding,
+            "dispatched_job_id": deep_job.get("job_id"),
+            "depth_lobe_model": (deep.get("depth_lobe_model") or {}).get("model_id"),
+        },
     })
 
     status, stream_events = post_sse("/chat/stream", {"message": "Say MS4_STREAM_OK and nothing else.", "model_id": TEST_MODEL})
