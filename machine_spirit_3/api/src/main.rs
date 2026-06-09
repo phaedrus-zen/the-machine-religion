@@ -71,29 +71,39 @@ where
     }
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        let token = self.token.clone();
-        let svc = self.service.clone();
+        // Bearer-token check runs SYNCHRONOUSLY here, before we touch the
+        // inner service, so we never hold the RefCell borrow across an
+        // await. The previous version did `svc.borrow_mut().call(req).await`
+        // inside the async block, which kept the RefMut alive across the
+        // await point; actix then called `poll_ready` (also borrow_mut) on
+        // the same per-worker service and panicked with "RefCell already
+        // borrowed", taking the whole actix worker down. That was MS3's
+        // recurring crash. (Fix: Jun 1 2026.)
+        if let Some(ref expected) = self.token {
+            let method = req.method().clone();
+            let is_mutating = method == actix_web::http::Method::POST
+                || method == actix_web::http::Method::PUT
+                || method == actix_web::http::Method::DELETE;
 
-        Box::pin(async move {
-            if let Some(ref expected) = token {
-                let method = req.method().clone();
-                let is_mutating = method == actix_web::http::Method::POST
-                    || method == actix_web::http::Method::PUT
-                    || method == actix_web::http::Method::DELETE;
+            if is_mutating {
+                let auth_header = req.headers().get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
 
-                if is_mutating {
-                    let auth_header = req.headers().get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("");
-
-                    let provided = auth_header.strip_prefix("Bearer ").unwrap_or("");
-                    if provided != expected.as_str() {
-                        return Err(actix_web::error::ErrorUnauthorized("Invalid or missing bearer token"));
-                    }
+                let provided = auth_header.strip_prefix("Bearer ").unwrap_or("");
+                if provided != expected.as_str() {
+                    return Box::pin(async move {
+                        Err(actix_web::error::ErrorUnauthorized("Invalid or missing bearer token"))
+                    });
                 }
             }
-            svc.borrow_mut().call(req).await
-        })
+        }
+
+        // Authorized: build the inner future and RELEASE the borrow at the
+        // end of this statement (the RefMut is a temporary; `fut` is the
+        // owned inner future). The async block below holds no borrow.
+        let fut = self.service.borrow_mut().call(req);
+        Box::pin(async move { fut.await })
     }
 }
 
