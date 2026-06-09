@@ -37,3 +37,13 @@ COMMIT_MSG.tmp
 _chat_model_probe.py
 _smoke_*.py
 _check_*.py
+_chatprobe.py
+_diag*.py
+_e2e_*.py
+_recover.py
+
+# Runtime logs + captured screenshots (not source)
+*.log
+ms3_sidecar.*.log
+ms4_gateway.*.log
+screenshot_*.png
