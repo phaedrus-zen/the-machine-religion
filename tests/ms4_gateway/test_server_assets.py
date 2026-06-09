@@ -440,6 +440,211 @@ def test_ms4_web_renders_double_agent_panel():
         assert required in html, f"missing Double Agent UI hook: {required}"
 
 
+def test_ms4_web_has_voice_feedback_overhaul():
+    """Jun 1 2026 voice overhaul: soft onset tick (not a spoken ack),
+    context-aware `reflex` event, high-fidelity thinking ambience, and the
+    raised VAD hangover / continuation guard for long-utterance ASR."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "function playOnsetTick(",            # soft non-speech onset cue
+        "function startThinkingAmbient(",     # high-fidelity dead-air ambience
+        "function stopThinkingAmbient(",
+        "eventName === 'reflex'",             # context-aware canned response
+        "VAD_CONTINUATION_WINDOW_MS",         # continuation merge guard
+        "keepStream",                          # don't drop prior transcript on re-onset
+        "|| '1400'",                          # raised end-of-turn hangover default
+    ):
+        assert required in html, f"missing voice-overhaul hook: {required}"
+    # The onset must no longer fire a spoken ack reflex (it talked over you).
+    assert "playAck: isVadAckEnabled()" not in html, "onset should no longer play a spoken ack"
+
+
+def test_ms4_web_has_latency_pass_hooks():
+    """Jun 1 2026 ChatGPT-level latency pass (client side): a curated
+    'Fast' model group for sub-second voice tokens, and the late
+    `speaker` event handler that decorates the user bubble AFTER the
+    transcript ships (speaker ID now runs off the critical path)."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "FAST_FACE_MODELS",                          # curated fast small models
+        r"Fast \u2014 best for voice latency",       # optgroup label (JS-escaped in source)
+        "eventName === 'speaker'",                   # late async speaker-ID handler
+        "voiceUserBubble",                           # decorates the existing bubble in place
+    ):
+        assert required in html, f"missing latency-pass hook: {required}"
+
+
+def test_server_provisions_tts_replicas_for_concurrency():
+    """Jun 2 2026: MS4 calls HiveMind's POST /provision/tts/scale on boot
+    (and periodically) so per-chunk TTS fans across one GPU per replica —
+    the fix for serialized TTS, scaling with nodes/GPUs."""
+    server = (ROOT / "machine_spirit_4" / "gateway" / "server.py").read_text(encoding="utf-8")
+    assert "_tts_autoscale_loop" in server
+    assert "provision_tts_replicas" in server
+    assert "MS4_VOICE_TTS_AUTOSCALE" in server
+    assert "MS4_VOICE_TTS_REPLICA_TARGET" in server  # pack replicas (GEN_LOCK serializes per GIM)
+    voice = (ROOT / "machine_spirit_4" / "gateway" / "voice.py").read_text(encoding="utf-8")
+    assert "def provision_tts_replicas" in voice
+    assert "/provision/tts/scale" in voice
+
+
+def test_server_has_face_keepwarm_and_residency_bias():
+    """Server-side latency pass: periodic Face keep-warm loop (idle
+    cold-start fix) + the Ollama keep_alive residency bias (anti-thrash)
+    + fully-async speaker ID (off the critical path)."""
+    server = (ROOT / "machine_spirit_4" / "gateway" / "server.py").read_text(encoding="utf-8")
+    assert "_face_keepwarm_loop" in server
+    assert "MS4_VOICE_FACE_KEEPWARM_SECS" in server
+    assert "ms4-flb-keepwarm" in server
+    assert "last_face_model()" in server
+    flc = (ROOT / "machine_spirit_4" / "gateway" / "face_lobe_chat.py").read_text(encoding="utf-8")
+    assert "MS4_FACE_KEEP_ALIVE" in flc
+    assert '"keep_alive"' in flc
+    assert "_is_local_ollama_model" in flc
+    voice = (ROOT / "machine_spirit_4" / "gateway" / "voice.py").read_text(encoding="utf-8")
+    assert "MS4_VOICE_SPEAKER_ID_ASYNC" in voice
+    assert "def record_face_model" in voice
+    assert "def _identify_speaker_async" in voice
+
+
+def test_ms4_web_speaks_deep_job_completions_proactively():
+    """Jun 1 2026: in a voice conversation the agent must SPEAK deep-job
+    completions on its own — the silent chat bubble isn't enough when
+    you're hands-free. The spoken delivery is gated on voice mode + a
+    Settings toggle and must not talk over the user."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "voiceModeActive",                       # only speak when in a voice convo
+        "function buildCompletionSpeech(",       # natural announcement text
+        "function speakAnnouncement(",           # synth + play the announcement
+        "function speakCompletionWhenQuiet(",    # defer until not talking over the user
+        "function playNotifyChime(",             # soft "something's ready" earcon
+        "_isVoiceBusy(",                         # the don't-talk-over-you guard
+        "isSpeakCompletionsEnabled(",            # Settings toggle gate
+        "settingsSpeakCompletions",              # the toggle element
+        "ms4_da_speak_completions",              # persisted key (default on)
+    ):
+        assert required in html, f"missing proactive-completion hook: {required}"
+    # It must be wired into the terminal-job announcement path.
+    assert "speakCompletionWhenQuiet(buildCompletionSpeech(job)" in html
+
+
+def test_ms4_web_has_adaptive_endpoint_vad():
+    """Jun 1 2026: adaptive end-of-turn — respond sooner after a long,
+    complete utterance, but keep the full hangover for short/mid-thought
+    fragments so we never clip someone gathering their thoughts."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "function vadEffectiveHangoverMs(",
+        "isVadAdaptiveEnabled(",
+        "VAD_ADAPTIVE_LONG_SPEECH_MS",
+        "VAD_ADAPTIVE_FLOOR_MS",
+        "settingsVadAdaptive",
+        "ms4_voice_vad_adaptive",
+    ):
+        assert required in html, f"missing adaptive-VAD hook: {required}"
+    # The state machine must use the adaptive hangover, not the raw one.
+    assert "vadEffectiveHangoverMs()" in html
+
+
+def test_ms4_web_rest_engine_labeled_recommended():
+    """REST must be labeled recommended/fastest and ws_super as slower, plus
+    the one-time auto-clear of a pinned ws_super engine."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    assert "recommended, fastest here" in html       # REST option
+    assert "SLOWER on this cluster" in html           # ws_super option, honestly labeled
+    assert "ms4_engine_migrated_v2" in html           # one-time ws_super -> REST clear
+
+
+def test_ms4_web_has_canned_speech_qa_and_ambience_toggle():
+    """Reflex QA report hooks + the (default-off) thinking-ambience toggle."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "settingsReflexValidate",      # the "Validate canned speech" button
+        "/reflexes/validate",          # endpoint it calls
+        "QA \u2713",                   # validated badge
+        "function isThinkingAmbienceEnabled(",
+        "settingsThinkingAmbience",    # the opt-in toggle
+        "ms4_thinking_ambience",       # persisted key (default off)
+    ):
+        assert required in html, f"missing QA/ambience hook: {required}"
+
+
+def test_ms4_web_has_honorable_easter_egg():
+    """The 'Honorable -> WE ON GO' easter egg: an `egg` SSE handler that
+    plays the clip from /easter/honorable."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "function playEggClip(",
+        "eventName === 'egg'",
+        "/easter/honorable",
+    ):
+        assert required in html, f"missing honorable easter-egg hook: {required}"
+
+
+def test_ms4_web_has_robust_mic_acquire():
+    """Mic acquisition retries with relaxed constraints and reports
+    accurate, actionable errors (not a blanket 'permission denied')."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "function acquireMicStream(",
+        "function micErrorMessage(",
+        "{audio: true}",              # relaxed-constraint fallback
+        "No microphone found",        # NotFoundError guidance
+        "Microphone is busy",         # NotReadableError guidance
+    ):
+        assert required in html, f"missing robust mic-acquire hook: {required}"
+    # The old misleading blanket message must be gone.
+    assert "Microphone permission denied:" not in html
+
+
+def test_ms4_web_has_audio_prebuffer():
+    """The voice player prebuffers the first chunk(s) so a tiny first
+    chunk doesn't leave an audible gap before the second word."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "PREBUFFER_MIN_CHUNKS",
+        "PREBUFFER_TARGET_MS",
+        "PREBUFFER_MAX_MS",
+        "function flushPrebuffer(",
+        "function scheduleDecodedChunk(",
+        "playbackRunStarted",
+    ):
+        assert required in html, f"missing audio prebuffer hook: {required}"
+
+
+def test_ms4_web_has_both_lobe_model_selectors():
+    """Both Face and Depth lobe models are UI-selectable and sent to the
+    backend (chat, voice params, deep-submit)."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        'id="modelSelect"',         # Face Lobe model
+        'id="depthModelSelect"',    # Depth Lobe model (new)
+        "Face Lobe model",
+        "Depth Lobe model",
+        "ms4_depth_model_id",       # persisted
+        "depth_model_id",           # sent to chat + deep-submit
+        "params.set('depth_model_id'",  # sent on voice turns
+    ):
+        assert required in html, f"missing per-lobe model selector hook: {required}"
+
+
+def test_ms4_web_announces_deep_job_completion():
+    """Proactive completion delivery: the UI announces a watched deep
+    job's terminal transition inline with a Show-details expander."""
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+    for required in (
+        "announceDoubleAgentCompletion",
+        "daAnnounceTerminalJobs",
+        "daSeenInFlight",          # only announce jobs we watched run
+        "ms4_da_announced_",       # localStorage guard against re-announce
+        "Deep job done",
+        "Show details",
+        "data.result",             # pulls full result.text from the detail endpoint
+    ):
+        assert required in html, f"missing Double Agent completion-delivery hook: {required}"
+
+
 def test_fusion_validator_reads_sse_incrementally():
     validator = (ROOT / "machine_spirit_4" / "scripts" / "validate_ms4_fusion.py").read_text(encoding="utf-8")
     post_sse = validator.split("def post_sse", 1)[1].split("def main", 1)[0]

@@ -164,6 +164,65 @@ def test_inventory_cache_key_isolates_per_cluster_url(fake_mcp):
 
 
 # ---------------------------------------------------------------------------
+# Wall-clock fetch budget (a slow cold cluster must not stall the turn)
+# ---------------------------------------------------------------------------
+
+
+def test_grounding_budget_bounds_slow_fetch_and_serves_stale(monkeypatch):
+    key = "inv::budget-stale"
+    # Seed an OLD entry (age > 0) so TTL=0 treats it as stale, not a fresh hit.
+    with ctx_module._GROUNDING_CACHE_LOCK:
+        ctx_module._GROUNDING_CACHE[key] = (time.time() - 120, "OLD INVENTORY")
+    monkeypatch.setattr(ctx_module, "GROUNDING_CACHE_TTL_SECS", 0)  # force a refetch
+
+    def slow_fetch():
+        time.sleep(2.0)
+        return "NEW INVENTORY"
+
+    t0 = time.monotonic()
+    text, source = ctx_module._grounding_with_cache(
+        cache_key=key, fetch=slow_fetch, fresh_source="src", budget_s=0.3,
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.5, "must not wait out the full 2s fetch"
+    assert text == "OLD INVENTORY", "served the stale cached value"
+    assert source.startswith("src+stale(age=")
+
+
+def test_grounding_budget_no_cache_raises_within_budget():
+    def slow_fetch():
+        time.sleep(2.0)
+        return "X"
+
+    t0 = time.monotonic()
+    with pytest.raises(Exception):
+        ctx_module._grounding_with_cache(
+            cache_key="inv::budget-nocache", fetch=slow_fetch, fresh_source="src", budget_s=0.3,
+        )
+    assert time.monotonic() - t0 < 1.5, "budget must bound the wait even with no cache"
+
+
+def test_grounding_late_fetch_warms_cache_for_next_turn(monkeypatch):
+    monkeypatch.setattr(ctx_module, "GROUNDING_CACHE_TTL_SECS", 60)
+    key = "inv::late-warm"
+
+    def slowish():
+        time.sleep(0.4)
+        return "WARMED"
+
+    # First turn gives up at 0.2s (no cache) and raises.
+    with pytest.raises(Exception):
+        ctx_module._grounding_with_cache(cache_key=key, fetch=slowish, fresh_source="src", budget_s=0.2)
+    # The background thread finishes ~0.4s later and warms the cache.
+    time.sleep(0.6)
+    text, source = ctx_module._grounding_with_cache(
+        cache_key=key, fetch=lambda: "SHOULD_NOT_RUN", fresh_source="src", budget_s=5.0,
+    )
+    assert text == "WARMED", "late-completing fetch should have warmed the cache"
+    assert source.startswith("src+cached(age=")
+
+
+# ---------------------------------------------------------------------------
 # Tools grounding
 # ---------------------------------------------------------------------------
 

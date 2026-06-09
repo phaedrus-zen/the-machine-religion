@@ -27,6 +27,17 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_double_agent_blackboard(tmp_path, monkeypatch):
     os.environ.setdefault("MS4_ALLOW_UNCONTAINED_RUNTIME", "1")
+    # The Quartermaster inline fast-path + curated tools summary make
+    # live MCP / ethics calls against the cluster. Disable both by
+    # default so the broad suite stays fast and offline; the
+    # Quartermaster + Phase-D tests opt back in with
+    # monkeypatch.setenv("MS4_QM_INLINE"/"MS4_QM_TOOLS_SUMMARY", "1").
+    os.environ.setdefault("MS4_QM_INLINE", "0")
+    os.environ.setdefault("MS4_QM_TOOLS_SUMMARY", "0")
+    # Isolate the MCP-importer registry so build_catalog() in unrelated
+    # tests never picks up a stray runtime/mcp_imports.json. Tests that
+    # exercise the bridge set their own path.
+    os.environ.setdefault("MS4_MCP_IMPORTS_PATH", str(tmp_path / "mcp_imports.json"))
     from machine_spirit_4.double_agent import (
         Blackboard,
         JobRunner,

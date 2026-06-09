@@ -114,6 +114,75 @@ def test_runner_default_model_is_hermes_compatible_for_depth(tmp_path):
     assert runner.default_model == "qwen3-coder-next:latest"
 
 
+# ----- sanctioned background-agent entry point + iteration config ----------
+
+
+def test_new_background_agent_sanctioned_path(tmp_path, monkeypatch):
+    """Double Agent workers build their agent via new_background_agent —
+    the sanctioned entry point that replaced the
+    runner._new_agent.__self__._agent_class() reach-through."""
+    monkeypatch.setenv("MS4_DA_MAX_ITERATIONS", "7")
+    runner = Ms4HermesRunner(
+        hermes_dir=str(tmp_path), agent_cls=FakeHermesAgent, face_lobe_chat=FakeFaceLobeChat()
+    )
+    plugin_checked = {"n": 0}
+    monkeypatch.setattr(runner, "ensure_hermes_path", lambda: None)
+    monkeypatch.setattr(runner, "require_plugin", lambda: plugin_checked.__setitem__("n", plugin_checked["n"] + 1))
+
+    def ts(*_a):
+        pass
+
+    def tc(*_a):
+        pass
+
+    agent = runner.new_background_agent(
+        session_id="da-worker-1", model="phi4-mini:latest",
+        tool_start_callback=ts, tool_complete_callback=tc,
+    )
+    assert isinstance(agent, FakeHermesAgent)
+    assert agent.kwargs["session_id"] == "da-worker-1"
+    assert agent.kwargs["model"] == "phi4-mini:latest"
+    assert agent.kwargs["platform"] == "ms4"
+    assert agent.kwargs["skip_memory"] is True
+    assert agent.kwargs["skip_context_files"] is True
+    assert agent.kwargs["tool_start_callback"] is ts
+    assert agent.kwargs["tool_complete_callback"] is tc
+    # Env-driven iteration cap is honored.
+    assert agent.kwargs["max_iterations"] == 7
+    # The sanctioned path enforces the ethics plugin before constructing.
+    assert plugin_checked["n"] == 1
+
+
+def test_new_background_agent_falls_back_to_default_model(tmp_path, monkeypatch):
+    runner = Ms4HermesRunner(
+        hermes_dir=str(tmp_path), agent_cls=FakeHermesAgent, face_lobe_chat=FakeFaceLobeChat()
+    )
+    monkeypatch.setattr(runner, "ensure_hermes_path", lambda: None)
+    monkeypatch.setattr(runner, "require_plugin", lambda: None)
+    agent = runner.new_background_agent(
+        session_id="da-2", model=None,
+        tool_start_callback=lambda *_a: None, tool_complete_callback=lambda *_a: None,
+    )
+    assert agent.kwargs["model"] == runner.default_model
+
+
+def test_max_iterations_env_helpers(monkeypatch):
+    from machine_spirit_4.gateway import hermes_runner as hr
+
+    monkeypatch.delenv("MS4_DA_MAX_ITERATIONS", raising=False)
+    monkeypatch.setenv("MS4_HERMES_MAX_ITERATIONS", "3")
+    assert hr.foreground_max_iterations() == 3
+    # Background falls back to the foreground value when its own var is unset.
+    assert hr.background_max_iterations() == 3
+    monkeypatch.setenv("MS4_DA_MAX_ITERATIONS", "9")
+    assert hr.background_max_iterations() == 9
+    # Garbage / empty fall back to the documented default (12).
+    monkeypatch.setenv("MS4_HERMES_MAX_ITERATIONS", "garbage")
+    monkeypatch.delenv("MS4_DA_MAX_ITERATIONS", raising=False)
+    assert hr.foreground_max_iterations() == 12
+    assert hr.background_max_iterations() == 12
+
+
 def test_runner_injects_tmr_grounding_into_face_lobe_extra_system(tmp_path):
     fake = FakeFaceLobeChat()
     runner = Ms4HermesRunner(hermes_dir=str(tmp_path), agent_cls=FakeHermesAgent, face_lobe_chat=fake)

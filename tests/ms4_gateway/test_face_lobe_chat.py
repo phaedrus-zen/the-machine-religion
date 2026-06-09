@@ -272,8 +272,12 @@ def test_system_prompt_contains_anti_hallucination_clauses():
     assert "do not invent tool names" in prompt, \
         "tool-name fabrication rule missing"
 
-    # /deep escape hatch documented.
-    assert "/deep" in prompt, "/deep escape hatch missing from prompt"
+    # May-31 2026: the prompt must FORBID telling the operator to type a
+    # slash command (impossible on voice) — deep work auto-dispatches.
+    assert "/deep" in prompt, "/deep handling missing from prompt"
+    plower = prompt.lower()
+    assert "never tell" in plower and "slash command" in plower, \
+        "prompt must forbid instructing the user to type a slash command"
 
     # And — the May-2026 fix — small talk must be explicitly allowed
     # so the model doesn't refuse "can you hear me?" as if it were a
@@ -297,6 +301,53 @@ def test_metrics_on_fallback_path_counts_two_api_calls(fake_hivemind):
     assert m["fallback_used"] is True
     assert m["requested_model"] == "phi4-mini"
     assert m["effective_model"] == "qwen3-coder-next:latest"
+
+
+def test_is_local_ollama_model_classifies_by_tag():
+    """keep_alive is Ollama-specific; only local ``name:tag`` models get
+    it. Hosted-provider ids (no colon, or gpt-/claude-/o-prefixed) must
+    be excluded so they aren't sent an unknown body field."""
+    from machine_spirit_4.gateway.face_lobe_chat import _is_local_ollama_model
+
+    assert _is_local_ollama_model("llama3.1:8b") is True
+    assert _is_local_ollama_model("qwen3-coder-next:latest") is True
+    assert _is_local_ollama_model("phi4-mini:latest") is True
+    # Hosted providers — no keep_alive.
+    assert _is_local_ollama_model("gpt-4o-mini") is False
+    assert _is_local_ollama_model("gpt-5.2") is False
+    assert _is_local_ollama_model("claude-3-5-haiku-20241022") is False
+    assert _is_local_ollama_model("o4-mini") is False
+    assert _is_local_ollama_model(None) is False
+    assert _is_local_ollama_model("") is False
+
+
+def test_face_keep_alive_default_and_disable(monkeypatch):
+    from machine_spirit_4.gateway.face_lobe_chat import _face_keep_alive
+
+    monkeypatch.delenv("MS4_FACE_KEEP_ALIVE", raising=False)
+    assert _face_keep_alive("llama3.1:8b") == "10m"      # default
+    assert _face_keep_alive("gpt-4o-mini") is None        # hosted -> never
+    monkeypatch.setenv("MS4_FACE_KEEP_ALIVE", "30m")
+    assert _face_keep_alive("llama3.1:8b") == "30m"
+    monkeypatch.setenv("MS4_FACE_KEEP_ALIVE", "")         # explicit disable
+    assert _face_keep_alive("llama3.1:8b") is None
+
+
+def test_keep_alive_sent_for_local_model_not_hosted(fake_hivemind, monkeypatch):
+    """The anti-thrash residency bias: a local Ollama-tag Face model must
+    carry keep_alive on the wire so HiveMind keeps IT resident over a
+    transient Depth model; a hosted model must NOT (it would 400)."""
+    monkeypatch.delenv("MS4_FACE_KEEP_ALIVE", raising=False)
+    fake_hivemind["script"]["per_model"] = {
+        "llama3.1:8b": {"content": "local reply"},
+        "gpt-4o-mini": {"content": "hosted reply"},
+    }
+    flc = FaceLobeChat(hivemind_url=fake_hivemind["url"])
+    flc.chat("Hi", session_id="ka-local", model="llama3.1:8b")
+    flc.chat("Hi", session_id="ka-hosted", model="gpt-4o-mini")
+    by_model = {b["model"]: b for b in fake_hivemind["log"]}
+    assert by_model["llama3.1:8b"].get("keep_alive") == "10m"
+    assert "keep_alive" not in by_model["gpt-4o-mini"]
 
 
 def test_stream_stall_returns_partial_text_without_hanging(fake_hivemind):

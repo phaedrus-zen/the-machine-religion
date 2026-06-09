@@ -163,7 +163,8 @@ def test_mark_stale_explicitly(board):
         runner.shutdown(wait=False)
 
 
-def test_bump_revision_marks_older_jobs_stale(board):
+def test_bump_revision_marks_older_jobs_stale(board, monkeypatch):
+    monkeypatch.setenv("MS4_DA_AUTOSTALE", "1")  # legacy revision-driven staling
     chat = FakeChat(sleep_until=threading.Event())  # never returns
     runner = JobRunner(blackboard=board, chat_runner_factory=chat.factory)
     try:

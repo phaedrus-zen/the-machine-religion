@@ -57,6 +57,16 @@ def _fake_urlopen_factory(handlers):
 # ----- check_voice_ready ----------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_ready_cache():
+    # check_voice_ready caches successes (15s TTL) so the MS3 round-trip
+    # is off the per-turn critical path. Tests reuse the same ms3_url, so
+    # clear the cache before each one or a cached "ready" leaks across.
+    voice._clear_voice_ready_cache()
+    yield
+    voice._clear_voice_ready_cache()
+
+
 def test_check_voice_ready_passes_when_input_ready(monkeypatch):
     fake, FakeResponse = _fake_urlopen_factory([
         (lambda u: "/voice/status" in u, lambda r: FakeResponse(json.dumps({"voice_input_ready": True}).encode("utf-8"))),
@@ -79,11 +89,131 @@ def test_check_voice_ready_fails_closed_when_not_ready(monkeypatch):
 
 
 def test_check_voice_ready_fails_closed_when_ms3_unreachable(monkeypatch):
+    # No hivemind_url -> no fallback -> still fails closed (unchanged).
     def boom(*_args, **_kwargs):
         raise urllib.error.URLError("connection refused")
     monkeypatch.setattr(voice.urllib.request, "urlopen", boom)
     with pytest.raises(voice.VoiceUnavailable):
         voice.check_voice_ready("http://ms3:9080")
+
+
+def test_check_voice_ready_falls_back_to_hivemind_asr_when_ms3_down(monkeypatch):
+    # MS3 crashed (connection refused) but HiveMind ASR is healthy ->
+    # voice proceeds rather than dying with the identity sidecar.
+    def boom(*_a, **_k):
+        raise urllib.error.URLError("[WinError 10061] actively refused")
+    monkeypatch.setattr(voice.urllib.request, "urlopen", boom)
+    import machine_spirit_4.gateway.voice_admin as va
+    monkeypatch.setattr(va, "get_provision_status",
+                        lambda url, svc, timeout=5: {"healthy": True, "provisioning_state": "running"})
+    payload = voice.check_voice_ready("http://ms3:9080", hivemind_url="http://hive:6089")
+    assert payload["voice_input_ready"] is True
+    assert payload["source"] == "hivemind-asr-fallback"
+    assert payload["ms3_unreachable"] is True
+
+
+def test_check_voice_ready_caches_success_off_critical_path(monkeypatch):
+    """A successful readiness check is cached so the MS3 round-trip is
+    paid once per conversation, not every turn. The second call inside
+    the TTL must NOT hit MS3 again."""
+    calls = {"n": 0}
+    _, FakeResponse = _fake_urlopen_factory([])
+
+    def counting(url, *a, **k):
+        calls["n"] += 1
+        return FakeResponse(json.dumps({"voice_input_ready": True}).encode("utf-8"))
+
+    monkeypatch.setenv("MS4_VOICE_READY_CACHE_S", "15")
+    monkeypatch.setattr(voice.urllib.request, "urlopen", counting)
+    p1 = voice.check_voice_ready("http://ms3:9080")
+    p2 = voice.check_voice_ready("http://ms3:9080")
+    assert p1["voice_input_ready"] is True and p2["voice_input_ready"] is True
+    assert calls["n"] == 1, f"second call should hit cache, not MS3 (got {calls['n']} round-trips)"
+
+
+def test_check_voice_ready_does_not_cache_failure(monkeypatch):
+    """A 'not ready' result is never cached — recovery must be detected
+    on the very next turn."""
+    monkeypatch.setenv("MS4_VOICE_READY_CACHE_S", "15")
+    state = {"ready": False}
+    _, FakeResponse = _fake_urlopen_factory([])
+
+    def variable(url, *a, **k):
+        return FakeResponse(json.dumps({"voice_input_ready": state["ready"]}).encode("utf-8"))
+
+    monkeypatch.setattr(voice.urllib.request, "urlopen", variable)
+    with pytest.raises(voice.VoiceUnavailable):
+        voice.check_voice_ready("http://ms3:9080")
+    # MS3 recovers — next call must see it (failure wasn't cached).
+    state["ready"] = True
+    assert voice.check_voice_ready("http://ms3:9080")["voice_input_ready"] is True
+
+
+# ----- provision_tts_replicas (TTS scale-out) -------------------------------
+
+
+def test_provision_tts_replicas_parses_replica_payload(monkeypatch):
+    """POST /provision/tts/scale success returns the replica count so MS4's
+    parallel chunk synthesis fans across one GPU per replica."""
+    fake, FakeResponse = _fake_urlopen_factory([
+        (lambda u: "/provision/tts/scale" in u,
+         lambda r: FakeResponse(json.dumps({
+             "status": "ok", "replicas": 2, "target": 2,
+             "endpoints": [{"gpus": ["0"], "port": 49180}, {"gpus": ["1"], "port": 49181}],
+         }).encode("utf-8"))),
+    ])
+    monkeypatch.setattr(voice.urllib.request, "urlopen", fake)
+    res = voice.provision_tts_replicas(hivemind_url="http://hive:6089")
+    assert res["ok"] is True
+    assert res["replicas"] == 2
+
+
+def test_provision_tts_replicas_sends_target_for_packing(monkeypatch):
+    """When a target is given (pack multiple GIMs per idle GPU), it must
+    be forwarded in the POST body so HiveMind scales past GPU count."""
+    seen = {}
+
+    def capture(request, timeout=None):
+        seen["body"] = json.loads(request.data.decode("utf-8"))
+
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps({"status": "ok", "replicas": 4, "target": 4}).encode()
+        return R()
+
+    monkeypatch.setattr(voice.urllib.request, "urlopen", capture)
+    res = voice.provision_tts_replicas(hivemind_url="http://hive:6089", target=4)
+    assert seen["body"]["target"] == 4
+    assert seen["body"]["job_type"] == "TTS_SUPER"
+    assert res["replicas"] == 4
+
+
+def test_provision_tts_replicas_softfails_on_older_gateway(monkeypatch):
+    """A gateway without the scale endpoint (404) must NOT raise — the
+    single TTS replica still serves voice."""
+    def not_found(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url if hasattr(request, "full_url") else "u",
+            404, "Not Found", {}, io.BytesIO(b"no such route"),
+        )
+
+    monkeypatch.setattr(voice.urllib.request, "urlopen", not_found)
+    res = voice.provision_tts_replicas(hivemind_url="http://hive:6089")
+    assert res["ok"] is False
+    assert res["status"] == 404
+
+
+def test_check_voice_ready_fails_closed_when_ms3_down_and_asr_unhealthy(monkeypatch):
+    # MS3 down AND HiveMind ASR not healthy -> genuinely can't do voice.
+    def boom(*_a, **_k):
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(voice.urllib.request, "urlopen", boom)
+    import machine_spirit_4.gateway.voice_admin as va
+    monkeypatch.setattr(va, "get_provision_status",
+                        lambda url, svc, timeout=5: {"healthy": False, "provisioning_state": "unknown"})
+    with pytest.raises(voice.VoiceUnavailable):
+        voice.check_voice_ready("http://ms3:9080", hivemind_url="http://hive:6089")
 
 
 # ----- transcribe -----------------------------------------------------------
@@ -188,7 +318,7 @@ class FakeRunner:
     ms3_url = "http://ms3"
     hivemind_url = "http://hive"
 
-    def chat(self, message, *, session_id=None, model=None):
+    def chat(self, message, *, session_id=None, model=None, **_):
         return {
             "text": f"echo:{message}",
             "session_id": session_id or "s1",

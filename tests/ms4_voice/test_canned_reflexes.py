@@ -33,6 +33,15 @@ import pytest
 from machine_spirit_4.gateway import canned_reflexes as cr
 
 
+@pytest.fixture(autouse=True)
+def _disable_reflex_qa(monkeypatch):
+    """These tests exercise generation/listing mechanics, not the QA
+    round-trip (which transcribes audio back via ASR). Keep QA OFF so they
+    stay hermetic and don't reach the network. QA itself is covered in
+    test_reflex_qa.py."""
+    monkeypatch.setenv("MS4_REFLEX_QA", "0")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -97,6 +106,15 @@ def test_catalog_has_expected_categories():
         cr.CATEGORY_ERROR,
         cr.CATEGORY_CONFIRM,
         cr.CATEGORY_IDENTITY,
+        # Intent/sentiment categories for the context-aware reflex (Jun 1 2026).
+        cr.CATEGORY_Q,
+        cr.CATEGORY_REQUEST,
+        cr.CATEGORY_GRATITUDE,
+        cr.CATEGORY_GREETING,
+        cr.CATEGORY_STATEMENT,
+        cr.CATEGORY_CORRECTION,
+        cr.CATEGORY_AFFIRM,
+        cr.CATEGORY_EGG,
     ])
 
 
@@ -213,7 +231,7 @@ def test_generate_all_aggregates_failures(cache_dir, monkeypatch):
 
     def flaky(*, hivemind_url, text, **_kw):
         calls["n"] += 1
-        if "Mhm" in text:
+        if "Mhm?" in text:  # exact ack_mhm text; the catalog now also has "Mhm." (stmt_mhm)
             raise RuntimeError("HiveMind hiccup")
         return {
             "audio_bytes": _fake_wav_bytes(text),

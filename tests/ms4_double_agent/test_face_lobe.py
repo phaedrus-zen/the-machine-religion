@@ -32,7 +32,8 @@ def _envelope(conv="conv-1", revision=1) -> JobEnvelope:
     return env
 
 
-def test_face_lobe_turn_start_bumps_revision_and_stales_old_jobs(board):
+def test_face_lobe_turn_start_bumps_revision_and_stales_old_jobs(board, monkeypatch):
+    monkeypatch.setenv("MS4_DA_AUTOSTALE", "1")  # legacy revision-driven staling
     runner = JobRunner(blackboard=board, chat_runner_factory=lambda: (lambda **_: {"text": "n/a"}))
     try:
         env = _envelope()
@@ -151,6 +152,45 @@ def test_context_block_surfaces_completed_job_result_text(board):
     assert "recently completed Depth Lobe jobs" in block
     assert "Today is Thursday, May 21, 2026" in block, \
         "completed job result text must be quoted in the context block so the Face Lobe can use it"
+
+
+def test_context_block_states_auto_delivery_and_no_speculation(board):
+    """Phase 4: the block must tell the Face Lobe that the system
+    auto-delivers completed jobs and that it must not speculate about
+    job state (fixes the observed 'already queued / might be cancelled'
+    hallucinations)."""
+    env = _envelope(conv="conv-rules", revision=1)
+    board.insert_job(env)
+    board.update_job_state(env.job_id, state="running")
+    board.bump_revision("conv-rules", user_message_excerpt="is it done?")
+    block = build_face_lobe_context_block(conversation_id="conv-rules", blackboard=board)
+    assert block is not None
+    assert "delivers each result to the user automatically" in block
+    assert "Do NOT speculate" in block
+    assert "delivered automatically when ready" in block
+    # Status-query handling: 'is it ready / what finished' must be answered
+    # from the completed list, not deflected to /deep.
+    assert "STATUS question" in block
+    assert "NEVER tell the user to re-dispatch" in block
+
+
+def test_completed_jobs_labeled_most_recent_first(board):
+    """The completed list is updated_at DESC; the block says so + the
+    status rule keys off 'most recent' to deliver the right result."""
+    from machine_spirit_4.double_agent import JobResult
+
+    for i in range(2):
+        env = _envelope(conv="conv-order", revision=1)
+        board.insert_job(env)
+        board.update_job_state(env.job_id, state="completed",
+                                last_safe_user_status=f"job {i} status")
+        board.insert_result(JobResult(
+            job_id=env.job_id, status="success", summary=f"job {i}",
+            text=f"result number {i}", confidence="high",
+        ))
+    block = build_face_lobe_context_block(conversation_id="conv-order", blackboard=board)
+    assert block is not None
+    assert "MOST RECENT FIRST" in block
 
 
 def test_context_block_extra_authoritative_lines_appear_first(board):
