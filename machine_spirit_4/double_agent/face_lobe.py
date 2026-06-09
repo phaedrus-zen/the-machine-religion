@@ -4,9 +4,12 @@ The Face Lobe is the gateway's existing chat path. The two
 adjustments this module owns are:
 
 1. **Revision bump per user message** — every call into
-   :func:`face_lobe_turn_start` increments the conversation revision
-   and stales any background job that was still running for an older
-   revision. Mirrors artifact §12.
+   :func:`face_lobe_turn_start` increments the conversation revision.
+   As of May 30 2026 this no longer auto-stales older in-flight jobs by
+   default (``MS4_DA_AUTOSTALE=0``): deep jobs run to completion and the
+   system delivers their results automatically; only an explicit cancel
+   stops a job. Set ``MS4_DA_AUTOSTALE=1`` to restore the legacy
+   revision-driven staling (artifact §12).
 
 2. **Anti-hallucination context block** — :func:`build_face_lobe_context_block`
    produces a structured block to prepend to the grounded user
@@ -40,8 +43,20 @@ _ANTI_HALLUCINATION_RULES = (
     "- For active jobs, refer only to the listed safe_user_status. Do not summarize beyond it.\n"
     "- For completed jobs listed above with a 'result:' line, the result IS the answer when "
     "relevant — quote it back rather than re-running or re-asking.\n"
-    "- If the latest user message contradicts an older job, treat that job as stale and "
-    "explain rather than presenting its result as final."
+    "- Deep jobs run to completion and the SYSTEM delivers each result to the user "
+    "automatically the moment it finishes. You do NOT poll, re-dispatch, or chase them.\n"
+    "- Do NOT speculate about or invent a job's state. Never say a job is 'queued', "
+    "'cancelled', 'might still be running', or 'already running' unless that exact state is "
+    "listed above. State only what the lines above say.\n"
+    "- If the user asks whether an in-flight job is done and it is still listed active, say "
+    "it's still working and that its result will be delivered automatically when ready — "
+    "do not guess a status or a result.\n"
+    "- If the user asks a STATUS question ('is it ready?', 'what just finished?', 'any "
+    "update?', 'did anything finish?', 'is it done?', 'status?'): answer from the lists "
+    "above. If there are recently completed jobs, report the MOST RECENT one(s) and their "
+    "result — that completed work IS the answer. Only say nothing finished if the completed "
+    "list is empty. NEVER tell the user to re-dispatch or use /deep for work that already "
+    "appears completed above."
 )
 
 
@@ -143,7 +158,7 @@ def build_face_lobe_context_block(
     else:
         lines.append("- no active background jobs")
     if completed:
-        lines.append("- recently completed Depth Lobe jobs (use these answers when relevant):")
+        lines.append("- recently completed Depth Lobe jobs (MOST RECENT FIRST; use these answers when relevant):")
         for job in completed:
             jid = job.get("job_id", "?")
             state = job.get("state", "?")

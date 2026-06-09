@@ -42,6 +42,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .blackboard import Blackboard, default_blackboard
+from .continuation import (
+    CLASSIFIER_CONSULT_MAX_LEN,
+    ContinuationClassifier,
+    phrase_is_continuation,
+)
 from .schemas import JobEnvelope, SchemaError
 from .worker import DoubleAgentWorker
 from . import safety
@@ -50,77 +55,48 @@ from . import safety
 log = logging.getLogger("ms4.double_agent.runner")
 
 
-# Short-continuation phrases that should NOT stale an in-flight Depth
-# Lobe job. When the user says one of these, they're asking the
-# background work to keep going / surface its result, not to start a
-# new line of thought.
-#
-# Matching contract:
-#  * lowercased, stripped of trailing punctuation
-#  * exact match against the whole message (so "do it" doesn't also
-#    fire on "do it differently") OR the message starts with the
-#    phrase followed by a connector (please / sir / now / etc).
-#  * length-capped so a long sentence containing "yes" as a word
-#    doesn't accidentally count.
-_CONTINUATION_PHRASES: tuple[str, ...] = (
-    "do that",
-    "yes",
-    "yeah",
-    "yep",
-    "yup",
-    "ok",
-    "okay",
-    "sure",
-    "go ahead",
-    "go on",
-    "continue",
-    "keep going",
-    "please do",
-    "do it",
-    "please continue",
-    "and?",
-    "and then?",
-    "what next",
-    "what's next",
-    "and after",
-    "any update",
-    "any updates",
-    "do you have an update",
-    "any progress",
-    "what's the status",
-    "status update",
-)
-_CONTINUATION_MAX_LEN = 50
-# Words allowed AFTER a continuation phrase without flipping it into
-# a new-direction message. E.g. "yes please", "do it now", "ok thanks".
-_CONTINUATION_TAIL_TOKENS: tuple[str, ...] = (
-    "please", "now", "thanks", "thank you", "sir", "ma'am",
-    "if you can", "if you could", "for me", "go", "do",
-)
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(minimum, int(raw.strip()))
+    except (TypeError, ValueError):
+        log.warning("ms4.double_agent: ignoring non-integer %s=%r; default %d", name, raw, default)
+        return default
 
 
-def _is_short_continuation(message: str) -> bool:
-    """Return True when the message looks like a follow-up that wants
-    in-flight work to keep going, not a new direction."""
-    if not message:
-        return False
-    # Strip trailing punctuation + whitespace and lowercase.
-    text = message.strip().lower().rstrip(".!?,;: \t\n")
-    if not text or len(text) > _CONTINUATION_MAX_LEN:
-        return False
-    for phrase in _CONTINUATION_PHRASES:
-        if text == phrase:
-            return True
-        # "<phrase> please" / "<phrase> now" / etc.
-        if text.startswith(phrase + " "):
-            tail = text[len(phrase) + 1:].strip()
-            if tail in _CONTINUATION_TAIL_TOKENS:
-                return True
-            # Also accept a tail that's itself another continuation
-            # phrase ("yes please continue") — recurse once.
-            if any(tail == p or tail.startswith(p + " ") for p in _CONTINUATION_PHRASES):
-                return True
-    return False
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(minimum, float(raw.strip()))
+    except (TypeError, ValueError):
+        log.warning("ms4.double_agent: ignoring non-float %s=%r; default %s", name, raw, default)
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _autostale_enabled() -> bool:
+    """Whether a new user turn auto-stales in-flight Depth Lobe jobs from
+    older revisions. Default OFF (May 30 2026): deep jobs run to
+    completion and the system delivers the result when done; only an
+    explicit cancel stops a job. Set ``MS4_DA_AUTOSTALE=1`` to restore the
+    legacy revision-driven staling (continuation-aware)."""
+    return _env_bool("MS4_DA_AUTOSTALE", False)
+
+
+# Backwards-compatible alias. The phrase fast-path moved to
+# :mod:`machine_spirit_4.double_agent.continuation`; keep the old name
+# importable for any caller/test that referenced it.
+_is_short_continuation = phrase_is_continuation
 
 
 class RunnerError(RuntimeError):
@@ -139,16 +115,29 @@ class JobRunner:
         *,
         blackboard: Blackboard | None = None,
         chat_runner_factory: ChatRunnerFactory | None = None,
-        max_concurrent_jobs: int = safety.DEFAULT_MAX_CONCURRENT_JOBS,
-        cancel_grace_seconds: float = 5.0,
+        max_concurrent_jobs: int | None = None,
+        cancel_grace_seconds: float | None = None,
+        continuation_classifier: ContinuationClassifier | None = None,
     ) -> None:
         self.blackboard = blackboard or default_blackboard()
         self._chat_runner_factory = chat_runner_factory
+        self._continuation_classifier = continuation_classifier
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
         self._futures: dict[str, Future] = {}
         # subprocess.Popen per running job_id; populated in subprocess mode.
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
+        # Concurrency cap + cancel grace are env-tunable so an operator can
+        # trade foreground headroom / shutdown latency without a code change.
+        # Explicit constructor args still win (tests pass them directly).
+        if max_concurrent_jobs is None:
+            max_concurrent_jobs = _env_int(
+                "MS4_DA_MAX_CONCURRENT_JOBS", safety.DEFAULT_MAX_CONCURRENT_JOBS, minimum=1
+            )
+        if cancel_grace_seconds is None:
+            cancel_grace_seconds = _env_float(
+                "MS4_DA_CANCEL_GRACE_SECONDS", 5.0, minimum=0.5
+            )
         self._max_concurrent = max(1, int(max_concurrent_jobs))
         self._cancel_grace_seconds = max(0.5, float(cancel_grace_seconds))
         self._pool = ThreadPoolExecutor(
@@ -345,6 +334,11 @@ class JobRunner:
     def get(self, job_id: str) -> dict[str, Any] | None:
         return self.blackboard.get_job_snapshot(job_id)
 
+    def get_result(self, job_id: str) -> dict[str, Any] | None:
+        """The persisted ``JobResult`` (text/summary/evidence) for a
+        finished job, or ``None`` if it hasn't produced one yet."""
+        return self.blackboard.get_result(job_id)
+
     # ------- cancel / mark_stale -----------------------------------------
 
     def cancel(self, job_id: str) -> dict[str, Any]:
@@ -406,24 +400,89 @@ class JobRunner:
 
     # ------- revision bumping --------------------------------------------
 
+    def _has_staleable_jobs(self, conversation_id: str) -> bool:
+        """True if the conversation has any queued/running job that a
+        revision bump could stale. Used to bound continuation detection
+        (no jobs in flight → no decision to make → never spend an LLM
+        call)."""
+        try:
+            jobs = self.blackboard.list_jobs(
+                conversation_id=conversation_id,
+                states=("queued", "running"),
+                limit=1,
+            )
+        except Exception:
+            return False
+        return bool(jobs)
+
+    def _detect_continuation(self, message: str, *, has_jobs: bool) -> tuple[bool, str]:
+        """Decide whether ``message`` is a continuation of in-flight work.
+
+        Returns ``(is_continuation, method)`` where method is one of
+        ``phrase`` / ``classifier`` / ``none``. Two-layer:
+
+        1. Phrase fast-path (zero latency, always on).
+        2. Optional injected LLM classifier — consulted ONLY when there
+           are staleable jobs, the phrase path missed, and the message
+           is short enough to plausibly be a continuation. Fail-safe:
+           an unsure/unavailable verdict (``None``) is treated as "not a
+           continuation" so behavior matches the pre-classifier runtime.
+        """
+        if phrase_is_continuation(message):
+            return True, "phrase"
+        classifier = self._continuation_classifier
+        if (
+            classifier is not None
+            and has_jobs
+            and message
+            and len(message.strip()) <= CLASSIFIER_CONSULT_MAX_LEN
+        ):
+            try:
+                verdict = classifier(message)
+            except Exception as exc:  # noqa: BLE001 — classifier must never break a turn
+                log.info("continuation classifier raised (treating as unsure): %s", exc)
+                verdict = None
+            if verdict is True:
+                return True, "classifier"
+        return False, "none"
+
     def bump_revision(self, conversation_id: str, *, user_message_excerpt: str = "") -> dict[str, Any]:
         revision = self.blackboard.bump_revision(
             conversation_id,
             user_message_excerpt=user_message_excerpt,
         )
-        # Continuation-aware staling (May 26 2026): when the new user
-        # message is a short continuation ("do that", "yes", "ok",
-        # "go on", "and?"), the user is WAITING for the in-flight
-        # background work — staling those jobs is exactly the wrong
-        # thing. Live evidence: operator hit a turn where a Depth
-        # Lobe job got dispatched, then they said "ok, then do that"
-        # and the dispatched job was killed mid-stream by the
-        # revision bump. Skip the stale step for those phrases.
-        if _is_short_continuation(user_message_excerpt):
+        # May 30 2026: auto-staling is OFF by default. Deep jobs now run
+        # to completion regardless of subsequent turns, and the system
+        # delivers the result when done (UI auto-announce). Only an
+        # explicit cancel stops a job. This fixes the live failure mode
+        # where asking "is it done?" bumped the revision and killed the
+        # very job the operator was waiting on. Set MS4_DA_AUTOSTALE=1 to
+        # restore the legacy continuation-aware revision staling below.
+        if not _autostale_enabled():
+            return {
+                "revision": revision.to_dict(),
+                "marked_stale": [],
+                "continuation_detected": False,
+                "autostale": False,
+            }
+        # ---- Legacy path (MS4_DA_AUTOSTALE=1) ----
+        # Continuation-aware staling (May 26 2026; classifier added
+        # May 28 2026): when the new user message is a continuation
+        # ("do that", "yes", "ok", "any update?", or a paraphrase the
+        # phrase list can't enumerate), the user is WAITING for the
+        # in-flight background work — staling those jobs is exactly the
+        # wrong thing. Only spend a classifier call when there's actually
+        # staleable work in flight.
+        has_jobs = self._has_staleable_jobs(conversation_id)
+        is_continuation, method = self._detect_continuation(
+            user_message_excerpt, has_jobs=has_jobs
+        )
+        if is_continuation:
             return {
                 "revision": revision.to_dict(),
                 "marked_stale": [],
                 "continuation_detected": True,
+                "continuation_method": method,
             }
         stale_ids = self.blackboard.mark_stale_jobs_for_revision(
             conversation_id, revision.revision_id
@@ -442,6 +501,7 @@ class JobRunner:
         return {
             "revision": revision.to_dict(),
             "marked_stale": list(stale_ids),
+            "continuation_detected": False,
         }
 
     # ------- internals ----------------------------------------------------
@@ -461,6 +521,15 @@ class JobRunner:
         chat runner (e.g. embedding MS4 in a unified process). Setting
         this back to ``None`` returns to subprocess mode."""
         self._chat_runner_factory = factory
+
+    def set_continuation_classifier(self, classifier: ContinuationClassifier | None) -> None:
+        """Wire (or clear) the optional LLM continuation classifier.
+
+        Production wires this in ``server.run()`` so paraphrased
+        continuations don't wrongly stale in-flight work. Tests leave it
+        unset, so ``bump_revision`` stays deterministic and offline
+        (phrase fast-path only). Setting ``None`` returns to phrase-only."""
+        self._continuation_classifier = classifier
 
     # ------- shutdown for tests ------------------------------------------
 

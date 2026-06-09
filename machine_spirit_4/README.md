@@ -862,9 +862,61 @@ This split is structural: the foreground returns in well under a second even for
 
 The Face Lobe model picker no longer enforces the 64K-context Hermes minimum (because Hermes is no longer in this path) and prefers small fast models again — see "Face Lobe Model" below.
 
+## Per-lobe model selection (UI, obeyed everywhere)
+
+May 31 2026: the web UI exposes **two** model dropdowns — **Face Lobe model** and **Depth Lobe model** — each with an explicit "Auto" option, persisted per-browser and populated from `/v1/models`. Both are obeyed:
+
+- **Face Lobe model** (`model_id`): applies to text chat AND voice. Voice previously force-nulled it to stay fast; now it honors your choice (empty = fast auto-picker). Set `MS4_VOICE_FORCE_AUTO=1` to force the fast picker for voice regardless. Note: picking a heavy Face model makes voice slower — your call.
+- **Depth Lobe model** (`depth_model_id`): flows to dispatched deep jobs as `resource_request.model_override` and is honored verbatim by `choose_depth_model(envelope_override=...)`; empty = the recommended-depth picker. Also settable in the "Submit deep job" dialog.
+
+Fully-local selections are honored verbatim — no cloud requirement.
+
+**Voice stall guard.** Because a heavy/cloud Face model can be slow or stall, the streaming voice turn has a **first-token watchdog** (`MS4_VOICE_FIRST_TOKEN_TIMEOUT_S`, default 20s): if the model produces no first token within the budget, the turn fails over to the canned "trouble reaching the cluster" reflex and ends cleanly instead of freezing the UI on "streaming…". A first token stands the watchdog down, so slow-but-streaming models still run to completion.
+
+**Voice brevity + chunk coalescing.** Voice replies are spoken aloud, so the Face Lobe is told (on voice turns only) to keep it to 2-3 short sentences and summarize instead of reading out lists/inventories — otherwise a verbose model produces a multi-minute spoken answer (`MS4_VOICE_BREVITY=0` to disable). After the first (fast) chunk, the sentence chunker also coalesces short sentences up to `MS4_VOICE_MIN_CHUNK_WORDS` (default 6) so a chatty reply makes fewer TTS calls and spends less time in the in-order reordering queue (the `held_for_inorder_ms` metric). These cut both the length and the chunk churn of voice turns when a heavy Face model is selected.
+
+**Audio prebuffer (no first→second-word gap).** The browser player holds the first chunk(s) of each turn until a second chunk is decoded (or the first is already long enough, or a ~400ms timeout), then plays everything gaplessly via Web Audio. This kills the audible gap a tiny first chunk ("Hey") otherwise leaves before the second word, at the cost of a small, bounded delay to the very first sound.
+
+**Voice feedback overhaul (Jun 1 2026).** Four coordinated changes for a natural conversational feel:
+
+- **No more talking over you.** Speech onset now plays only a soft, ~100ms, low-volume Web Audio tick (not a spoken "Mhm?"). All spoken acknowledgments moved to *after* you finish.
+- **Context-aware "buying time" acks.** When you stop, a tiny model (`MS4_VOICE_REFLEX_MODEL`, default `qwen2.5:0.5b`) classifies your utterance's intent and plays a *fitting, varied* canned phrase (no repeats) during the dead air while the reply generates. Fail-closed to a keyword heuristic. Toggle `MS4_VOICE_SMART_REFLEX`.
+- **High-fidelity thinking ambience.** For longer waits, a subtle programmatic Web Audio pad fills the silence and stops the instant the reply audio starts.
+- **Long-utterance ASR fix.** Full-duplex no longer truncates long speech: a mid-thought pause up to ~1.4s (`vadHangoverMs`) stays one utterance, and a quick re-onset keeps the prior transcript. Tradeoff: the reply starts ~0.7s after you stop.
+
+**TTS keep-warm.** A periodic ping (`MS4_VOICE_TTS_KEEPWARM_SECS`, default 240s) keeps HiveMind's TTS model resident so the first audio chunk isn't a 3-5s cold load.
+
+**ChatGPT-phone latency pass (Jun 1 2026).** Live profiling showed REST TTS is *not* the bottleneck — the dominant voice latency is the Face model's time-to-first-token, which swings from ~3.6s (warm) to ~14s when a deep job is generating. The 14s spikes are **GPU compute/VRAM contention** with the 27B Depth Lobe; the warm overhead is mostly the inline speaker-ID wait. Four levers close the gap:
+
+- **Async speaker ID (per-turn win).** Speaker identification now runs fully *off* the critical path: the transcript ships immediately and a late `speaker` SSE event decorates the bubble when diarization resolves. This removes the up-to-`MS4_VOICE_SPEAKER_ID_BUDGET_S` (1.5s) inline wait from *every* voice turn. Set `MS4_VOICE_SPEAKER_ID_ASYNC=0` to restore the old bounded-inline behavior.
+- **Periodic Face keep-warm (idle cold-start fix).** Every `MS4_VOICE_FACE_KEEPWARM_SECS` (default 180s; 0 disables) the gateway pings the model you're *actually* talking to (`last_face_model()`, tracked per turn) with a 1-token completion so it stays resident across conversational gaps. HiveMind caps client `keep_alive` at ~12 min (verified live), so a sub-12-min loop keeps it warm forever.
+- **Residency bias (anti-thrash).** Every Face turn now sends a fresh `keep_alive` (`MS4_FACE_KEEP_ALIVE`, default `10m`; empty disables). Ollama evicts the *soonest-expiring* model under VRAM pressure, so refreshing the Face model's timer each turn makes a transient Depth job the eviction victim instead of the model the operator is talking to. Scoped to local Ollama-tag models (`name:tag`); hosted providers (OpenAI/Anthropic) are never sent the field.
+- **Fast small Face model (sub-second tokens).** The UI Face Lobe dropdown now surfaces a "⚡ Fast — best for voice latency" group of curated 3-4B-class models (`phi4-mini`, `ministral-3`, `Llama-3.2-3B`, `llama3.2`, `gemma3`, `qwen3:0.6b`, …). A 3-4B model gives true sub-second first-token *and* contends far less for GPU memory than an 8B sharing a card with the 27B Depth Lobe.
+
+> **Cluster-side residency (the real fix for the 14s spikes).** The contention spikes are ultimately a HiveMind placement concern: for ChatGPT-phone consistency, pin the Face model to one GPU (resident) and the 27B Depth model to the *other* GPU (you have 2× RTX PRO 6000 Blackwell) so foreground and background inference never compete for the same card. MS4's keep-warm + residency-bias mitigate idle eviction and bias which model gets evicted, but a hard no-contention guarantee requires per-GPU placement in the HiveMind config.
+
+**TTS-focused pass (Jun 1 2026, round 2).** A live REST-TTS benchmark on this cluster found the real voice bottleneck is TTS, not the model:
+
+| chunk text | synth_ms | audio_s | RTF |
+|---|---|---|---|
+| "Yeah," (1 word) | 7219 | 5.69 | 1.27 |
+| 3-word clause | 2891 | 1.04 | 2.78 |
+| 6-word sentence | **2061** | 1.49 | **1.39** |
+| 32-word | 12906 | 16.22 | 0.80 |
+
+Findings + fixes:
+- **tts-1 has a ~2s fixed per-call floor and babbles a long garbage tail on 1-3 word fragments.** So the old "tiny first chunk = audio sooner" strategy was *backwards* — a 1-word chunk took 7.2s (with 5.7s of babble) vs 2.1s for a clean 6-word sentence. Fix: `FIRST_CHUNK_MIN_WORDS` 1 → **5** (clean first chunk, no babble) and `MIN_CHUNK_WORDS` 6 → **10** (RTF improves with chunk size, so larger steady-state chunks stay ahead of playback → fewer gaps).
+- **The WebSocket streaming TTS path (`ws_super` / `/v1/text-to-speech/stream-input`) is currently broken on the cluster** — it opens, accepts text, but emits **zero audio** and times out (verified: `first_audio_ms=None, audio_chunks=0` on repeated trials). That's a HiveMind-side fault, which is why REST is the only dependable engine. The realtime pipeline (`/v1/realtime/stream`) exists but depends on the same broken TTS GIM, so streaming ASR/realtime is deferred until the cluster's streaming TTS emits audio.
+- **`check_voice_ready` is now cached** (`MS4_VOICE_READY_CACHE_S`, default 15s): the synchronous MS3 `/voice/status` round-trip that ran before *every* ASR is now paid once per conversation; failures are never cached so outages/recovery are still caught.
+- **Adaptive end-of-turn VAD** (client, default on, toggle in Settings): after a long, clearly-complete utterance (≥2.6s of speech) the end-of-turn pause shortens from 1.4s toward a ~0.9s floor so the reply comes sooner; short/mid-thought fragments keep the full pause so you're never clipped gathering your thoughts.
+
+Honest ceiling: tts-1 itself is ~0.3s/word on this cluster, so first audio floors at ~2s for a clean first chunk — snappier and gap-free now, but true ChatGPT-instant first audio needs the cluster's streaming TTS GIM fixed (it currently emits no audio).
+
+**TTS concurrency scale-out (Jun 2 2026, post-HiveMind-fix).** HiveMind responded to `docs/specs/HIVEMIND_VOICE_PERF_REPORT.md` (see `HIVEMIND_VOICE_PERF_RESPONSE_2026-06-02.md`): they forwarded `keep_alive` (committed) and shipped **`POST /provision/tts/scale`** (launches N TTS GIM replicas, round-robins `/v1/audio/speech` across them). Their v2 confirmed our original premise — **`GEN_LOCK` serializes generation per GIM process**, so throughput scales **near-linearly with replica count** (1 GIM 2.73 rps → 3 GIM 6.58 rps). And TTS is **GPU-idle (~5–10% util, ~3 GB/GIM)**, so replicas can be **packed multiple-per-GPU** (`target` may exceed GPU count). Because parallelism == replica count, MS4 **auto-provisions replicas on boot + periodically** (`provision_tts_replicas()`). **But there's a hard ceiling we learned painfully:** the TTS GIMs are **CPU-bound**, and leaving ~6 of them running pegged the CPU at 100% and **starved the LLM** (`/v1/chat/completions` timed out) and real-speech ASR — over-provisioning TTS breaks the rest of the voice loop. So the default `target` is a deliberately modest **2** (`MS4_VOICE_TTS_REPLICA_TARGET`; empty/0 = one-per-GPU) — enough to keep a typical reply smooth while leaving CPU for the LLM + ASR. Raise it only with CPU headroom (or TTS on dedicated nodes). Note the scale endpoint only **adds** replicas (floors), so MS4 can't shrink an oversized pool — that's a HiveMind-side reset. Other tunables: `MS4_VOICE_TTS_AUTOSCALE` (default on), `MS4_VOICE_TTS_AUTOSCALE_SECS` (default 600s; 0 = boot-only). MS4 stays on the **batch (REST) path**: HiveMind confirmed the **WS streaming path is the source of the "weird pauses"** (RTF ~0.34, ~10× slower than batch; the GIM's per-chunk delivery architecture throttles generation — needs a GIM rebuild). Still open cluster-side: WS streaming reliability (Findings 2–3), GPU affinity, `/api/ps` accounting.
+
 ## Face Lobe Model (Hardware-Aware)
 
-The Face Lobe picks a small/fast model with a clear precedence:
+The Face Lobe picks a small/fast model (when set to "Auto") with a clear precedence:
 
 1. Per-turn `"model"` from the request (or the model dropdown) wins.
 2. Otherwise `MS4_FOREGROUND_MODEL` env var wins.
@@ -953,6 +1005,19 @@ The MS4 UI shows a purple "🧠 Depth Lobe dispatched (model) — job da-... · 
 
 Cached 60 s like the foreground picker.
 
+### Continuation detection (don't stale work the user is waiting for)
+
+Every Face Lobe turn bumps the conversation revision and, by default, stales any in-flight Depth Lobe job from an older revision. That is wrong when the new message is a *continuation* ("ok, do that", "any update?", "go for it") — the user is waiting for that work. `double_agent/continuation.py` guards against it with two layers:
+
+1. **Phrase fast-path** (`phrase_is_continuation`) — zero-latency, deterministic, always on. Catches obvious short affirmations/prompts.
+2. **Optional LLM classifier** (`make_llm_continuation_classifier`) — for paraphrases the phrase list can't enumerate. It is **bounded** (consulted only when there are staleable jobs AND the phrase path missed AND the message is ≤160 chars), **fail-safe** (any error/timeout/unsure verdict degrades to phrase-only behavior — a down cluster never hangs a turn), and **cheap** (one-word output, `max_tokens=4`, short timeout, small model). Wired onto the production runner in `server.run()`; disable with `MS4_DA_CONTINUATION_CLASSIFIER=0`. Tests leave it unset so `bump_revision` stays deterministic and offline.
+
+`bump_revision` returns `continuation_detected` + `continuation_method` (`phrase`/`classifier`/`none`) so the caller can see why work was (or wasn't) staled.
+
+### Background worker construction + config knobs
+
+The Depth Lobe worker builds its isolated Hermes agent via the sanctioned `Ms4HermesRunner.new_background_agent(...)` entry point (replacing a prior private reach-through into runner internals). Operational knobs are env-driven with safe defaults: `MS4_DA_MAX_CONCURRENT_JOBS` (2), `MS4_DA_CANCEL_GRACE_SECONDS` (5.0), `MS4_DA_MAX_ITERATIONS` (falls back to `MS4_HERMES_MAX_ITERATIONS`, 12). Explicit `JobRunner(...)` args still win over env.
+
 REST surface (modeled on HiveMind's Ollama-admin shape; phase 1 is local-only — HiveMind capability-lease routing comes in phase 4):
 
 ```text
@@ -981,12 +1046,82 @@ ms4.double_agent.mark_stale@v1
 
 Web UI at `http://127.0.0.1:9180/` shows a Double Agent panel above the chat when the current conversation has any active or recently completed jobs. Each row reports `last_safe_user_status` only (no model reasoning leaked) and offers a Cancel button for in-flight jobs. A "Submit deep job…" dialog lets the operator dispatch a job directly tied to the current chat session id.
 
+**Completion loop (May 30 2026).** Deep jobs now run to completion no matter what you type next — asking "is it done?" no longer stales the job you're waiting on (it used to: the revision bump killed it). When a job the UI was watching reaches a terminal state, it proactively injects an inline chat bubble — "Deep job done — \<goal\>: \<summary\>" with a **Show details** expander that pulls the full `result.text` from `GET /api/v1/double-agent/jobs/{id}`. Only an explicit Cancel stops a job. Set `MS4_DA_AUTOSTALE=1` to restore the legacy revision-driven staling.
+
+**Proactive *spoken* completion (Jun 1 2026).** The visual bubble isn't enough in a hands-free voice conversation — you'd have to glance at the screen or ask "is it done?". So when you've used voice this session (`voiceModeActive`), a completed deep job now also **speaks up on its own**: a soft two-tone notify chime, then a short synthesized announcement ("Heads up — that's ready. Here's the gist: …. Want the full details?") via the same REST TTS path. It's scheduled through `speakCompletionWhenQuiet()`, which holds the announcement until you're not mid-utterance and no reply audio is playing (it never talks over you; ~20s budget, then it defers to the visual bubble). Toggle it in Settings → "Speak deep-job completions aloud" (`ms4_da_speak_completions`, default on). Text-only sessions keep just the visual bubble.
+
 Face Lobe wiring (every `Ms4HermesRunner.chat` turn):
 
-1. Bumps the conversation revision via `double_agent.face_lobe.face_lobe_turn_start` and stales any older-revision in-flight jobs.
-2. Prepends a Face Lobe context block to the grounded message: current revision id, list of active/stale jobs with their `last_safe_user_status`, and the May-Report / May-Not-Invent rules from artifact §13. The block is templated (not model-generated), so the Face Lobe cannot tamper with its own rules.
+1. Bumps the conversation revision via `double_agent.face_lobe.face_lobe_turn_start`. By default (`MS4_DA_AUTOSTALE=0`) this does NOT stale in-flight jobs; they run to completion and the UI delivers their results automatically.
+2. Prepends a Face Lobe context block to the grounded message: current revision id, active + recently-completed jobs (with completed `result:` text), and the May-Report / May-Not-Invent rules from artifact §13 — including explicit instructions that the system auto-delivers completed jobs and that the Face Lobe must not speculate about job state. The block is templated (not model-generated), so the Face Lobe cannot tamper with its own rules.
 
 See `machine_spirit_4/docs/double_agent/` for the full design (`research_artifact_v2.md`, `fit_gap_double_agent.md`, `existing_primitive_mapping.md`).
+
+## Quartermaster (tool router)
+
+`machine_spirit_4/gateway/quartermaster/` retrieves only the tools relevant to a request instead of dumping the full ~75-tool MS4 / ~154-tool HiveMind catalog into the model's context. The old `format_tools_answer` injected all ~75 tools (15-20s grounding cost); the Quartermaster's curated summary + inline fast-path cut tools-in-context by ~97% on the eval set.
+
+Metaphor: a **tool shed** (capability clusters) holds **toolboxes** (tool domains) which hold **tools**. The taxonomy is derived mechanically from `hivemind.<domain>.<verb>@v1` names — it self-organises as HiveMind ships tools.
+
+Confidence-gated cascade (`cascade.py`, cheapest-confident-wins, same spine as `double_agent/router.py` + `continuation.py`):
+
+1. **Deterministic** — toolbox keyword lexicon nails the obvious case ("list my VMs" -> `vm`). Instant, offline.
+2. **Embeddings** — TF-IDF (offline, default) or `hivemind.embeddings.create@v1` (`MS4_QM_USE_HM_EMBEDDINGS=1`); two-stage toolbox-then-tool retrieval. On-disk index cache keyed by catalog version.
+3. **Tiny-LLM** — optional injected classifier, consulted ONLY on low-confidence ambiguity, fail-safe to the embeddings result.
+
+The **ToolRouter** (`router.py`) turns a resolution into a verdict:
+
+- **inline** — the top tool is read-only (`is_inline_eligible`: verb allowlist + non-destructive + zero required args) AND clears the MS3 `/ethics/evaluate` gate (fail-closed). The Face Lobe executes it inline this turn (`executor.py`) and narrates the real result — no Depth Lobe job, no 10-40s wait.
+- **depth** — anything mutating, arg-needing, low-confidence, or ethics-denied/unreachable dispatches a Depth Lobe job exactly as before (zero regression — inline is purely additive and fail-soft).
+- **none** — no tool resolved; plain chat.
+
+Hard safety gate: only `kind: read_only` ∩ verb allowlist, never `confirm:true`, always through `evaluate_action`. The eval harness asserts zero inline-eligible destructive tools.
+
+Face Lobe wiring: `Ms4HermesRunner.chat()` calls `_try_quartermaster_inline()` on every deep-routed turn before dispatching Depth. Capability questions ("what tools do you have?") route through `context.format_tools_answer_quartermaster` — a targeted toolbox view + compact cluster map instead of the full dump.
+
+Evidence (the part that makes it real): `quartermaster/eval/harness.py` scores the cascade against `golden_set.jsonl` over a frozen `catalog_snapshot.json` — recall@3, precision@1, toolbox_recall, mean-tools-in-context vs the full-catalog baseline, and a hard inline-safety gate. Current: **recall@3 1.00, precision@1 0.98, toolbox_recall 1.00, ~97% context shrinkage, 0 safety violations**. Enforced in CI by `tests/ms4_quartermaster/test_eval_harness.py`. Run it: `python -m machine_spirit_4.gateway.quartermaster.eval.harness`.
+
+Audit events: `quartermaster_resolve`, `quartermaster_inline_selected`, `quartermaster_inline_exec`, `quartermaster_fallback_to_depth`. Env knobs: `MS4_QM_*` (see WHERE_IS_EVERYTHING). Disable the fast-path with `MS4_QM_INLINE=0`.
+
+**### Importing 3rd-party MCP servers
+
+`machine_spirit_4/mcp_bridge/` ingests any 3rd-party MCP server, converts its `tools/list` into the MS4 / Quartermaster catalog schema, and proxies `tools/call` back — so external tools (GitHub, Slack, filesystem, a hosted HTTP MCP, ...) become first-class alongside HiveMind + MS4 tools.
+
+```text
+POST   http://127.0.0.1:9180/api/v1/mcp/imports          # register {server_id, transport, command|url, env_passthrough, allow_inline}
+GET    http://127.0.0.1:9180/api/v1/mcp/imports          # list servers + tool counts + health
+POST   http://127.0.0.1:9180/api/v1/mcp/imports/<id>/refresh
+GET    http://127.0.0.1:9180/api/v1/mcp/imports/<id>/health
+DELETE http://127.0.0.1:9180/api/v1/mcp/imports/<id>
+```
+
+Example (stdio, the common case — a server launched via npx):
+
+```json
+{
+  "server_id": "github",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env_passthrough": ["GITHUB_TOKEN"],
+  "allow_inline": false
+}
+```
+
+Imported tools are namespaced `ext.<server>.<tool>@v1` (toolbox = the server, cluster = `external_mcp`). They surface in MS4's own MCP server (`tools/list` + proxied `tools/call`) and in the Quartermaster catalog, so the Face Lobe can route to them and the Depth Lobe can use them.
+
+Design notes:
+
+- **Stdlib only** — `subprocess` (stdio, newline-delimited JSON-RPC + the initialize handshake) and `urllib` (Streamable HTTP/SSE, with `Mcp-Session-Id`). No `mcp` SDK dependency.
+- **Fail-closed safety** — an imported tool is `read_only` (inline-eligible) ONLY when the upstream declares `readOnlyHint`, is not `destructiveHint`, AND the operator set `allow_inline` on the server. Everything else is `runtime_action` → Depth Lobe under MS3 ethics per call. Inline execution of an `ext.*` tool routes through the bridge proxy, not HiveMind MCP.
+- **Secret hygiene** — secrets are referenced by env-var NAME via `env_passthrough` (resolved from MS4's process env at launch, never written to `runtime/mcp_imports.json`). Launching stdio subprocesses is operator-initiated and audited (`mcp_import_registered`/`_refreshed`/`_removed`).
+- **Fail-soft** — a bad command, unreachable server, or malformed schema is captured (`last_error`) and never crashes the catalog or a turn; the proxy reconnects once then returns an error envelope.
+
+Cluster-wide hosting (register an upstream once for every MCP client on the cluster) is spec'd as an approval-gated HiveMind change-set in `docs/quartermaster/HIVEMIND_MCP_BRIDGE_CHANGESET.md`.
+
+Phase B (HiveMind delegation):** when `hivemind.tools.search@v1` exists in the live catalog (and `MS4_QM_DELEGATE=1`), the cascade delegates retrieval to that shared, auto-updating substrate index (tier `hm_search`) and re-attaches local safety classification so the router's gates still apply; it falls back to the local engine on any failure. The HiveMind-side primitive itself is an approval-gated change — the exact spec is in `docs/quartermaster/HIVEMIND_TOOLS_SEARCH_CHANGESET.md` (do not modify the HiveMind repo / restart Warden without approval).
+
+**Phase E (Depth Lobe trimming):** the Depth Lobe worker is a Hermes agent, so `ResourceRequest.enabled_toolsets` optionally restricts which Hermes *toolsets* it loads (`taxonomy.hermes_toolsets_for_query` maps a request to a conservative toolset list, defaulting to `None` = full catalog escape hatch). Wired through `_construct_agent`/`new_background_agent` → `AIAgent(enabled_toolsets=…)` and the worker. Opt-in via `MS4_QM_TRIM_DEPTH=1`. (Hermes *toolsets* — its own tools — are distinct from Quartermaster *toolboxes*, which are HiveMind tool domains.)
 
 ## Hermes Auto-Update
 

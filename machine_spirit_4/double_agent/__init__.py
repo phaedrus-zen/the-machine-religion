@@ -37,6 +37,11 @@ from .depth_picker import (
     DepthChoice,
     choose_depth_model,
 )
+from .continuation import (
+    ContinuationClassifier,
+    make_llm_continuation_classifier,
+    phrase_is_continuation,
+)
 from .face_lobe import build_face_lobe_context_block, face_lobe_turn_start
 from .model_picker import (
     DEFAULT_FOREGROUND_MODEL,
@@ -67,6 +72,7 @@ from .worker import DoubleAgentWorker, WorkerCanceled, build_real_chat_runner
 __all__ = [
     "AuthorityEnvelope",
     "Blackboard",
+    "ContinuationClassifier",
     "ConversationRevision",
     "DEFAULT_FOREGROUND_MODEL",
     "DEPTH_PRIORITY_PATTERNS",
@@ -95,5 +101,7 @@ __all__ = [
     "default_blackboard",
     "default_runner",
     "face_lobe_turn_start",
+    "make_llm_continuation_classifier",
+    "phrase_is_continuation",
     "router_route",
 ]

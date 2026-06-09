@@ -39,6 +39,33 @@ from typing import Any, Callable
 log = logging.getLogger("ms4.gateway.face_lobe_chat")
 
 
+def _is_local_ollama_model(model: str | None) -> bool:
+    """True when ``model`` looks like a local Ollama tag (``name:tag``,
+    e.g. ``llama3.1:8b``, ``qwen3-coder-next:latest``). Hosted-provider
+    ids (``gpt-4o-mini``, ``claude-3-5-haiku``, ``o4-mini``) have no
+    colon. Used to scope the Ollama-specific ``keep_alive`` body field
+    to backends that accept it — hosted providers may 400 on unknown
+    body params."""
+    if not model:
+        return False
+    m = str(model).strip()
+    return ":" in m and not m.lower().startswith(("gpt-", "claude-", "o1", "o3", "o4"))
+
+
+def _face_keep_alive(model: str | None) -> str | None:
+    """The ``keep_alive`` value to send on a Face Lobe request, or
+    ``None`` to omit it. Sending a fresh keep_alive every turn biases
+    HiveMind/Ollama to evict a transient Depth model (the 27B) before
+    the resident Face model under VRAM pressure. Tunable via
+    ``MS4_FACE_KEEP_ALIVE`` (default ``10m``); empty string disables.
+    Only applied to local Ollama-tag models (see
+    :func:`_is_local_ollama_model`)."""
+    if not _is_local_ollama_model(model):
+        return None
+    val = os.environ.get("MS4_FACE_KEEP_ALIVE", "10m").strip()
+    return val or None
+
+
 FACE_LOBE_SYSTEM_PROMPT = (
     "You are the MS4 Face Lobe — the foreground voice of a Machine Spirit "
     "in a live conversation with the operator. You can also be reached "
@@ -83,8 +110,12 @@ FACE_LOBE_SYSTEM_PROMPT = (
     "Depth Lobe found...' or 'a previous job reported...') rather than "
     "speaking as if you executed the tool yourself.\n"
     " * If the operator asks for something tool-requiring and no "
-    "dispatch happened, say so plainly and suggest they prefix `/deep` "
-    "to force a Depth Lobe job. Do NOT invent tool names.\n"
+    "dispatch happened this turn, NEVER tell them to type, say, or "
+    "prefix `/deep` or any slash command — they are often on voice and "
+    "cannot type. Instead state plainly that you'll run it (e.g. \"I'll "
+    "run that for you now\") so the system dispatches it; a short "
+    "confirmation like 'yes, do that' kicks it off. Do NOT invent tool "
+    "names.\n"
     "\n"
     "Voice conversation is normal conversation. Questions like 'can you "
     "hear me?', 'what's up?', or 'are you there?' are small talk — just "
@@ -274,6 +305,17 @@ class FaceLobeChat:
                 "stream": is_streaming,
                 "temperature": 0.2,
             }
+            # Anti-thrash residency bias: send a fresh keep_alive on every
+            # Face turn so HiveMind/Ollama keeps the FACE model resident.
+            # Ollama evicts the soonest-expiring model under VRAM pressure,
+            # so refreshing Face's timer each turn makes a transient Depth
+            # job (the 27B) the eviction victim instead of the Face model
+            # the operator is talking to. Scoped to local Ollama-tag models
+            # (``name:tag``) so hosted providers (OpenAI/Anthropic) that
+            # 400 on unknown body fields are never sent it.
+            keep_alive = _face_keep_alive(target_model)
+            if keep_alive is not None:
+                p["keep_alive"] = keep_alive
             # Some providers omit usage in streaming mode unless asked.
             if is_streaming:
                 p["stream_options"] = {"include_usage": True}
@@ -539,9 +581,17 @@ class FaceLobeChat:
                 choices = event.get("choices") if isinstance(event, dict) else None
                 if not isinstance(choices, list):
                     continue
+                stop = False
                 for choice in choices:
                     if not isinstance(choice, dict):
                         continue
+                    # Return as soon as the model signals completion, instead
+                    # of waiting for a (possibly late) [DONE]/connection close.
+                    # Some backends emit finish_reason on the last content
+                    # chunk but then dawdle ~10s+ before closing the stream,
+                    # which used to inflate the whole chat call. (Jun 1 2026)
+                    if choice.get("finish_reason"):
+                        stop = True
                     delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else None
                     if delta is None:
                         msg = choice.get("message") if isinstance(choice.get("message"), dict) else None
@@ -565,6 +615,8 @@ class FaceLobeChat:
                             stream_callback(fragment)
                         except Exception as exc:
                             log.warning("face_lobe stream_callback raised: %s", exc)
+                if stop:
+                    break  # model finished — don't wait out a slow stream close
         finally:
             try:
                 response.close()

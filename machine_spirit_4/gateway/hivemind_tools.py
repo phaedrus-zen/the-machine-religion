@@ -1267,11 +1267,24 @@ def inference_models(hivemind_url: str) -> Any:
     return _call_tool(hivemind_url, "hivemind.inference.models@v1")
 
 
-def inference_chat(hivemind_url: str, *, messages: list[dict[str, Any]], model: str, **opts: Any) -> Any:
+def inference_chat(
+    hivemind_url: str,
+    *,
+    messages: list[dict[str, Any]],
+    model: str,
+    timeout: float = 120,
+    **opts: Any,
+) -> Any:
     """``hivemind.inference.chat@v1`` — direct chat completion through
-    the MCP gateway. ``messages`` follows OpenAI shape."""
+    the MCP gateway. ``messages`` follows OpenAI shape.
+
+    ``timeout`` bounds the HTTP round-trip (seconds) and is NOT sent as
+    a tool argument — callers that need a short, fail-safe call (e.g.
+    the Double Agent continuation classifier) pass a small value here.
+    Other ``opts`` (``max_tokens``, ``temperature``, ``stream``) ARE
+    forwarded as tool arguments."""
     args: dict[str, Any] = {"messages": messages, "model": model, **opts}
-    return _call_tool(hivemind_url, "hivemind.inference.chat@v1", args, timeout=120)
+    return _call_tool(hivemind_url, "hivemind.inference.chat@v1", args, timeout=timeout)
 
 
 # ===========================================================================

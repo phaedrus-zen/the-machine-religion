@@ -134,11 +134,14 @@ from .voice import (
     DEFAULT_TTS_FORMAT,
     VoiceRequestError,
     VoiceUnavailable,
+    last_face_model,
     parse_audio_request,
     prewarm_asr,
     prewarm_face_lobe_model,
     prewarm_tts,
     prewarm_tts_super_ws,
+    provision_tts_replicas,
+    record_face_model,
     synthesize,
     transcribe,
     voice_ptt_turn,
@@ -366,6 +369,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if self.path.startswith("/reflexes/"):
             self._reflexes_serve(self.path[len("/reflexes/"):])
             return
+        if self.path.startswith("/easter/honorable"):
+            self._easter_honorable()
+            return
         if self.path == "/doctrine/tmr":
             self._doctrine_full()
             return
@@ -392,6 +398,13 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/voice/recent-turns"):
             self._voice_recent_turns_get()
+            return
+        # ---- 3rd-party MCP importer/bridge (read) ----
+        if self.path == "/api/v1/mcp/imports":
+            self._mcp_imports_list()
+            return
+        if self.path.startswith("/api/v1/mcp/imports/") and self.path.endswith("/health"):
+            self._mcp_imports_health(self.path[len("/api/v1/mcp/imports/"):-len("/health")])
             return
         # ---- Pure-MCP read routes (no HLI dependency, work even when
         # the inference gateway is down). Each route returns a stable
@@ -533,6 +546,12 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         _json_response(self, 404, {"error": "not found"})
 
+    def do_DELETE(self) -> None:
+        if self.path.startswith("/api/v1/mcp/imports/"):
+            self._mcp_imports_remove(self.path[len("/api/v1/mcp/imports/"):])
+            return
+        _json_response(self, 404, {"error": "not found"})
+
     def do_POST(self) -> None:
         if self.path == "/chat/stream":
             self._stream_chat()
@@ -543,6 +562,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if self.path == "/reflexes/regenerate":
             self._reflexes_regenerate()
             return
+        if self.path == "/reflexes/validate":
+            self._reflexes_validate()
+            return
         if self.path == "/doctrine/tmr/read-into-session":
             self._doctrine_read_into_session()
             return
@@ -551,6 +573,13 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/spirit/heartbeat":
             self._spirit_heartbeat()
+            return
+        # ---- 3rd-party MCP importer/bridge (register / refresh) ----
+        if self.path == "/api/v1/mcp/imports":
+            self._mcp_imports_register()
+            return
+        if self.path.startswith("/api/v1/mcp/imports/") and self.path.endswith("/refresh"):
+            self._mcp_imports_refresh(self.path[len("/api/v1/mcp/imports/"):-len("/refresh")])
             return
         # ---- HiveMind admin POSTs (mutations). Each route is audit-
         # logged; destructive ones (delete / force_stop / restore)
@@ -819,10 +848,13 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             if not message:
                 _json_response(self, 400, {"error": "message is required"})
                 return
+            _face_model = body.get("model_id") or body.get("model") or None
+            record_face_model(_face_model)
             result = self.runner.chat(
                 message,
                 session_id=body.get("session_id") or None,
-                model=body.get("model_id") or body.get("model") or None,
+                model=_face_model,
+                depth_model=body.get("depth_model_id") or body.get("depth_model") or None,
             )
             _json_response(self, 200, result)
         except HermesUnavailable as exc:
@@ -897,7 +929,8 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             # ?model= is the Face Lobe chat model; ?tts_model= is the
             # TTS model (tts-1 / tts-1-hd). See _voice_turn_stream for
             # the bug history.
-            model = params.get("model") or None
+            model = params.get("model") or params.get("model_id") or None
+            depth_model = params.get("depth_model") or params.get("depth_model_id") or None
             tts_model = params.get("tts_model") or None
             tts_voice = params.get("voice") or None
             tts_format = params.get("response_format") or None
@@ -907,6 +940,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 filename=filename,
                 session_id=session_id,
                 model=model,
+                depth_model=depth_model,
                 tts_model=tts_model,
                 tts_voice=tts_voice,
                 response_format=tts_format,
@@ -962,7 +996,8 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         # was mistakenly sending ?model=tts-1 which made the Face Lobe
         # try to use tts-1 as a chat model, causing every voice turn
         # to fall through to the canned-failure reply.
-        model = params.get("model") or None
+        model = params.get("model") or params.get("model_id") or None
+        depth_model = params.get("depth_model") or params.get("depth_model_id") or None
         tts_model = params.get("tts_model") or None
         tts_voice = params.get("voice") or None
         tts_format = params.get("response_format") or None
@@ -994,6 +1029,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     filename=filename,
                     session_id=session_id,
                     model=model,
+                    depth_model=depth_model,
                     tts_model=tts_model,
                     tts_voice=tts_voice,
                     response_format=tts_format,
@@ -1302,6 +1338,39 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(audio)
 
+    def _easter_honorable(self) -> None:
+        """Serve the "Honorable" easter-egg audio clip (BIA - WE ON GO).
+
+        The browser can't read an arbitrary local file path, so the
+        gateway streams the configured clip over HTTP. Path is fixed via
+        ``MS4_VOICE_EGG_HONORABLE_CLIP`` (NOT user input -> no traversal
+        risk). 404 if the file is missing, in which case the UI falls back
+        to MS4 simply saying the line. Content type is inferred from the
+        extension (mp3 -> audio/mpeg)."""
+        default_clip = r"C:\Users\nexus-hc-win-00\Downloads\BIA - WE ON GO (Official Audio).mp3"
+        clip_path = os.environ.get("MS4_VOICE_EGG_HONORABLE_CLIP", default_clip)
+        try:
+            with open(clip_path, "rb") as fh:
+                data = fh.read()
+        except FileNotFoundError:
+            _json_response(self, 404, {"error": "easter-egg clip not found", "path": clip_path})
+            return
+        except Exception as exc:
+            _json_response(self, 500, {"error": str(exc)})
+            return
+        ext = os.path.splitext(clip_path)[1].lower()
+        mime = {
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac",
+        }.get(ext, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=300")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _reflexes_regenerate(self) -> None:
         """Force a (re-)render of every reflex for the configured voice.
 
@@ -1357,6 +1426,43 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             "voice": result.get("voice"),
             "generated": [g["id"] for g in (result.get("generated") or [])],
             "skipped": result.get("skipped"),
+            "failed": list((result.get("failed") or {}).keys()),
+        })
+        _json_response(self, 200, result)
+
+    def _reflexes_validate(self) -> None:
+        """Round-trip QA pass: validate existing renders (transcribe back +
+        LLM judge) and re-render any that fail (with an auto-rephrased,
+        TTS-stable equivalent). Does NOT force-rerender good ones.
+
+        Body (optional): ``{voice, async}``. Async returns 202 and the QA
+        runs in the background; poll GET /reflexes for `validated`/`heard`.
+        """
+        try:
+            body = _read_json(self) if (self.headers.get("Content-Length") or "0") != "0" else {}
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        voice = body.get("voice") or DEFAULT_REFLEX_VOICE
+        run_async = bool(body.get("async", True))  # default async — QA is slow (ASR per reflex)
+
+        if run_async:
+            generate_all_async(hivemind_url=self.runner.hivemind_url, voice=voice, force=False, qa=True)
+            append_event("reflex_validate_requested", {"voice": voice, "async": True})
+            _json_response(self, 202, {
+                "schema": "Ms4ReflexValidateAck.v1", "started": True,
+                "voice": voice, "async": True, "poll_url": "/reflexes",
+            })
+            return
+        try:
+            result = generate_all(hivemind_url=self.runner.hivemind_url, voice=voice, force=False, qa=True)
+        except Exception as exc:
+            _json_response(self, 502, {"error": str(exc)})
+            return
+        append_event("reflex_validate_completed", {
+            "voice": result.get("voice"),
+            "regenerated": [g["id"] for g in (result.get("generated") or [])],
+            "revalidated": result.get("revalidated"),
             "failed": list((result.get("failed") or {}).keys()),
         })
         _json_response(self, 200, result)
@@ -1636,6 +1742,95 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
     # ------------------------------------------------------------------
     # /hivemind/time — authoritative cluster time
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # /api/v1/mcp/imports — 3rd-party MCP server importer/bridge
+    # ------------------------------------------------------------------
+
+    def _mcp_imports_list(self) -> None:
+        from machine_spirit_4.mcp_bridge.registry import load
+
+        reg = load()
+        _json_response(self, 200, {
+            "schema": "Ms4McpImports.v1",
+            "servers": [s.to_dict(include_tools=False) for s in reg.list_servers()],
+            "tool_count": len(reg.all_tools()),
+        })
+
+    def _mcp_imports_register(self) -> None:
+        from machine_spirit_4.mcp_bridge.registry import ImportedServer, load
+        from machine_spirit_4.mcp_bridge.upstream_client import UpstreamError
+
+        try:
+            body = _read_json(self) or {}
+        except (ValueError, json.JSONDecodeError):
+            _json_response(self, 400, {"error": "invalid JSON body"})
+            return
+        server_id = body.get("server_id")
+        transport = body.get("transport")
+        if not server_id or transport not in ("stdio", "http"):
+            _json_response(self, 400, {"error": "server_id and transport ('stdio'|'http') are required"})
+            return
+        server = ImportedServer(
+            server_id=str(server_id),
+            transport=str(transport),
+            command=(str(body["command"]) if body.get("command") else None),
+            args=[str(a) for a in (body.get("args") or [])],
+            env={str(k): str(v) for k, v in (body.get("env") or {}).items()},
+            env_passthrough=[str(n) for n in (body.get("env_passthrough") or []) if isinstance(n, str)],
+            cwd=(str(body["cwd"]) if body.get("cwd") else None),
+            url=(str(body["url"]) if body.get("url") else None),
+            headers={str(k): str(v) for k, v in (body.get("headers") or {}).items()},
+            allow_inline=bool(body.get("allow_inline", False)),
+            enabled=bool(body.get("enabled", True)),
+        )
+        refresh = bool(body.get("refresh", True))
+        reg = load()
+        try:
+            reg.register(server, refresh=refresh)
+        except UpstreamError as exc:
+            _json_response(self, 400, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            _json_response(self, 500, {"error": f"register failed: {exc}"})
+            return
+        result = reg.get(server.server_id)
+        _json_response(self, 200, result.to_dict() if result else {"error": "register did not persist"})
+
+    def _mcp_imports_refresh(self, server_id: str) -> None:
+        from machine_spirit_4.mcp_bridge.registry import load
+
+        reg = load()
+        if reg.get(server_id) is None:
+            _json_response(self, 404, {"error": f"unknown imported server: {server_id}"})
+            return
+        server = reg.refresh(server_id)
+        _json_response(self, 200, server.to_dict())
+
+    def _mcp_imports_remove(self, server_id: str) -> None:
+        from machine_spirit_4.mcp_bridge.registry import load
+
+        reg = load()
+        removed = reg.remove(server_id)
+        _json_response(self, 200 if removed else 404, {"removed": removed, "server_id": server_id})
+
+    def _mcp_imports_health(self, server_id: str) -> None:
+        from machine_spirit_4.mcp_bridge.registry import load
+
+        reg = load()
+        server = reg.get(server_id)
+        if server is None:
+            _json_response(self, 404, {"error": f"unknown imported server: {server_id}"})
+            return
+        _json_response(self, 200, {
+            "server_id": server.server_id,
+            "transport": server.transport,
+            "enabled": server.enabled,
+            "allow_inline": server.allow_inline,
+            "tool_count": len(server.tools),
+            "last_refresh": server.last_refresh,
+            "last_error": server.last_error,
+        })
 
     def _hivemind_time_get(self) -> None:
         try:
@@ -2812,6 +3007,12 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 _json_response(self, 400, {"error": "request body must be a JSON object"})
                 return
             envelope = JobEnvelope.from_dict(body)
+            # Obey an explicit Depth Lobe model from the submit dialog
+            # (top-level depth_model_id / model_override) when the
+            # envelope didn't already carry one.
+            override = body.get("depth_model_id") or body.get("model_override")
+            if override and not envelope.resource_request.model_override:
+                envelope.resource_request.model_override = str(override)
             snapshot = default_runner().submit(envelope)
             _json_response(self, 202, snapshot or {"error": "submission accepted but snapshot missing"})
         except DoubleAgentSchemaError as exc:
@@ -2840,10 +3041,16 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if not is_safe_job_id(job_id):
             _json_response(self, 400, {"error": "unsafe job_id"})
             return
-        snap = default_runner().get(job_id)
+        runner = default_runner()
+        snap = runner.get(job_id)
         if snap is None:
             _json_response(self, 404, {"error": "unknown job_id"})
             return
+        # Attach the full JobResult (text/summary) so the UI can show the
+        # complete answer in the completion announcement's "Show details".
+        result = runner.get_result(job_id)
+        if result is not None:
+            snap = {**snap, "result": result}
         _json_response(self, 200, snap)
 
     def _double_agent_cancel(self, job_id: str) -> None:
@@ -2945,6 +3152,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                         message,
                         session_id=body.get("session_id") or None,
                         model=body.get("model_id") or body.get("model") or None,
+                        depth_model=body.get("depth_model_id") or body.get("depth_model") or None,
                         stream_callback=stream_callback,
                     )
                     events.put(("done", result))
@@ -3019,6 +3227,25 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     # JobRunner(chat_runner_factory=...) to bypass subprocess overhead.
     da_runner = default_runner()
     da_runner.recover_on_startup()
+    # Wire the optional LLM continuation classifier onto the production
+    # runner so paraphrased follow-ups ("go for it", "sounds good, run
+    # it") don't wrongly stale in-flight Depth Lobe work that the phrase
+    # fast-path can't enumerate. Fail-safe + bounded: only consulted when
+    # there are staleable jobs and the phrase path missed; any error /
+    # timeout degrades to the phrase-only behavior. Disable with
+    # MS4_DA_CONTINUATION_CLASSIFIER=0.
+    if os.environ.get("MS4_DA_CONTINUATION_CLASSIFIER", "1").strip() not in ("0", "false", "no"):
+        try:
+            from machine_spirit_4.double_agent.continuation import (
+                make_llm_continuation_classifier,
+            )
+
+            da_runner.set_continuation_classifier(
+                make_llm_continuation_classifier(handler_cls.runner.hivemind_url)
+            )
+            print("MS4 Double Agent continuation classifier: enabled", flush=True)
+        except Exception as exc:
+            print(f"MS4 Double Agent continuation classifier wiring failed: {exc}", flush=True)
     # Pre-warm ASR + TTS + Face Lobe model on boot. Voice latency is
     # dominated by cold loads on the first turn (whisper ~3-8s, TTS
     # ~3-5s, Face Lobe model load ~5-10s). Each pre-warm runs in its
@@ -3056,6 +3283,106 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     # barge-in — can play instant audio without a HiveMind round-trip.
     # Already-rendered reflexes are skipped on subsequent boots.
     threading.Thread(target=_prewarm, args=("Reflexes", lambda: generate_all(hivemind_url=hivemind_url, force=False)), daemon=True, name="ms4-reflex-prewarm").start()
+    # Periodic TTS keep-warm: HiveMind unloads an idle TTS model, so the
+    # next voice turn's FIRST audio chunk pays a 3-5s cold load (the
+    # dominant TTS-specific latency). Every MS4_VOICE_TTS_KEEPWARM_SECS
+    # (default 240s; 0 disables) ping TTS with a tiny phrase so it stays
+    # resident. Best-effort and silent on failure (a real turn would just
+    # pay the cold load, i.e. status quo).
+    def _tts_keepwarm_loop() -> None:
+        try:
+            interval = int(os.environ.get("MS4_VOICE_TTS_KEEPWARM_SECS", "240"))
+        except (TypeError, ValueError):
+            interval = 240
+        if interval <= 0:
+            return
+        while True:
+            time.sleep(interval)
+            try:
+                prewarm_tts(hivemind_url=hivemind_url)
+            except Exception:
+                pass  # best-effort keep-warm; next real turn handles cold load
+    threading.Thread(target=_tts_keepwarm_loop, daemon=True, name="ms4-tts-keepwarm").start()
+    # TTS replica scale-out. MS4 fires per-chunk TTS in parallel, but
+    # HiveMind serializes generation per GIM process (GEN_LOCK — confirmed
+    # by the HiveMind team 2026-06-02), so a reply's chunks only synthesize
+    # concurrently if there are ~as many TTS replicas as chunks. Their
+    # POST /provision/tts/scale (shipped 2026-06-02) launches replicas and
+    # round-robins /v1/audio/speech across them; throughput scales
+    # near-linearly with replica count (1→2.73, 3→6.58 rps). Crucially TTS
+    # is GPU-IDLE (~5-10% util, ~3GB/replica), so replicas can be PACKED
+    # multiple-per-GPU and `target` may exceed the GPU count.
+    #
+    # We default the target to MS4_VOICE_TTS_REPLICA_TARGET (2). IMPORTANT:
+    # HiveMind's TTS GIMs are CPU-bound (per the 2026-06-02 study: ~5-10%
+    # GPU, scales by process until CPU saturates). Measured the hard way on
+    # this box: leaving ~6 TTS GIMs running pegged the CPU at 100% and
+    # STARVED the LLM (/v1/chat/completions timed out) and real-speech ASR
+    # — i.e. over-provisioning TTS breaks the rest of the voice loop. So the
+    # default is deliberately modest: 2 replicas give a typical reply enough
+    # concurrency to stay smooth while leaving CPU for the LLM + ASR. Raise
+    # MS4_VOICE_TTS_REPLICA_TARGET only if you have CPU headroom (or TTS on
+    # dedicated nodes); empty/0 = let HiveMind place one-per-GPU. NOTE the
+    # scale endpoint only ADDS replicas (floors), so this can't reduce an
+    # already-oversized pool — that's a HiveMind-side reset. We provision on
+    # boot and re-issue periodically (idempotent). MS4_VOICE_TTS_AUTOSCALE=0
+    # disables; MS4_VOICE_TTS_AUTOSCALE_SECS (default 600; 0 = boot-only).
+    def _tts_replica_target() -> int | None:
+        raw = os.environ.get("MS4_VOICE_TTS_REPLICA_TARGET", "2").strip()
+        if not raw:
+            return None
+        try:
+            t = int(raw)
+        except ValueError:
+            return None
+        return t if t > 0 else None
+
+    def _tts_autoscale_loop() -> None:
+        if os.environ.get("MS4_VOICE_TTS_AUTOSCALE", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+        try:
+            interval = int(os.environ.get("MS4_VOICE_TTS_AUTOSCALE_SECS", "600"))
+        except (TypeError, ValueError):
+            interval = 600
+        target = _tts_replica_target()
+        res = provision_tts_replicas(hivemind_url=hivemind_url, target=target)
+        if res.get("ok"):
+            print(f"MS4 TTS scale-out: {res.get('replicas')} replica(s) "
+                  f"(target={target if target else 'per-GPU'}) — {res.get('status')}", flush=True)
+        if interval <= 0:
+            return
+        while True:
+            time.sleep(interval)
+            try:
+                provision_tts_replicas(hivemind_url=hivemind_url, target=_tts_replica_target())
+            except Exception:
+                pass  # best-effort; single replica still serves TTS
+    threading.Thread(target=_tts_autoscale_loop, daemon=True, name="ms4-tts-autoscale").start()
+    # Periodic Face Lobe keep-warm: HiveMind evicts an idle chat model
+    # after its residency window (~12 min — client keep_alive is capped
+    # there, verified live), so a conversational gap longer than that
+    # cold-loads the Face model on the next turn (5-10s ON the path to
+    # first token — the single biggest idle-cold-start hit). Every
+    # MS4_VOICE_FACE_KEEPWARM_SECS (default 180s, comfortably under the
+    # ~12 min cap; 0 disables) ping the model the operator is ACTUALLY
+    # talking to (last_face_model(), tracked per turn) with a 1-token
+    # completion so it stays resident. Falls back to the Face Lobe
+    # auto-picker when every turn so far was Auto-pick. Best-effort and
+    # silent on failure (a real turn would just pay the cold load).
+    def _face_keepwarm_loop() -> None:
+        try:
+            interval = int(os.environ.get("MS4_VOICE_FACE_KEEPWARM_SECS", "180"))
+        except (TypeError, ValueError):
+            interval = 180
+        if interval <= 0:
+            return
+        while True:
+            time.sleep(interval)
+            try:
+                prewarm_face_lobe_model(hivemind_url=hivemind_url, model=last_face_model())
+            except Exception:
+                pass  # best-effort keep-warm; next real turn handles cold load
+    threading.Thread(target=_face_keepwarm_loop, daemon=True, name="ms4-flb-keepwarm").start()
     # Start MS3 heartbeat: every MS4_SPIRIT_HEARTBEAT_SECS (default 60s)
     # POST /identity/heartbeat so MS3 keeps the spirit's continuity
     # checks happy even when the Face Lobe direct chat path is the

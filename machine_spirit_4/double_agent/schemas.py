@@ -99,6 +99,12 @@ class ResourceRequest:
     preferred_hardware: str = "best_available"
     fallback_allowed: bool = False
     model_override: str | None = None
+    # Optional Hermes toolset filter for the Depth Lobe worker (Phase E).
+    # ``None`` = full Hermes tool catalog (the escape hatch). When set,
+    # the worker constructs its agent with only these Hermes toolsets,
+    # trimming the per-job tool context. Driven by the Quartermaster's
+    # read of the job intent; conservative (None) by default.
+    enabled_toolsets: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,17 +114,27 @@ class ResourceRequest:
             "preferred_hardware": self.preferred_hardware,
             "fallback_allowed": bool(self.fallback_allowed),
             "model_override": self.model_override,
+            "enabled_toolsets": list(self.enabled_toolsets) if self.enabled_toolsets else None,
         }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "ResourceRequest":
         raw = raw or {}
+        ets_raw = raw.get("enabled_toolsets")
+        enabled_toolsets = None
+        if isinstance(ets_raw, list):
+            # Keep only safe, short identifier-ish toolset names.
+            enabled_toolsets = [
+                str(t) for t in ets_raw
+                if isinstance(t, str) and t and len(t) <= 64
+            ] or None
         return cls(
             model_class=str(raw.get("model_class") or "deep_reasoning"),
             preferred_runtime=str(raw.get("preferred_runtime") or "local"),
             preferred_hardware=str(raw.get("preferred_hardware") or "best_available"),
             fallback_allowed=bool(raw.get("fallback_allowed", False)),
             model_override=(str(raw.get("model_override")) if raw.get("model_override") else None),
+            enabled_toolsets=enabled_toolsets,
         )
 
 

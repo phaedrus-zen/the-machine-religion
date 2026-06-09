@@ -1,0 +1,55 @@
+{"query": "list my virtual machines", "expect_toolboxes": ["vm"], "expect_tools": ["hivemind.vm.list@v1"]}
+{"query": "what VMs do I have running", "expect_toolboxes": ["vm"], "expect_tools": ["hivemind.vm.list@v1"]}
+{"query": "show me the virtual machines in the cluster", "expect_toolboxes": ["vm"], "expect_tools": ["hivemind.vm.list@v1"]}
+{"query": "take a screenshot of the hyper-v guest", "expect_toolboxes": ["vm"], "expect_tools": ["hivemind.vm.screenshot@v1"]}
+{"query": "do you see any GPUs", "expect_toolboxes": ["gpu"], "expect_tools": ["hivemind.gpu.availability@v1"]}
+{"query": "what gpus are available right now", "expect_toolboxes": ["gpu"], "expect_tools": ["hivemind.gpu.availability@v1"]}
+{"query": "how many free gpus are there", "expect_toolboxes": ["gpu"], "expect_tools": ["hivemind.gpu.availability@v1"]}
+{"query": "switch the gpu to passthrough mode", "expect_toolboxes": ["gpu_mode"], "expect_tools": ["hivemind.gpu_mode.set@v1"]}
+{"query": "what vgpu profiles does this card support", "expect_toolboxes": ["gpu_mode"]}
+{"query": "list the storage volumes", "expect_toolboxes": ["storage"], "expect_tools": ["hivemind.storage.volumes@v1"]}
+{"query": "show me the storage pools", "expect_toolboxes": ["storage"], "expect_tools": ["hivemind.storage.pools@v1"]}
+{"query": "create a new disk volume", "expect_toolboxes": ["storage"], "expect_tools": ["hivemind.storage.volume_create@v1"]}
+{"query": "take a snapshot of that volume", "expect_toolboxes": ["storage"], "expect_tools": ["hivemind.storage.snapshot_create@v1"]}
+{"query": "list the cluster networks", "expect_toolboxes": ["network"], "expect_tools": ["hivemind.network.list@v1"]}
+{"query": "what network bridges exist", "expect_toolboxes": ["network"], "expect_tools": ["hivemind.network.bridges@v1"]}
+{"query": "list the cluster nodes", "expect_toolboxes": ["hosts"], "expect_tools": ["hivemind.hosts.list@v1"]}
+{"query": "what hosts are in the cluster", "expect_toolboxes": ["hosts"], "expect_tools": ["hivemind.hosts.list@v1"]}
+{"query": "what is the cluster summary", "expect_toolboxes": ["cluster"], "expect_tools": ["hivemind.cluster.summary@v1"]}
+{"query": "are the services healthy", "expect_toolboxes": ["service_health"], "expect_tools": ["hivemind.service_health@v1"]}
+{"query": "what jobs are active on the cluster", "expect_toolboxes": ["jobs"], "expect_tools": ["hivemind.jobs.active@v1"]}
+{"query": "what is running right now", "expect_toolboxes": ["jobs"], "expect_tools": ["hivemind.jobs.active@v1"]}
+{"query": "cancel that inference job", "expect_toolboxes": ["jobs"], "expect_tools": ["hivemind.jobs.cancel@v1"]}
+{"query": "list the available models", "expect_toolboxes": ["models"], "expect_tools": ["hivemind.models.list@v1", "ms4.models.list@v1", "hivemind.models.catalog@v1"]}
+{"query": "what models can I use", "expect_toolboxes": ["models"], "expect_tools": ["hivemind.models.list@v1", "ms4.models.list@v1", "hivemind.models.catalog@v1"]}
+{"query": "recommend a model for coding under 24gb", "expect_toolboxes": ["models"], "expect_tools": ["hivemind.models.recommend@v1"]}
+{"query": "start a lora fine-tune job", "expect_toolboxes": ["training"], "expect_tools": ["hivemind.training.start@v1"]}
+{"query": "what training backends are there", "expect_toolboxes": ["training"], "expect_tools": ["hivemind.training.backends@v1"]}
+{"query": "list the trained adapters", "expect_toolboxes": ["adapters"], "expect_tools": ["hivemind.adapters.list@v1"]}
+{"query": "apply the voice-stack loadout profile", "expect_toolboxes": ["loadout"], "expect_tools": ["hivemind.loadout.apply@v1"]}
+{"query": "what loadout profiles are configured", "expect_toolboxes": ["loadout"], "expect_tools": ["hivemind.loadout.profiles@v1"]}
+{"query": "transcribe this audio to text", "expect_toolboxes": ["audio"], "expect_tools": ["hivemind.audio.transcribe@v1"]}
+{"query": "list the enrolled voice identities", "expect_toolboxes": ["voice_identities"], "expect_tools": ["hivemind.voice_identities.list@v1"]}
+{"query": "enroll a new voice identity", "expect_toolboxes": ["voice_identities"], "expect_tools": ["hivemind.voice_identities.enroll@v1"]}
+{"query": "what is the crown headset signal quality", "expect_toolboxes": ["crown"], "expect_tools": ["hivemind.crown.signal_quality@v1"]}
+{"query": "is the crown eeg connected", "expect_toolboxes": ["crown"], "expect_tools": ["hivemind.crown.status@v1"]}
+{"query": "generate an image of a sunset", "expect_toolboxes": ["images"], "expect_tools": ["hivemind.images.generate@v1"]}
+{"query": "run ocr on this screenshot", "expect_toolboxes": ["images"], "expect_tools": ["hivemind.images.ocr@v1"]}
+{"query": "read the file at that path", "expect_toolboxes": ["files"], "expect_tools": ["hivemind.files.read@v1"]}
+{"query": "search the web for the latest news", "expect_toolboxes": ["web"], "expect_tools": ["hivemind.web.search@v1"]}
+{"query": "what time is it on the cluster", "expect_toolboxes": ["time"], "expect_tools": ["hivemind.time.now@v1"]}
+{"query": "what is the current date", "expect_toolboxes": ["time"], "expect_tools": ["hivemind.time.now@v1"]}
+{"query": "restart the menta_hli service", "expect_toolboxes": ["services"], "expect_tools": ["hivemind.services.restart@v1"]}
+{"query": "list the warden services", "expect_toolboxes": ["services"], "expect_tools": ["hivemind.services.list@v1"]}
+{"query": "ask the oracle to plan this migration", "expect_toolboxes": ["oracle"], "expect_tools": ["hivemind.oracle.chat@v1"]}
+{"query": "calculate 1024 times 768", "expect_toolboxes": ["math"], "expect_tools": ["hivemind.math.calculate@v1"]}
+{"query": "request human approval before deleting it", "expect_toolboxes": ["human"], "expect_tools": ["hivemind.human.approval.request@v1"]}
+{"query": "is cyberpunk available to stream", "expect_toolboxes": ["game"], "expect_tools": ["hivemind.game.ensure_available@v1"]}
+{"query": "plan a game streaming session", "expect_toolboxes": ["game_session"], "expect_tools": ["hivemind.game_session.plan@v1"]}
+{"query": "describe what is in this image", "expect_toolboxes": ["vlm", "images"]}
+{"query": "what is the per-node capability matrix", "expect_toolboxes": ["capability"], "expect_tools": ["hivemind.capability.matrix@v1"]}
+{"query": "hello how are you today", "expect_tool_needed": false}
+{"query": "thanks that was helpful", "expect_tool_needed": false}
+{"query": "what do you think about consciousness", "expect_tool_needed": false}
+{"query": "tell me a joke", "expect_tool_needed": false}
+{"query": "good morning", "expect_tool_needed": false}

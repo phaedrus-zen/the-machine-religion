@@ -1357,7 +1357,71 @@ def build_tool_registry() -> dict[str, ToolDef]:
             hivemind_gpu_passthrough_game_stream_vm,
         ),
     ]
-    return {tool.name: tool for tool in tools}
+    registry = {tool.name: tool for tool in tools}
+    _append_imported_tools(registry)
+    return registry
+
+
+def _imported_annotations(record: dict[str, Any]) -> dict[str, Any]:
+    """Derive MCP annotations for an imported tool from its bridge
+    record (fail-closed: unless classified read_only, treat as
+    non-read-only/open-world)."""
+    ann = record.get("annotations") if isinstance(record.get("annotations"), dict) else {}
+    read_only = record.get("kind") == "read_only" or bool(ann.get("readOnlyHint"))
+    return {
+        "title": f"[ext:{record.get('server_id', '?')}] {record.get('upstream_name', record.get('name', ''))}",
+        "readOnlyHint": bool(read_only),
+        "destructiveHint": bool(ann.get("destructiveHint", False)),
+        "idempotentHint": bool(ann.get("idempotentHint", False)),
+        "openWorldHint": True,  # 3rd-party tool — assume it touches the outside world
+    }
+
+
+def _make_imported_handler(tool_name: str) -> Callable[[Any, dict[str, Any]], Any]:
+    """Build a handler that proxies an imported tool call to its
+    upstream MCP server via the mcp_bridge proxy."""
+
+    def _handler(_runtime: Any, arguments: dict[str, Any]) -> Any:
+        from machine_spirit_4.mcp_bridge.proxy import call_imported_tool
+
+        out = call_imported_tool(tool_name, arguments or {})
+        if not isinstance(out, dict) or not out.get("ok"):
+            raise RuntimeError(out.get("error") if isinstance(out, dict) else "imported tool call failed")
+        return {
+            "tool": tool_name,
+            "server_id": out.get("server_id"),
+            "is_error": bool(out.get("is_error")),
+            "result": out.get("result"),
+        }
+
+    return _handler
+
+
+def _append_imported_tools(registry: dict[str, ToolDef]) -> None:
+    """Append imported 3rd-party MCP tools (from the mcp_bridge
+    registry) to the MS4 MCP tool registry. Fail-soft: a missing or
+    broken registry simply yields no imported tools."""
+    try:
+        from machine_spirit_4.mcp_bridge.registry import imported_tool_records
+
+        records = imported_tool_records()
+    except Exception:  # noqa: BLE001 — never let the bridge break the core registry
+        return
+    for record in records:
+        name = record.get("name")
+        if not isinstance(name, str) or not name or name in registry:
+            continue
+        input_schema = record.get("input_schema")
+        if not isinstance(input_schema, dict):
+            input_schema = {"type": "object", "properties": {}}
+        description = str(record.get("description") or "").strip()
+        registry[name] = ToolDef(
+            name=name,
+            description=f"[ext:{record.get('server_id', '?')}] {description}".strip(),
+            input_schema=input_schema,
+            annotations=_imported_annotations(record),
+            handler=_make_imported_handler(name),
+        )
 
 
 def result_content(data: Any) -> dict[str, Any]:

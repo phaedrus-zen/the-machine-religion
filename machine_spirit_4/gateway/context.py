@@ -38,6 +38,23 @@ log = logging.getLogger("ms4.gateway.context")
 GROUNDING_CACHE_TTL_SECS = int(os.environ.get("MS4_GROUNDING_CACHE_TTL", "60"))
 
 
+def _grounding_fetch_budget() -> float:
+    """Max wall-clock seconds a turn will WAIT for a live grounding fetch
+    (cluster inventory / active jobs / tools) before giving up. A cold
+    inventory fetch makes two sequential HiveMind MCP calls (default 30s
+    each = up to 60s), which used to block the chat from even starting on
+    a "what's in my cluster?" turn. We cap the wait here; the fetch still
+    runs to completion on its daemon thread and warms the cache for next
+    time, but the current turn proceeds (with a stale cached value if one
+    exists, else an honest "lookup unavailable" grounding) instead of
+    stalling. Tunable via ``MS4_GROUNDING_FETCH_BUDGET_S``."""
+    try:
+        val = float(os.environ.get("MS4_GROUNDING_FETCH_BUDGET_S", "8").strip())
+    except (TypeError, ValueError):
+        val = 8.0
+    return max(1.0, val)
+
+
 _GROUNDING_CACHE: dict[str, tuple[float, str]] = {}
 _GROUNDING_CACHE_LOCK = threading.Lock()
 
@@ -56,28 +73,60 @@ def _cache_age_secs(entry: tuple[float, str]) -> int:
     return int(time.time() - entry[0])
 
 
+def _fetch_with_budget(cache_key: str, fetch: Callable[[], str], budget_s: float) -> str:
+    """Run ``fetch`` on a daemon thread and wait at most ``budget_s``.
+
+    Returns the fetched text if it completes in time. If it doesn't, the
+    thread keeps running and warms the cache when it eventually finishes
+    (so the next turn is fast), but we raise ``TimeoutError`` now so the
+    caller can fall back to a stale value / proceed — the chat never
+    stalls on a slow cold cluster fetch.
+    """
+    holder: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            text = fetch()
+            holder["text"] = text
+            _cache_put(cache_key, text)  # warm the cache even if we stopped waiting
+        except Exception as exc:  # noqa: BLE001 — surfaced to the waiter
+            holder["err"] = exc
+
+    t = threading.Thread(target=_run, name="ms4-grounding-fetch", daemon=True)
+    t.start()
+    t.join(timeout=budget_s)
+    if "text" in holder:
+        return holder["text"]
+    if "err" in holder:
+        raise holder["err"]
+    raise TimeoutError(f"grounding fetch exceeded {budget_s:.0f}s budget")
+
+
 def _grounding_with_cache(
     *,
     cache_key: str,
     fetch: Callable[[], str],
     fresh_source: str,
+    budget_s: float | None = None,
 ) -> tuple[str, str]:
     """Return ``(text, source_label)`` honoring the TTL cache + stale fallback.
 
     - Fresh cache hit (within TTL): ``(cached_text, f"{fresh_source}+cached(age=Ns)")``.
-    - Cache miss / TTL expired: call ``fetch()``. On success cache + return ``(text, fresh_source)``.
-    - On fetch exception: if a stale cached value exists, return
+    - Cache miss / TTL expired: call ``fetch()`` under a wall-clock budget
+      (``_grounding_fetch_budget``). On success cache + return ``(text, fresh_source)``.
+    - On fetch exception OR budget timeout: if a stale cached value exists, return
       ``(stale_text, f"{fresh_source}+stale(age=Ns)")``. Otherwise re-raise.
     """
     entry = _cache_get(cache_key)
     if entry is not None and (time.time() - entry[0]) <= GROUNDING_CACHE_TTL_SECS:
         return entry[1], f"{fresh_source}+cached(age={_cache_age_secs(entry)}s)"
+    budget = budget_s if budget_s is not None else _grounding_fetch_budget()
     try:
-        text = fetch()
+        text = _fetch_with_budget(cache_key, fetch, budget)
     except Exception as exc:
         if entry is not None:
             log.warning(
-                "grounding %r refetch failed (%s); serving stale value age=%ds",
+                "grounding %r fetch failed/timed-out (%s); serving stale value age=%ds",
                 cache_key, exc, _cache_age_secs(entry),
             )
             return entry[1], f"{fresh_source}+stale(age={_cache_age_secs(entry)}s)"
@@ -368,11 +417,87 @@ def format_tools_answer(ms3_url: str, hivemind_url: str, gateway_url: str) -> st
         "- Hermes built-in tools are available through the worker loop (terminal, file I/O, "
         "browser, search, code execution, etc.) when a Depth Lobe job is dispatched. "
         "The Face Lobe by itself does not directly execute terminal commands or browser actions; "
-        "for those, the user can prefix `/deep` to force-dispatch a background worker.",
+        "for those, heavier work runs in the Depth Lobe in the background and its result is "
+        "delivered to the operator automatically. NEVER tell the operator to type or prefix a "
+        "slash command (e.g. /deep) — they may be on voice; just say you'll run it.",
         "",
         "If asked what you have access to, answer from this list. Do not invent tool names "
         "(no `browser_snapshot`, no `skills_list`, no `hivemind list-tools`).",
     ])
+    return "\n".join(lines)
+
+
+def format_tools_answer_quartermaster(message: str, hivemind_url: str, gateway_url: str) -> str:
+    """Quartermaster-curated answer to a "what tools do you have?"
+    question.
+
+    Replaces the full ``format_tools_answer`` dump (which injected all
+    ~75 MS4 tools + descriptions, ~15-20s grounding cost) with a
+    targeted view:
+
+    * the toolbox(es) most relevant to the specific question, with
+      their tools listed in detail, and
+    * a compact tool-shed map (clusters -> toolboxes) so the model can
+      still describe the whole surface without every schema in context.
+
+    Falls back to :func:`format_tools_answer` on any error so a vague
+    question still gets a complete answer.
+    """
+    from .quartermaster import get_catalog, resolve
+    from .quartermaster.taxonomy import TOOL_SHED_CLUSTERS
+
+    catalog = get_catalog(hivemind_url)
+    if not catalog.tools:
+        # No catalog (cluster + manifest both unavailable) — fall back.
+        return format_tools_answer(
+            os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080"),
+            hivemind_url,
+            gateway_url,
+        )
+
+    lines = [
+        "MS4 capability surface (Quartermaster-curated; answer from this, do not invent tools):",
+        f"- {len(catalog.tools)} tools across {len(catalog.toolboxes)} toolboxes "
+        f"(HiveMind {catalog.sources.get('hivemind', 0)} + MS4 {catalog.sources.get('ms4', 0)}).",
+    ]
+
+    # If the question points at a specific area, show those tools in detail.
+    resolution = resolve(message, catalog=catalog, hivemind_url=hivemind_url)
+    detailed_boxes: list[str] = []
+    if resolution.toolboxes and resolution.tier in ("deterministic", "embeddings", "llm"):
+        detailed_boxes = [tb for tb in resolution.toolboxes if tb in catalog.toolboxes][:3]
+    if detailed_boxes:
+        lines.append("")
+        lines.append("Most relevant to your question:")
+        for tb in detailed_boxes:
+            entries = catalog.toolboxes.get(tb, ())
+            lines.append(f"- toolbox `{tb}`:")
+            for entry in entries[:10]:
+                desc = (entry.description or "")[:90]
+                lines.append(f"    * {entry.name} — {desc}" if desc else f"    * {entry.name}")
+
+    # Always include the compact tool-shed map so the whole surface is
+    # describable without dumping every tool.
+    present = set(catalog.toolboxes.keys())
+    lines.append("")
+    lines.append("Full tool shed (clusters -> toolboxes; ask about an area to see its tools):")
+    for cluster, toolboxes in TOOL_SHED_CLUSTERS.items():
+        members = [tb for tb in toolboxes if tb in present]
+        if members:
+            lines.append(f"- {cluster}: {', '.join(members)}")
+    # Any toolboxes not in a known cluster (forward-compat).
+    classified = {tb for members in TOOL_SHED_CLUSTERS.values() for tb in members}
+    leftover = sorted(present - classified)
+    if leftover:
+        lines.append(f"- other: {', '.join(leftover)}")
+
+    lines.append("")
+    lines.append(
+        "The Face Lobe runs safe read-only tools inline; heavier or mutating work goes to "
+        "the Depth Lobe and its result is delivered automatically when done. Never tell the "
+        "operator to type a slash command (e.g. /deep) — just say you'll run it. Do not invent "
+        "tool names beyond this surface."
+    )
     return "\n".join(lines)
 
 
@@ -485,8 +610,12 @@ def build_grounded_user_message(message: str, hivemind_url: str) -> tuple[str, s
 
     if is_inventory_question(message):
         def _fetch_inventory() -> str:
-            summary = mcp_call(hivemind_url, "hivemind.cluster.summary@v1", {"include_gpu_details": True})
-            hosts = mcp_call(hivemind_url, "hivemind.hosts.list@v1", {"status_filter": "all"})
+            # Tight per-call timeout (vs the 30s mcp_call default) so a
+            # cold/slow cluster call can't hog the grounding budget; the
+            # wall-clock budget in _grounding_with_cache caps the total
+            # wait regardless.
+            summary = mcp_call(hivemind_url, "hivemind.cluster.summary@v1", {"include_gpu_details": True}, timeout=6)
+            hosts = mcp_call(hivemind_url, "hivemind.hosts.list@v1", {"status_filter": "all"}, timeout=6)
             return format_inventory_answer(summary, hosts)
         try:
             inventory, source_label = _grounding_with_cache(
@@ -517,13 +646,32 @@ def build_grounded_user_message(message: str, hivemind_url: str) -> tuple[str, s
 
     if is_tools_question(message):
         ms3_url = os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080")
+        gateway = ms4_gateway_url()
+        # Quartermaster-curated summary (env-gated, default on): a
+        # targeted toolbox view + compact cluster map instead of dumping
+        # all ~75 tool schemas. Fail-soft to the legacy full dump.
+        use_qm = os.environ.get("MS4_QM_TOOLS_SUMMARY", "1").strip().lower() not in {"0", "false", "no"}
+
         def _fetch_tools() -> str:
-            return format_tools_answer(ms3_url, hivemind_url, ms4_gateway_url())
+            if use_qm:
+                try:
+                    return format_tools_answer_quartermaster(message, hivemind_url, gateway)
+                except Exception as exc:
+                    log.warning("quartermaster tools summary failed (-> full dump): %s", exc)
+            return format_tools_answer(ms3_url, hivemind_url, gateway)
+
+        # Cache key includes the message because the Quartermaster
+        # summary is question-specific (the legacy dump was not).
+        cache_key = (
+            f"tools-qm::{hivemind_url}::{message.lower().strip()[:80]}"
+            if use_qm
+            else f"tools::{ms3_url}::{hivemind_url}"
+        )
         try:
             tools_block, source_label = _grounding_with_cache(
-                cache_key=f"tools::{ms3_url}::{hivemind_url}",
+                cache_key=cache_key,
                 fetch=_fetch_tools,
-                fresh_source="ms4-tools-grounding",
+                fresh_source="ms4-tools-grounding-qm" if use_qm else "ms4-tools-grounding",
             )
         except Exception as exc:
             return (

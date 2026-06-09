@@ -180,7 +180,7 @@ class DoubleAgentWorker:
             )
             self._maybe_cancel()
 
-            response = self._chat_runner(
+            chat_kwargs: dict[str, Any] = dict(
                 message=self.envelope.internal_goal or self.envelope.user_visible_goal,
                 session_id=f"da-worker-{self.envelope.job_id}",
                 model=self.envelope.resource_request.model_override,
@@ -188,6 +188,12 @@ class DoubleAgentWorker:
                 tool_start_callback=self._on_tool_start,
                 tool_complete_callback=self._on_tool_complete,
             )
+            # Phase E: only pass enabled_toolsets when the job set one, so
+            # chat-runner fakes that don't accept the kwarg stay unaffected.
+            enabled_toolsets = getattr(self.envelope.resource_request, "enabled_toolsets", None)
+            if enabled_toolsets:
+                chat_kwargs["enabled_toolsets"] = list(enabled_toolsets)
+            response = self._chat_runner(**chat_kwargs)
 
             self._maybe_cancel()
             text = str(response.get("text", "")) if isinstance(response, dict) else str(response)
@@ -302,37 +308,27 @@ class DoubleAgentWorker:
 
 
 def build_real_chat_runner(runner: Any) -> Callable[..., dict[str, Any]]:
-    """Adapter so the worker can call ``Ms4HermesRunner.chat`` without
+    """Adapter so the worker can call ``Ms4HermesRunner`` without
     importing it directly (keeps the worker test-friendly).
 
-    The default :class:`Ms4HermesRunner.chat` doesn't accept the worker's
-    tool callbacks — those callbacks are owned by the session that was
-    constructed at session-create time. To keep phase 1 simple and
-    avoid a Hermes-runner refactor today, we build a dedicated session
-    per job whose callbacks we own end-to-end."""
+    Each job gets a fresh, isolated agent whose lifecycle callbacks the
+    worker owns end-to-end, built via the sanctioned
+    :meth:`Ms4HermesRunner.new_background_agent` entry point (no
+    reaching into runner internals). ``max_iterations`` is sourced from
+    ``MS4_DA_MAX_ITERATIONS`` inside ``new_background_agent``.
+    """
 
     def _call(*, message: str, session_id: str, model: str | None,
               stream_callback: Callable[[str], None],
               tool_start_callback: Callable[[str, str, dict[str, Any]], None],
-              tool_complete_callback: Callable[[str, str, dict[str, Any], Any], None]) -> dict[str, Any]:
-        # Force a fresh session whose lifecycle callbacks we control.
-        runner.ensure_hermes_path()
-        runner.require_plugin()
-        agent = runner._new_agent.__self__._agent_class()  # type: ignore[attr-defined]
-        agent_instance = agent(
-            base_url=f"{runner.hivemind_url}/v1",
-            api_key=runner.default_model and "local-not-needed",
-            provider="custom",
-            api_mode="chat_completions",
-            model=model or runner.default_model,
+              tool_complete_callback: Callable[[str, str, dict[str, Any], Any], None],
+              enabled_toolsets: list[str] | None = None) -> dict[str, Any]:
+        agent_instance = runner.new_background_agent(
             session_id=session_id,
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-            platform="ms4",
-            max_iterations=12,
+            model=model or runner.default_model,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            enabled_toolsets=enabled_toolsets,
         )
         kwargs: dict[str, Any] = {"conversation_history": [], "task_id": session_id}
         if stream_callback is not None:

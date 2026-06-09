@@ -93,9 +93,14 @@
 
   <section class="grid">
     <div>
-      <div class="muted">Model</div>
+      <div class="muted">Face Lobe model</div>
       <select id="modelSelect"><option value="">Loading models...</option></select>
-      <small class="muted" style="display:block; font-size:10px; margin-top:2px;">Voice turns always use auto-picker (fast).</small>
+      <small class="muted" style="display:block; font-size:10px; margin-top:2px;">Used for chat AND voice. For ChatGPT-phone speed pick a \u26a1 Fast model (3-4B). Auto-pick = small/fast.</small>
+    </div>
+    <div>
+      <div class="muted">Depth Lobe model</div>
+      <select id="depthModelSelect"><option value="">Loading models...</option></select>
+      <small class="muted" style="display:block; font-size:10px; margin-top:2px;">Used for dispatched deep jobs. Auto = recommended.</small>
     </div>
     <div>
       <div class="muted">Session</div>
@@ -174,8 +179,8 @@
     <h4 style="margin:16px 0 6px;">Voice — TTS engine</h4>
     <select id="settingsTtsEngine" style="width:100%;">
       <option value="">Use server default (<span class="muted">loading…</span>)</option>
-      <option value="rest">REST — sentence-chunked parallel POST /v1/audio/speech</option>
-      <option value="ws_super">WS_SUPER — streaming WebSocket /v1/text-to-speech/{voice}/stream-input (recommended)</option>
+      <option value="rest">REST — parallel POST /v1/audio/speech (recommended, fastest here)</option>
+      <option value="ws_super">WS_SUPER — streaming WS (higher quality, but ~10x SLOWER on this cluster)</option>
     </select>
     <p class="muted" style="font-size:11px; margin:4px 0 0;">REST is the default — parallel chunks (up to MS4_VOICE_TTS_POOL_SIZE), fastest first-audio in practice. WS_SUPER ships higher-quality voice but is currently ~10× slower on this cluster because its GIM is single-stream and slow to start. Pick WS_SUPER per-turn when you want the quality and can afford the latency.</p>
 
@@ -219,6 +224,7 @@
     </div>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <button type="button" id="settingsReflexRegenerate" class="secondary">Regenerate reflexes</button>
+      <button type="button" id="settingsReflexValidate" class="secondary">Validate canned speech (LLM)</button>
       <span id="settingsReflexStatus" class="muted" style="font-size:12px;"></span>
     </div>
     <div id="settingsReflexCatalog" style="margin-top:8px; max-height:240px; overflow:auto; border:1px solid #2d2d44; border-radius:6px; padding:6px;">
@@ -236,6 +242,15 @@
       </label>
       <label class="toggle" style="align-items:center;">
         <input id="settingsHalfContext" type="checkbox" checked> Half-context cut (let MS4's current word tail off, ~250 ms)
+      </label>
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsVadAdaptive" type="checkbox" checked> Adaptive end-of-turn (respond sooner after a long, complete sentence; keep the full pause mid-thought)
+      </label>
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsThinkingAmbience" type="checkbox"> Thinking ambience during long waits (soft background pad; off by default)
+      </label>
+      <label class="toggle" style="align-items:center;">
+        <input id="settingsSpeakCompletions" type="checkbox"> Speak deep-job completions aloud (proactively, in voice mode; on by default)
       </label>
     </div>
     <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px; font-size:11px;">
@@ -293,7 +308,7 @@
     <div id="settingsVoiceIdentities" style="font-size:12px;">Loading…</div>
     <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center;">
       <input id="settingsVoiceIdentityName" type="text" placeholder="Speaker name" style="flex:1; min-width:140px;">
-      <button type="button" id="settingsVoiceIdentityEnroll" class="secondary">Enroll (record 5s)</button>
+      <button type="button" id="settingsVoiceIdentityEnroll" class="secondary">Enroll (record 8s — keep talking)</button>
       <span id="settingsVoiceIdentityStatus" class="muted" style="font-size:11px;"></span>
     </div>
 
@@ -454,6 +469,7 @@ const statusEl = document.getElementById('status');
 const sessionEl = document.getElementById('sessionId');
 const voiceEl = document.getElementById('voiceStatus');
 const modelSelect = document.getElementById('modelSelect');
+const depthModelSelect = document.getElementById('depthModelSelect');
 // The Stream toggle lives in the Settings dialog now. Keep a stable
 // reference so the rest of the existing chat flow doesn't need to
 // change; settings logic below keeps localStorage in sync.
@@ -593,6 +609,20 @@ const SETTINGS_LS_KEYS = {
   ttsVoice: 'ms4_tts_voice',
   ttsModel: 'ms4_tts_model',
 };
+
+// One-time migration (Jun 1 2026): ws_super is ~10x slower on this cluster
+// (emits no audio, wastes the bail timeout, then falls back to REST). The
+// old dropdown label mis-said it was "recommended", so sessions got pinned
+// to it. Clear a pinned ws_super ONCE so the user lands on the REST default
+// without reopening Settings; they can re-pick ws_super deliberately after.
+try {
+  if (localStorage.getItem(SETTINGS_LS_KEYS.ttsEngine) === 'ws_super'
+      && localStorage.getItem('ms4_engine_migrated_v2') !== 'true') {
+    localStorage.removeItem(SETTINGS_LS_KEYS.ttsEngine);
+    localStorage.setItem('ms4_engine_migrated_v2', 'true');
+    console.info('MS4: cleared pinned ws_super TTS engine -> using REST default (faster here).');
+  }
+} catch (e) { /* localStorage unavailable -> ignore */ }
 
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsDialog = document.getElementById('settingsDialog');
@@ -960,6 +990,24 @@ function renderReflexRow(rfx) {
   txt.style.cssText = 'flex:1; color:#c0c4d0;';
   txt.textContent = rfx.text;
   row.appendChild(txt);
+  // QA verdict from the round-trip validator: pass / fail / unchecked.
+  const qa = document.createElement('span');
+  qa.className = 'pill';
+  qa.style.fontSize = '9px';
+  if (rfx.validated === true) { qa.textContent = 'QA ✓'; qa.style.color = '#22c55e'; qa.style.borderColor = '#22c55e'; }
+  else if (rfx.validated === false) { qa.textContent = 'QA ✗'; qa.style.color = '#ef4444'; qa.style.borderColor = '#ef4444'; }
+  else { qa.textContent = 'QA ·'; qa.style.color = '#9999b4'; }
+  const heardBits = [];
+  if (rfx.heard) heardBits.push('heard: ' + rfx.heard);
+  if (rfx.effective_text && rfx.effective_text !== rfx.text) heardBits.push('says: ' + rfx.effective_text);
+  if (heardBits.length) qa.title = heardBits.join('\n');
+  row.appendChild(qa);
+  if (rfx.effective_text && rfx.effective_text !== rfx.text) {
+    const eff = document.createElement('span');
+    eff.style.cssText = 'color:#7c83a0; font-style:italic; font-size:10px;';
+    eff.textContent = '→ ' + rfx.effective_text;
+    row.appendChild(eff);
+  }
   if (rfx.available) {
     const ok = document.createElement('span');
     ok.className = 'pill';
@@ -1173,15 +1221,23 @@ async function triggerVoiceServiceRelease(service, btnEl) {
   }
 }
 
-settingsBtn.addEventListener('click', async () => {
-  await settingsLoadServerSnapshot();
-  await refreshVoiceServices();
-  await refreshReflexCatalog();
-  await refreshSpiritState();
-  await refreshHivemindState();
-  await refreshDoctrinePanel();
-  // New HiveMind admin panels (May 25-26 2026)
-  await Promise.allSettled([
+settingsBtn.addEventListener('click', () => {
+  // Open the dialog IMMEDIATELY, then load every panel in the
+  // background. Previously the handler awaited each panel fetch before
+  // calling showModal(), so a single slow/unreachable backend (e.g. the
+  // MS3 sidecar being down makes /spirit/state hang) made the whole
+  // button feel dead. Each refresh* renders its own error state, so
+  // firing them in parallel and never blocking the open is correct.
+  if (typeof settingsDialog.showModal === 'function') settingsDialog.showModal();
+  settingsCacheStatus.textContent = '';
+  Promise.allSettled([
+    settingsLoadServerSnapshot(),
+    refreshVoiceServices(),
+    refreshReflexCatalog(),
+    refreshSpiritState(),
+    refreshHivemindState(),
+    refreshDoctrinePanel(),
+    // HiveMind admin panels
     refreshHivemindVms(),
     refreshHivemindApps(),
     refreshVoiceIdentities(),
@@ -1193,8 +1249,6 @@ settingsBtn.addEventListener('click', async () => {
     refreshHivemindAdapters(),
     refreshHivemindLoadout(),
   ]);
-  settingsCacheStatus.textContent = '';
-  if (typeof settingsDialog.showModal === 'function') settingsDialog.showModal();
 });
 
 // ----- HiveMind cluster state -----------------------------------------
@@ -2101,7 +2155,7 @@ const settingsVoiceIdentities = document.getElementById('settingsVoiceIdentities
 const settingsVoiceIdentityEnroll = document.getElementById('settingsVoiceIdentityEnroll');
 const settingsVoiceIdentityName = document.getElementById('settingsVoiceIdentityName');
 const settingsVoiceIdentityStatus = document.getElementById('settingsVoiceIdentityStatus');
-const VOICE_ENROLL_SECS = 5;
+const VOICE_ENROLL_SECS = 8;  // 5s often yields too little continuous speech for the SD backend to extract an embedding
 
 async function refreshVoiceIdentities() {
   if (!settingsVoiceIdentities) return;
@@ -2163,12 +2217,12 @@ async function enrollVoiceIdentity() {
     return;
   }
   settingsVoiceIdentityEnroll.disabled = true;
-  settingsVoiceIdentityStatus.textContent = `Recording ${VOICE_ENROLL_SECS}s — speak naturally…`;
+  settingsVoiceIdentityStatus.textContent = `Recording ${VOICE_ENROLL_SECS}s — keep talking continuously (read a sentence or two, don't pause)…`;
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+    stream = await acquireMicStream();
   } catch (exc) {
-    settingsVoiceIdentityStatus.textContent = `mic permission denied: ${exc.message || exc}`;
+    settingsVoiceIdentityStatus.textContent = micErrorMessage(exc);
     settingsVoiceIdentityEnroll.disabled = false;
     return;
   }
@@ -2405,6 +2459,30 @@ settingsReflexRegenerate.addEventListener('click', async () => {
   }
 });
 
+const settingsReflexValidate = document.getElementById('settingsReflexValidate');
+if (settingsReflexValidate) {
+  settingsReflexValidate.addEventListener('click', async () => {
+    settingsReflexValidate.disabled = true;
+    settingsReflexValidate.textContent = 'Validating…';
+    settingsReflexStatusEl.textContent = 'POST /reflexes/validate — transcribing each clip back + LLM judge (runs in background)…';
+    try {
+      const r = await fetch('/reflexes/validate', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({async: true}),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      settingsReflexStatusEl.textContent =
+        'Validation started in the background. Re-open Settings in ~1 min for QA ✓/✗ badges.';
+    } catch (exc) {
+      settingsReflexStatusEl.textContent = `Validate failed: ${exc.message || exc}`;
+    } finally {
+      settingsReflexValidate.disabled = false;
+      settingsReflexValidate.textContent = 'Validate canned speech (LLM)';
+    }
+  });
+}
+
 // Preload reflexes on page load so playReflex() is ready before the
 // Settings dialog is even opened.
 window.addEventListener('load', () => {
@@ -2449,6 +2527,8 @@ function voiceQueryParams() {
   // Top-level chat model dropdown (modelSelect) — if the operator
   // explicitly picked a chat model, honor it for the voice turn too.
   if (modelSelect && modelSelect.value) params.set('model', modelSelect.value);
+  // Depth Lobe model for any deep job this voice turn dispatches.
+  if (depthModelSelect && depthModelSelect.value) params.set('depth_model_id', depthModelSelect.value);
   return params;
 }
 
@@ -2464,28 +2544,73 @@ async function refreshVoice() {
   voiceEl.textContent = data.voice_input_ready ? 'voice ready' : `ASR not ready: ${data.asr?.detail || 'unknown'}`;
 }
 
+// Curated small/fast chat models for sub-second first-token on voice.
+// Ordered best-first; only those present in the live catalog are shown.
+// A 3-4B-class model gives ChatGPT-phone-like responsiveness AND
+// contends far less for GPU memory than an 8B+ model sharing the card
+// with the 27B Depth Lobe.
+const FAST_FACE_MODELS = [
+  'phi4-mini:latest',
+  'ministral-3:latest',
+  'Llama-3.2-3B-Instruct-uncensored',
+  'llama3.2',
+  'gemma3',
+  'qwen3:0.6b',
+  'phi3.5:latest',
+  'qwen2.5:0.5b',
+];
+
+function _modelOption(model) {
+  const option = document.createElement('option');
+  option.value = model.id;
+  option.textContent = `${model.loaded ? '●' : model.available ? '◐' : '○'} ${model.id}`;
+  return option;
+}
+
+function _fillModelDropdown(sel, autoLabel, models, savedValue, recommendFast) {
+  sel.innerHTML = '';
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = autoLabel;
+  sel.appendChild(auto);
+  const list = models || [];
+  if (recommendFast) {
+    // Surface curated fast models in a group at the top so the operator
+    // can pick a snappy voice model without scrolling the full catalog.
+    const byId = new Map(list.map(m => [m.id, m]));
+    const fast = FAST_FACE_MODELS.map(id => byId.get(id)).filter(Boolean);
+    if (fast.length) {
+      const grp = document.createElement('optgroup');
+      grp.label = '\u26a1 Fast \u2014 best for voice latency';
+      fast.forEach(m => grp.appendChild(_modelOption(m)));
+      sel.appendChild(grp);
+      const grpAll = document.createElement('optgroup');
+      grpAll.label = 'All models';
+      list.forEach(m => grpAll.appendChild(_modelOption(m)));
+      sel.appendChild(grpAll);
+      if (savedValue && [...sel.querySelectorAll('option')].some(o => o.value === savedValue)) sel.value = savedValue;
+      return;
+    }
+  }
+  list.forEach(model => sel.appendChild(_modelOption(model)));
+  if (savedValue && [...sel.options].some(o => o.value === savedValue)) sel.value = savedValue;
+}
+
 async function loadModels() {
-  const selected = localStorage.getItem('ms4_model_id') || '';
-  modelSelect.innerHTML = '<option value="">Auto-pick Face Lobe model (small/fast)</option>';
+  const faceSel = localStorage.getItem('ms4_model_id') || '';
+  const depthSel = localStorage.getItem('ms4_depth_model_id') || '';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
     const r = await fetch('/models', {signal: controller.signal});
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    (data.models || []).forEach(model => {
-      const option = document.createElement('option');
-      option.value = model.id;
-      option.textContent = `${model.loaded ? '●' : model.available ? '◐' : '○'} ${model.id}`;
-      modelSelect.appendChild(option);
-    });
-    if ([...modelSelect.options].some(o => o.value === selected)) modelSelect.value = selected;
+    const models = data.models || [];
+    _fillModelDropdown(modelSelect, 'Auto-pick Face Lobe model (small/fast)', models, faceSel, true);
+    _fillModelDropdown(depthModelSelect, 'Auto (recommended depth model)', models, depthSel, false);
   } catch (error) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = `Model catalog unavailable; auto-pick will fall back to qwen2.5:0.5b`;
-    option.disabled = true;
-    modelSelect.appendChild(option);
+    modelSelect.innerHTML = '<option value="">Auto-pick Face Lobe model (small/fast)</option>';
+    depthModelSelect.innerHTML = '<option value="">Auto (recommended depth model)</option>';
     console.warn('Failed to load MS4 model catalog:', error);
   } finally {
     clearTimeout(timeout);
@@ -2493,6 +2618,7 @@ async function loadModels() {
 }
 
 modelSelect.addEventListener('change', () => localStorage.setItem('ms4_model_id', modelSelect.value));
+depthModelSelect.addEventListener('change', () => localStorage.setItem('ms4_depth_model_id', depthModelSelect.value));
 streamToggle.checked = localStorage.getItem('ms4_stream_chat') !== 'false';
 streamToggle.addEventListener('change', () => localStorage.setItem('ms4_stream_chat', streamToggle.checked ? 'true' : 'false'));
 
@@ -2500,7 +2626,7 @@ async function sendBlockingChat(text) {
   const r = await fetch('/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value})
+    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value, depth_model_id: depthModelSelect.value})
   });
   const data = await r.json();
   if (!r.ok) {
@@ -2548,7 +2674,7 @@ async function sendStreamingChat(text) {
   const r = await fetch('/chat/stream', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value})
+    body: JSON.stringify({message: text, session_id: sessionId, model_id: modelSelect.value, depth_model_id: depthModelSelect.value})
   });
   if (!r.ok || !r.body) {
     throw new Error(`stream failed: ${r.statusText}`);
@@ -2841,6 +2967,221 @@ function renderDoubleAgentJobs(jobs, revisionId) {
   }
 }
 
+// ----- Proactive Depth Lobe completion delivery -----------------------
+// "A system keeps tabs": when a deep job we were watching transitions
+// from in-flight -> terminal, announce it inline in the transcript with
+// its result. We only announce jobs we OBSERVED running this page
+// session (daSeenInFlight), so the historical backlog never spams. The
+// localStorage set is belt-and-suspenders against re-announcing across
+// reloads.
+const DA_TERMINAL_STATES = new Set(['completed', 'failed', 'canceled']);
+let daSeenInFlight = new Set();
+let daAnnounced = new Set();
+let daAnnouncedSession = null;
+
+function daAnnouncedKey(sid) { return `ms4_da_announced_${sid}`; }
+
+function daLoadAnnounced(sid) {
+  if (daAnnouncedSession === sid) return;
+  try {
+    const raw = localStorage.getItem(daAnnouncedKey(sid));
+    daAnnounced = new Set(raw ? JSON.parse(raw) : []);
+  } catch (e) { daAnnounced = new Set(); }
+  daSeenInFlight = new Set();  // in-flight observations are per page-session
+  daAnnouncedSession = sid;
+}
+
+function daPersistAnnounced(sid) {
+  try { localStorage.setItem(daAnnouncedKey(sid), JSON.stringify([...daAnnounced])); } catch (e) {}
+}
+
+// ---- Proactive SPOKEN delivery of deep-job completions -------------------
+// In a voice conversation the visual "Deep job done" bubble isn't enough —
+// the operator is hands-free and not staring at the screen, so the agent
+// has to speak up on its own. These helpers synthesize a short, natural
+// announcement and play it WHEN it won't talk over the user.
+const SPEAK_COMPLETIONS_KEY = 'ms4_da_speak_completions';
+function isSpeakCompletionsEnabled() {
+  // Default ON. Only the explicit string 'false' disables it.
+  return localStorage.getItem(SPEAK_COMPLETIONS_KEY) !== 'false';
+}
+
+const DA_DONE_OPENERS = ['Heads up \u2014', 'Quick update \u2014', 'Good news \u2014', 'Okay, that finished \u2014'];
+
+function _firstSentence(s, max) {
+  s = (s || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const m = s.match(/^.*?[.!?](\s|$)/);
+  let out = m ? m[0].trim() : s;
+  if (out.length > max) out = out.slice(0, max - 1).trim() + '\u2026';
+  return out;
+}
+
+function buildCompletionSpeech(job) {
+  const opener = DA_DONE_OPENERS[Math.floor(Math.random() * DA_DONE_OPENERS.length)];
+  if (job.state === 'failed') {
+    const why = _firstSentence(job.last_safe_user_status, 120);
+    return `${opener} that background job didn't pan out.${why ? ' ' + why : ''}`;
+  }
+  const gist = _firstSentence(job.last_safe_user_status, 140);
+  return gist
+    ? `${opener} that's ready. Here's the gist: ${gist} Want the full details?`
+    : `${opener} the background work you asked about is ready. Want the details?`;
+}
+
+// A soft two-tone "something's ready" earcon so even a missed word still
+// registers as a notification. Web Audio, ~250ms, low volume.
+function playNotifyChime() {
+  try {
+    const ctx = getPlaybackCtx();
+    const t = Math.max(nextChunkStartTime, ctx.currentTime) + 0.02;
+    [[660, 0], [880, 0.12]].forEach(([freq, off]) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t + off);
+      g.gain.exponentialRampToValueAtTime(0.16, t + off + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.16);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t + off); o.stop(t + off + 0.18);
+    });
+  } catch (e) { /* best-effort cue */ }
+}
+
+async function speakAnnouncement(text) {
+  // Synthesize via the same REST TTS path the voice turns use, then play
+  // through the shared Web Audio queue so barge-in can stop it if the
+  // user starts talking.
+  try {
+    const r = await fetch('/voice/synthesize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text}),
+    });
+    if (!r.ok) throw new Error('synthesize HTTP ' + r.status);
+    const ctx = getPlaybackCtx();
+    const buf = await ctx.decodeAudioData(await r.arrayBuffer());
+    const startAt = Math.max(nextChunkStartTime, ctx.currentTime) + 0.02;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(startAt);
+    nextChunkStartTime = startAt + buf.duration;
+    const entry = {source: src, startAt, endAt: startAt + buf.duration};
+    activeAudioSources.push(entry);
+    src.onended = () => { activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== src); };
+    return true;
+  } catch (e) {
+    console.warn('speakAnnouncement failed:', e);
+    return false;
+  }
+}
+
+function _isUserSpeakingNow() {
+  return vadState.enabled && (vadState.phase === 'speech' || vadState.phase === 'maybe_speech');
+}
+function _isVoiceBusy() {
+  // Reply stream in flight, or user mid-utterance, or audio still playing.
+  if (activeVoiceStreamController) return true;
+  if (_isUserSpeakingNow()) return true;
+  if (playbackCtx) {
+    const now = playbackCtx.currentTime;
+    if (activeAudioSources.some(e => (e.endAt || 0) > now + 0.05)) return true;
+  }
+  return false;
+}
+
+let daSpeakRetryTimer = null;
+function speakCompletionWhenQuiet(text, attempt) {
+  attempt = attempt || 0;
+  if (attempt > 16) return;  // ~20s budget; the visual bubble still stands
+  if (_isVoiceBusy()) {
+    if (daSpeakRetryTimer) clearTimeout(daSpeakRetryTimer);
+    daSpeakRetryTimer = setTimeout(() => speakCompletionWhenQuiet(text, attempt + 1), 1300);
+    return;
+  }
+  if (attempt === 0) {
+    // First clean shot: chime, then speak after it rings out.
+    playNotifyChime();
+    setTimeout(() => { if (!_isUserSpeakingNow()) speakAnnouncement(text); }, 380);
+  } else {
+    speakAnnouncement(text);
+  }
+}
+
+function announceDoubleAgentCompletion(job) {
+  const failed = job.state === 'failed';
+  const el = document.createElement('div');
+  el.className = 'msg system';
+  el.style.cssText = 'border-left:3px solid ' + (failed ? '#ef4444' : '#22c55e') + '; padding-left:10px;';
+  const head = document.createElement('div');
+  head.style.cssText = 'font-weight:600; margin-bottom:2px;';
+  head.textContent = (failed ? '\u26A0 Deep job failed \u2014 ' : '\u2705 Deep job done \u2014 ') + (job.user_visible_goal || '');
+  const summary = document.createElement('div');
+  summary.style.cssText = 'font-size:13px; margin-bottom:3px;';
+  summary.textContent = job.last_safe_user_status || '(no summary)';
+  const sub = document.createElement('div');
+  sub.className = 'muted';
+  sub.style.cssText = 'font-size:11px;';
+  sub.textContent = 'from your earlier question \u00B7 ' + job.job_id;
+  el.append(head, summary, sub);
+
+  const btn = document.createElement('button');
+  btn.className = 'secondary';
+  btn.type = 'button';
+  btn.textContent = 'Show details';
+  btn.style.cssText = 'margin-top:6px; font-size:12px;';
+  const detail = document.createElement('pre');
+  detail.style.cssText = 'display:none; white-space:pre-wrap; margin-top:6px; max-height:320px; overflow:auto; font-size:12px; background:#0e0f17; border:1px solid #2d2d44; border-radius:6px; padding:8px;';
+  btn.addEventListener('click', async () => {
+    if (detail.style.display === 'none') {
+      if (!detail.dataset.loaded) {
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/api/v1/double-agent/jobs/${encodeURIComponent(job.job_id)}`);
+          const data = r.ok ? await r.json() : {};
+          detail.textContent = (data.result && data.result.text) || data.last_safe_user_status || '(no result text)';
+          detail.dataset.loaded = '1';
+        } catch (e) {
+          detail.textContent = `failed to load result: ${e.message || e}`;
+        } finally { btn.disabled = false; }
+      }
+      detail.style.display = 'block';
+      btn.textContent = 'Hide details';
+    } else {
+      detail.style.display = 'none';
+      btn.textContent = 'Show details';
+    }
+  });
+  el.append(btn, detail);
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+
+  // Proactively SPEAK it when we're in a voice conversation — the whole
+  // point of the complaint: don't make the operator ask "is it done?".
+  // Gated behind voice mode (text users see the bubble) and a toggle.
+  if (voiceModeActive && isSpeakCompletionsEnabled()) {
+    speakCompletionWhenQuiet(buildCompletionSpeech(job), 0);
+  }
+}
+
+function daAnnounceTerminalJobs(jobs) {
+  daLoadAnnounced(sessionId);
+  for (const job of jobs) {
+    if (job.state === 'queued' || job.state === 'running') {
+      daSeenInFlight.add(job.job_id);
+      continue;
+    }
+    if (!DA_TERMINAL_STATES.has(job.state)) continue;
+    if (!daSeenInFlight.has(job.job_id)) continue;  // never watched it run -> backlog, skip
+    if (daAnnounced.has(job.job_id)) continue;
+    if (job.state !== 'canceled') announceDoubleAgentCompletion(job);  // canceled = no bubble
+    daAnnounced.add(job.job_id);
+    daPersistAnnounced(sessionId);
+  }
+}
+
 async function refreshDoubleAgent() {
   if (!sessionId) {
     daPanel.style.display = 'none';
@@ -2854,8 +3195,10 @@ async function refreshDoubleAgent() {
     ]);
     const jobsData = jobsResp.ok ? await jobsResp.json() : {jobs: []};
     const revData = revResp.ok ? await revResp.json() : {revision_id: null};
-    renderDoubleAgentJobs(jobsData.jobs || [], revData.revision_id);
-    const anyInFlight = (jobsData.jobs || []).some(j => j.state === 'queued' || j.state === 'running');
+    const jobs = jobsData.jobs || [];
+    renderDoubleAgentJobs(jobs, revData.revision_id);
+    daAnnounceTerminalJobs(jobs);  // proactive completion delivery
+    const anyInFlight = jobs.some(j => j.state === 'queued' || j.state === 'running');
     if (anyInFlight && !daPollHandle) {
       daPollHandle = setInterval(refreshDoubleAgent, 3000);
     } else if (!anyInFlight && daPollHandle) {
@@ -2902,6 +3245,7 @@ async function submitDoubleAgentJob() {
         background_lobe_type: lobe,
         user_visible_goal: goal,
         internal_goal: internal,
+        depth_model_id: depthModelSelect.value,
       }),
     });
     const data = await r.json();
@@ -2945,12 +3289,53 @@ function setVoiceStatus(text, kind) {
   voiceStatusLine.style.color = kind === 'error' ? '#ef4444' : (kind === 'ok' ? '#22c55e' : '#9999b4');
 }
 
+// Preferred mic constraints: mono + echo/noise processing. These can
+// fail on some devices (OverconstrainedError) and a stale/changed
+// default device can throw NotFoundError even when a mic exists, so
+// acquireMicStream() retries once with bare {audio:true} before giving
+// up. (function declaration -> hoisted, so earlier call sites can use it.)
+const MIC_PREFERRED_CONSTRAINTS = {audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}};
+
+async function acquireMicStream() {
+  try {
+    return await navigator.mediaDevices.getUserMedia(MIC_PREFERRED_CONSTRAINTS);
+  } catch (err) {
+    const name = err && err.name;
+    if (name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'NotReadableError') {
+      // Relax constraints and retry once — handles over-constrained
+      // devices and stale default-device races (the "Requested device
+      // not found" case where a mic actually IS present).
+      return await navigator.mediaDevices.getUserMedia({audio: true});
+    }
+    throw err;
+  }
+}
+
+// Map a getUserMedia failure to an ACCURATE, actionable message. The old
+// code labeled every failure "permission denied", which sent users
+// hunting for a permission toggle when the real problem was no device or
+// a device held by another app.
+function micErrorMessage(error) {
+  const name = (error && error.name) || '';
+  const detail = (error && error.message) || String(error);
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return `Microphone blocked — allow mic access for this page (browser address bar / OS privacy settings). [${detail}]`;
+  }
+  if (name === 'NotFoundError' || name === 'OverconstrainedError' || name === 'DevicesNotFoundError') {
+    return `No microphone found — check a mic is plugged in, enabled, and selected as the input device. [${detail}]`;
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return `Microphone is busy — another app (Zoom/Teams/OBS/browser tab) may have it locked. Close it and retry. [${detail}]`;
+  }
+  return `Microphone error: ${detail}`;
+}
+
 async function startRecording() {
   if (recorder) return; // already recording
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+    mediaStream = await acquireMicStream();
   } catch (error) {
-    setVoiceStatus(`Microphone permission denied: ${error.message || error}`, 'error');
+    setVoiceStatus(micErrorMessage(error), 'error');
     return;
   }
   try {
@@ -3088,8 +3473,18 @@ function encodeWavBlob(float32Samples, sampleRate) {
 let playbackCtx = null;
 let nextChunkStartTime = 0;
 let activeAudioSources = [];
+// Initial prebuffer (jitter buffer) state — see PREBUFFER_* constants.
+let prebufferQueue = [];
+let prebufferTimer = null;
+let playbackRunStarted = false;
 let currentVoiceTurnId = 0;
 let activeVoiceStreamController = null;
+// True once the operator has used voice this page-session (PTT or
+// full-duplex). Gates the PROACTIVE SPOKEN delivery of deep-job
+// completions: in a hands-free conversation the silent chat bubble
+// isn't enough — the agent must speak up on its own when background
+// work finishes. Text-only users still get the visual bubble.
+let voiceModeActive = false;
 
 function getPlaybackCtx() {
   if (!playbackCtx) {
@@ -3116,11 +3511,31 @@ const HALF_CONTEXT_TAIL_MS = 250;
 // fragments. Adds ~150ms to first-audio latency but eliminates the
 // "stutter at sentence boundaries" the operator reported live.
 const AUDIO_LEAD_TIME_MS = 150;
+// Initial prebuffer (jitter buffer). A short reply often ships a tiny
+// first chunk ("Hey") whose audio finishes BEFORE the second chunk's TTS
+// arrives, leaving an audible gap between the first and second words. So
+// we HOLD the first chunk(s) of each turn until one of:
+//   * a second chunk is decoded (PREBUFFER_MIN_CHUNKS) — now we can chain
+//     them gaplessly, OR
+//   * the buffered audio already covers PREBUFFER_TARGET_MS (the first
+//     chunk is long enough to mask the next chunk's arrival on its own,
+//     so don't add latency), OR
+//   * PREBUFFER_MAX_MS elapses (a one-chunk reply still plays promptly;
+//     the stream's `done` event also flushes immediately).
+// Then everything plays back-to-back with no gap.
+const PREBUFFER_MIN_CHUNKS = 2;
+const PREBUFFER_TARGET_MS = 900;
+const PREBUFFER_MAX_MS = 400;
 
 function bargeIn(reason, options) {
   const opts = options || {};
   const halfContext = opts.halfContext === true;
   const playAck = opts.playAck === true;
+  // keepStream: this is a CONTINUATION of the same utterance (the user
+  // paused briefly then resumed). Stop the reply audio so it doesn't talk
+  // over them, but DON'T abort the in-flight fetch or bump the turn id —
+  // that lets the prior turn's transcript still render so nothing is lost.
+  const keepStream = opts.keepStream === true;
   const now = playbackCtx ? playbackCtx.currentTime : 0;
   const tailOff = HALF_CONTEXT_TAIL_MS / 1000;
 
@@ -3155,18 +3570,29 @@ function bargeIn(reason, options) {
   } else {
     nextChunkStartTime = 0;
   }
+  // Reset the prebuffer so the next turn re-buffers its first chunk(s)
+  // and any chunks held for the barged turn are discarded.
+  playbackRunStarted = false;
+  prebufferQueue = [];
+  if (prebufferTimer) { clearTimeout(prebufferTimer); prebufferTimer = null; }
+  // Kill any lingering "thinking" ambience from the turn being interrupted.
+  stopThinkingAmbient();
 
   // 2. Cancel the in-flight stream fetch so the SSE reader stops
   //    enqueuing more chunks AND the server-side worker can detect
   //    a closed client and bail out (saves HiveMind cycles).
-  if (activeVoiceStreamController) {
+  //    On a CONTINUATION we keep the stream so the prior transcript
+  //    still lands (no truncation/loss of the first part).
+  if (!keepStream && activeVoiceStreamController) {
     try { activeVoiceStreamController.abort(); } catch (e) {}
     activeVoiceStreamController = null;
   }
 
   // 3. Bump the turn id so any chunks already in-flight get dropped
-  //    when they arrive at enqueueAudioChunk.
-  currentVoiceTurnId += 1;
+  //    when they arrive at enqueueAudioChunk. (Skipped on continuation.)
+  if (!keepStream) {
+    currentVoiceTurnId += 1;
+  }
 
   // 4. Optional canned ack played from the pre-rendered reflex
   //    catalog. Used by the full-duplex / VAD path to make the
@@ -3194,19 +3620,151 @@ function playRandomReflexAck() {
   try { playReflex(choice); } catch (e) { /* never let an ack failure break the turn */ }
 }
 
-// Bridge between turn-start and first-audio: when first audio is
-// taking too long (cold model load, large reply), play a
-// pre-rendered "thinking" reflex so the user hears something natural
-// instead of dead silence. Defaults are tuned so a normal warm
-// turn never hits the bridge (~1s first-audio); only cold/long
-// turns do.
-const THINKING_BRIDGE_DELAY_MS = 1200;
+// A soft, very short, low-volume "heard you" earcon played the instant
+// the user starts speaking in full-duplex. Replaces the old spoken ack
+// ("Mhm?" / "I'm listening.") that fired ~160ms into the first word and
+// talked OVER the user. Pure Web Audio — no asset, no round-trip, ~5ms to
+// schedule. A gentle rising sine pip at ~ -26 dB: noticeable but it never
+// competes with speech. Spoken acknowledgments now happen AFTER the user
+// finishes (server-driven, context-aware `reflex` event).
+function playOnsetTick() {
+  try {
+    const ctx = getPlaybackCtx();
+    const t0 = ctx.currentTime + 0.005;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(620, t0);
+    osc.frequency.exponentialRampToValueAtTime(880, t0 + 0.05);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.05, t0 + 0.015);  // soft attack
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.11); // quick decay
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.13);
+  } catch (e) { /* never let the tick break a turn */ }
+}
+
+// Bridge between turn-start and first-audio: when first audio is taking
+// long (cold load, slow Face model, large reply), fill the dead air. The
+// server's context-aware `reflex` event (tiny sentiment model) lands
+// first (~1.5s) as the spoken acknowledgment; this bridge then starts a
+// subtle high-fidelity "thinking" AMBIENCE underneath for the rest of the
+// wait. Raised 1200 -> 1900ms so the spoken reflex usually wins the lead.
+const THINKING_BRIDGE_DELAY_MS = 1900;
 function playRandomThinkingReflex() {
   const ids = ['thinking_one_moment', 'thinking_let_me_check', 'thinking_working_on_it'];
   const eligible = ids.filter(id => reflexBuffers.has(id));
   if (eligible.length === 0) return false;
   const choice = eligible[Math.floor(Math.random() * eligible.length)];
   try { return !!playReflex(choice); } catch (e) { return false; }
+}
+
+// Optional non-speech "thinking" ambience generated in Web Audio: a very
+// soft, slowly-breathing low pad. OFF by default (it was unwanted); opt in
+// via Settings (localStorage `ms4_thinking_ambience`). Softened Jun 1 2026
+// (lower gain, warmer low partials, gentler swell) so it's unobtrusive.
+const THINKING_AMBIENCE_KEY = 'ms4_thinking_ambience';
+function isThinkingAmbienceEnabled() {
+  return localStorage.getItem(THINKING_AMBIENCE_KEY) === 'true';  // default OFF
+}
+let thinkingAmbient = null;
+
+function startThinkingAmbient() {
+  if (thinkingAmbient) return;
+  try {
+    const ctx = getPlaybackCtx();
+    const now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(0.0001, now);
+    master.gain.exponentialRampToValueAtTime(0.022, now + 0.6);  // softer fade-in, ~ -33 dB
+    master.connect(ctx.destination);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 520;   // warmer/darker -> less "hum" presence
+    lp.Q.value = 0.5;
+    lp.connect(master);
+
+    const oscs = [];
+    [110.0, 164.8, 220.0].forEach((f, i) => {  // lower octave -> gentler
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      o.detune.value = (i - 1) * 3;
+      const g = ctx.createGain();
+      g.gain.value = i === 0 ? 0.6 : 0.25;
+      o.connect(g); g.connect(lp);
+      o.start(now);
+      oscs.push(o);
+    });
+
+    // Very slow breathing swell on the master gain (~6s cycle).
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.16;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 0.008;
+    lfo.connect(lfoGain); lfoGain.connect(master.gain);
+    lfo.start(now);
+
+    thinkingAmbient = {
+      stop() {
+        try {
+          const t = ctx.currentTime;
+          master.gain.cancelScheduledValues(t);
+          master.gain.setValueAtTime(Math.max(0.0002, master.gain.value || 0.04), t);
+          master.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+          oscs.forEach(o => { try { o.stop(t + 0.28); } catch (e) {} });
+          try { lfo.stop(t + 0.28); } catch (e) {}
+        } catch (e) { /* fine */ }
+      },
+    };
+  } catch (e) { thinkingAmbient = null; }
+}
+
+function stopThinkingAmbient() {
+  if (thinkingAmbient) {
+    try { thinkingAmbient.stop(); } catch (e) { /* fine */ }
+    thinkingAmbient = null;
+  }
+}
+
+// Easter egg: play the "Honorable" -> WE ON GO drop. Fetches the clip from
+// the gateway (the browser can't read a local file path), decodes once,
+// caches it, and plays the first `secs` with a smooth fade-out. Routed
+// through activeAudioSources so barge-in can stop it. Falls back to the
+// spoken "We on go!" reflex if the clip is unavailable (file missing).
+let eggClipBuffer = null;
+
+async function playEggClip(url, secs) {
+  try {
+    const ctx = getPlaybackCtx();
+    stopThinkingAmbient();
+    if (!eggClipBuffer) {
+      const r = await fetch(url || '/easter/honorable', {cache: 'force-cache'});
+      if (!r.ok) throw new Error('clip HTTP ' + r.status);
+      eggClipBuffer = await ctx.decodeAudioData(await r.arrayBuffer());
+    }
+    const dur = Math.min(Math.max(1, secs || 9), eggClipBuffer.duration);
+    const now = ctx.currentTime + 0.02;
+    const src = ctx.createBufferSource();
+    src.buffer = eggClipBuffer;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.9, now);
+    g.gain.setValueAtTime(0.9, now + Math.max(0.1, dur - 0.6));  // hold, then fade
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    src.connect(g); g.connect(ctx.destination);
+    src.start(now, 0, dur);  // play the first `dur` seconds (the intro)
+    const entry = {source: src, startAt: now, endAt: now + dur};
+    activeAudioSources.push(entry);
+    src.onended = () => { activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== src); };
+    return true;
+  } catch (e) {
+    console.warn('egg clip failed; falling back to spoken line:', e);
+    try { return playReflex('egg_honorable'); } catch (e2) { return false; }
+  }
 }
 
 function resetPlaybackQueue() {
@@ -3234,30 +3792,58 @@ async function enqueueAudioChunk(audioB64, mime, turnId) {
     // Re-check turn id AFTER the async decode — decoding takes ~10-30ms
     // and barge-in might have fired in between.
     if (turnId !== undefined && turnId !== currentVoiceTurnId) return;
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    // Schedule with a lead-time buffer so jittery chunk arrivals
-    // don't introduce audible gaps between word fragments. If
-    // nextChunkStartTime is already ahead of currentTime + lead,
-    // we honor it (chunks are queueing); otherwise we anchor to
-    // currentTime + lead so the next chunk has room.
-    const leadFloor = ctx.currentTime + (AUDIO_LEAD_TIME_MS / 1000);
-    const startAt = Math.max(nextChunkStartTime, leadFloor);
-    source.start(startAt);
-    nextChunkStartTime = startAt + audioBuffer.duration;
-    // Track start/end times alongside the node so half-context
-    // barge-in can decide whether each source is "currently
-    // playing" (let it tail off) vs "queued in the future" (cancel
-    // immediately).
-    const entry = {source, startAt, endAt: startAt + audioBuffer.duration};
-    activeAudioSources.push(entry);
-    source.onended = () => {
-      activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== source);
-    };
+    // Initial prebuffer: hold the first chunk(s) until the second is
+    // ready (or the first is long enough / a short timeout) so the
+    // first->second word gap disappears. Once the run is playing,
+    // schedule live.
+    if (!playbackRunStarted) {
+      prebufferQueue.push({audioBuffer, turnId});
+      const bufferedMs = prebufferQueue.reduce((s, it) => s + it.audioBuffer.duration, 0) * 1000;
+      if (prebufferQueue.length >= PREBUFFER_MIN_CHUNKS || bufferedMs >= PREBUFFER_TARGET_MS) {
+        flushPrebuffer();
+      } else if (!prebufferTimer) {
+        prebufferTimer = setTimeout(flushPrebuffer, PREBUFFER_MAX_MS);
+      }
+      return;
+    }
+    scheduleDecodedChunk(audioBuffer, turnId);
   } catch (err) {
     console.warn('audio chunk decode/play failed:', err);
   }
+}
+
+// Release the prebuffered chunks and commit this run to live playback.
+function flushPrebuffer() {
+  if (prebufferTimer) { clearTimeout(prebufferTimer); prebufferTimer = null; }
+  playbackRunStarted = true;
+  const items = prebufferQueue;
+  prebufferQueue = [];
+  for (const it of items) scheduleDecodedChunk(it.audioBuffer, it.turnId);
+}
+
+// Schedule one decoded chunk gaplessly behind whatever's already queued.
+function scheduleDecodedChunk(audioBuffer, turnId) {
+  // Barge-in may have fired while we were prebuffering — drop stale audio.
+  if (turnId !== undefined && turnId !== currentVoiceTurnId) return;
+  const ctx = getPlaybackCtx();
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(ctx.destination);
+  // If nextChunkStartTime is already ahead of currentTime + lead we honor
+  // it (chunks are queueing back-to-back); otherwise we anchor to
+  // currentTime + lead so the next chunk has room.
+  const leadFloor = ctx.currentTime + (AUDIO_LEAD_TIME_MS / 1000);
+  const startAt = Math.max(nextChunkStartTime, leadFloor);
+  source.start(startAt);
+  nextChunkStartTime = startAt + audioBuffer.duration;
+  // Track start/end times alongside the node so half-context barge-in can
+  // decide whether each source is "currently playing" (let it tail off)
+  // vs "queued in the future" (cancel immediately).
+  const entry = {source, startAt, endAt: startAt + audioBuffer.duration};
+  activeAudioSources.push(entry);
+  source.onended = () => {
+    activeAudioSources = activeAudioSources.filter(e => (e.source || e) !== source);
+  };
 }
 
 async function stopRecordingAndSend() {
@@ -3290,6 +3876,7 @@ async function stopRecordingAndSend() {
 // of it.
 async function submitWavBlobAsVoiceTurn(wavBlob, options) {
   const opts = options || {};
+  voiceModeActive = true;  // we're in a voice conversation -> speak completions
   const durationSec = opts.durationSec != null ? opts.durationSec : 0;
   const sourceLabel = opts.sourceLabel || 'voice';
   setVoiceStatus(
@@ -3329,13 +3916,21 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
   let assistantState = null;     // {el, textNode, text}
   let transcriptShown = false;
   let firstAudioAt = null;
+  // Refs so a late (async) `speaker` event can decorate the user bubble
+  // after the transcript already shipped — speaker ID now runs off the
+  // critical path so the transcript no longer waits on diarization.
+  let voiceUserBubble = null;
+  let voiceUserText = '';
   const accumulatedDeltas = [];
   // Schedule a "thinking" reflex if first audio is taking long
   // enough to feel awkward. Cleared the moment first audio plays
   // OR the turn aborts.
   let thinkingBridgeTimer = setTimeout(() => {
-    if (firstAudioAt === null && currentVoiceTurnId === myTurnId) {
-      playRandomThinkingReflex();
+    if (firstAudioAt === null && currentVoiceTurnId === myTurnId && isThinkingAmbienceEnabled()) {
+      // Optional soft ambience for the longer wait. OFF by default (the
+      // spoken context reflex already covers the dead air, and the hum
+      // was unwanted); opt in via Settings.
+      startThinkingAmbient();
     }
   }, THINKING_BRIDGE_DELAY_MS);
 
@@ -3379,10 +3974,11 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           // so it's still obviously a voice turn.
           const speaker = payload.speaker;
           const speakerName = (speaker && speaker.accepted && speaker.name) ? speaker.name : null;
+          voiceUserText = payload.text || '';
           const userText = speakerName
-            ? `🎤 ${speakerName}: ${payload.text || ''}`
-            : `🎤 ${payload.text || ''}`;
-          addMessage('user', userText);
+            ? `🎤 ${speakerName}: ${voiceUserText}`
+            : `🎤 ${voiceUserText}`;
+          voiceUserBubble = addMessage('user', userText);
           assistantState = createStreamingAssistantMessage();
           assistantState.text = '';
           transcriptShown = true;
@@ -3391,6 +3987,35 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
             ? ` · speaker ${speakerName} (${Math.round((speaker.score || 0) * 100)}%)`
             : '';
           setVoiceStatus(`${asrLine}${speakerLine} — streaming reply…`, null);
+        } else if (eventName === 'speaker') {
+          // Late speaker-ID result (diarization now runs off the critical
+          // path, so it lands after the transcript). Decorate the existing
+          // user bubble in place rather than blocking the turn on it.
+          const speaker = payload.speaker;
+          const speakerName = (speaker && speaker.accepted && speaker.name) ? speaker.name : null;
+          if (speakerName && voiceUserBubble) {
+            voiceUserBubble.textContent = `🎤 ${speakerName}: ${voiceUserText}`;
+          }
+        } else if (eventName === 'reflex') {
+          // Server-chosen, context-aware "buying time" acknowledgment
+          // (tiny sentiment model -> fitting, varied canned phrase). Play
+          // it during the dead air, but only if the real reply audio
+          // hasn't already started. Replaces the old random thinking
+          // reflex; cancel that timer so they don't double up.
+          if (firstAudioAt === null && currentVoiceTurnId === myTurnId && payload.id) {
+            if (thinkingBridgeTimer) { clearTimeout(thinkingBridgeTimer); thinkingBridgeTimer = null; }
+            playReflex(payload.id);
+          }
+        } else if (eventName === 'egg') {
+          // Easter egg fired (Honorable -> WE ON GO). It REPLACES the
+          // reply: stop any dead-air cues and play the clip. firstAudioAt
+          // is set so the bridge/ambience can't fire on top of it.
+          if (currentVoiceTurnId === myTurnId) {
+            if (thinkingBridgeTimer) { clearTimeout(thinkingBridgeTimer); thinkingBridgeTimer = null; }
+            firstAudioAt = Date.now() - turnStart;
+            setVoiceStatus(payload.label || 'Honorable... we on go', 'ok');
+            playEggClip(payload.clip, payload.secs);
+          }
         } else if (eventName === 'text_delta') {
           if (!assistantState) {
             assistantState = createStreamingAssistantMessage();
@@ -3406,18 +4031,23 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           if (firstAudioAt === null) {
             firstAudioAt = Date.now() - turnStart;
             setVoiceStatus(`First audio in ${firstAudioAt}ms`, 'ok');
-            // Real audio has arrived; cancel the thinking bridge so
-            // it doesn't fire on top of the actual reply.
+            // Real audio has arrived; cancel the thinking bridge and stop
+            // the ambience so neither plays on top of the actual reply.
             if (thinkingBridgeTimer) {
               clearTimeout(thinkingBridgeTimer);
               thinkingBridgeTimer = null;
             }
+            stopThinkingAmbient();
           }
           // Pass myTurnId so the chunk is dropped if barge-in already fired.
           await enqueueAudioChunk(payload.audio_base64, payload.audio_mime || 'audio/wav', myTurnId);
         } else if (eventName === 'audio_error') {
           console.warn('audio_error for chunk', payload.index, payload.error);
         } else if (eventName === 'done') {
+          // The reply is complete — release any still-held prebuffer
+          // immediately so a short (one-chunk) reply plays without
+          // waiting out the prebuffer timeout.
+          if (!playbackRunStarted && prebufferQueue.length) flushPrebuffer();
           if (payload.session_id) {
             sessionId = payload.session_id;
             localStorage.setItem('ms4_session_id', sessionId);
@@ -3477,6 +4107,13 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
     }
     const msg = String(error.message || error || '');
     setVoiceStatus(`Voice turn failed: ${msg}`, 'error');
+    // Audible failover: a stalled / unreachable / timed-out Face model
+    // should SPEAK the canned "trouble reaching the cluster" reflex
+    // instead of just showing red text, so a slow model never leaves the
+    // user staring at a frozen "streaming…" with no feedback.
+    if (/stall|did not respond|timed out|timeout|unreachable|reaching the (language )?cluster/i.test(msg)) {
+      playReflex('err_cluster_unreachable');
+    }
     // When the failure mode is "ASR unhealthy / no endpoints", surface
     // a one-click Provision button right next to the error so the
     // operator doesn't have to dig through settings.
@@ -3504,6 +4141,9 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
       clearTimeout(thinkingBridgeTimer);
       thinkingBridgeTimer = null;
     }
+    // Turn finished (done/error/abort) — make sure the ambience never
+    // lingers, e.g. a text-only reply that emitted no audio_chunk.
+    stopThinkingAmbient();
   }
 }
 
@@ -3580,8 +4220,39 @@ function vadMinSpeechMs() {
   return parseInt(localStorage.getItem(VAD_MIN_SPEECH_MS_KEY) || '160', 10);
 }
 function vadHangoverMs() {
-  return parseInt(localStorage.getItem(VAD_HANGOVER_MS_KEY) || '700', 10);
+  // End-of-turn silence. Raised 700 -> 1400ms (Jun 1 2026) so a natural
+  // mid-thought pause no longer ends the turn, splits the utterance, and
+  // truncates long speech to the last fragment. Tradeoff: the reply
+  // starts ~0.7s after you stop talking. Tunable via the Settings slider.
+  return parseInt(localStorage.getItem(VAD_HANGOVER_MS_KEY) || '1400', 10);
 }
+const VAD_ADAPTIVE_KEY = 'ms4_voice_vad_adaptive';
+function isVadAdaptiveEnabled() {
+  // Default ON.
+  const v = localStorage.getItem(VAD_ADAPTIVE_KEY);
+  return v === null ? true : v === 'true';
+}
+// Adaptive end-of-turn: shorten the wait ONLY after a clearly-complete,
+// LONG utterance (you've made a full statement, not a mid-thought
+// fragment), and never below a safe floor. Short utterances keep the
+// full hangover so we never clip someone gathering their thoughts — the
+// behavior the operator explicitly asked to preserve.
+const VAD_ADAPTIVE_LONG_SPEECH_MS = 2600;  // "substantial utterance" gate
+const VAD_ADAPTIVE_FLOOR_MS = 900;          // never end faster than this
+function vadEffectiveHangoverMs() {
+  const base = vadHangoverMs();
+  if (!isVadAdaptiveEnabled()) return base;
+  const speechMs = (vadState.lastSpeechSampleAt || 0) - (vadState.speechStartedAt || 0);
+  if (speechMs >= VAD_ADAPTIVE_LONG_SPEECH_MS) {
+    // Long, complete-sounding utterance -> respond sooner, but gently.
+    return Math.max(VAD_ADAPTIVE_FLOOR_MS, Math.round(base * 0.65));
+  }
+  return base;  // short/mid-thought -> keep the full, generous pause
+}
+// How soon after an offset a new onset counts as a CONTINUATION of the
+// same utterance (re-append) rather than a brand-new turn. Guards against
+// the rare case where a pause briefly exceeds the hangover mid-sentence.
+const VAD_CONTINUATION_WINDOW_MS = 1200;
 
 const vadState = {
   enabled: false,
@@ -3639,11 +4310,9 @@ async function enableFullDuplex() {
   if (vadState.enabled) return;
   // Grant mic permission once and hold the stream open across turns.
   try {
-    vadState.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true},
-    });
+    vadState.mediaStream = await acquireMicStream();
   } catch (error) {
-    setVoiceStatus(`Full-duplex: mic permission denied (${error.message || error})`, 'error');
+    setVoiceStatus(`Full-duplex: ${micErrorMessage(error)}`, 'error');
     localStorage.setItem(FULL_DUPLEX_KEY, 'false');
     const toggle = document.getElementById('settingsFullDuplex');
     if (toggle) toggle.checked = false;
@@ -3728,11 +4397,12 @@ function disableFullDuplex(options) {
   if (!opts.silent) setVoiceStatus('Full-duplex off', null);
 }
 
-// 300 ms rolling pre-roll buffer of audio frames captured BEFORE the
-// VAD confirms speech. When onset fires, we prepend the pre-roll to
-// the recorded utterance so the first 200-300 ms of the user's voice
-// (which the VAD took to identify) isn't lost.
-const VAD_PREROLL_MAX_FRAMES = 8;  // ~300 ms at 4096-sample frames @ 48 kHz
+// Rolling pre-roll buffer of audio frames captured BEFORE the VAD
+// confirms speech. When onset fires, we prepend the pre-roll to the
+// recorded utterance so the first ~400 ms of the user's voice (which the
+// VAD took to identify) isn't clipped. Raised 8 -> 12 frames (Jun 1 2026)
+// to give more head-room on quiet/ramping speech onsets.
+const VAD_PREROLL_MAX_FRAMES = 12;  // ~1.0s at 4096-sample frames @ 48 kHz
 let vadPreRoll = [];
 
 function vadPushAudio(samples) {
@@ -3827,8 +4497,10 @@ function vadTick() {
         setVadStateLabel();
         break;
       }
-      if (now - vadState.lastTransitionAt >= vadHangoverMs()) {
-        // Confirmed silence → end of utterance.
+      if (now - vadState.lastTransitionAt >= vadEffectiveHangoverMs()) {
+        // Confirmed silence → end of utterance. The hangover is adaptive:
+        // shorter after a long, clearly-complete utterance; full-length
+        // after a short one so a mid-thought pause is never clipped.
         vadState.phase = 'silence';
         vadState.lastTransitionAt = now;
         setVadStateLabel();
@@ -3839,20 +4511,28 @@ function vadTick() {
 }
 
 function onVadSpeechOnset() {
-  // The user just started speaking. Three things happen the moment
-  // we confirm onset:
+  // The user just started speaking. The moment we confirm onset:
   //
-  // 1. Half-context barge-in. MS4's currently-playing word is allowed
-  //    to tail off (~250 ms) instead of cutting mid-syllable; queued
-  //    chunks and the in-flight SSE fetch are cancelled immediately.
-  // 2. Random ack reflex from the pre-rendered catalog ("Mhm?", "Yes?",
-  //    "Go ahead.") plays in ~5 ms — zero round-trip to HiveMind.
+  // 1. Half-context barge-in: MS4's currently-playing word tails off
+  //    (~250 ms) instead of cutting mid-syllable; queued chunks and the
+  //    in-flight SSE fetch are cancelled. EXCEPT on a continuation (a
+  //    brief pause then resume within VAD_CONTINUATION_WINDOW_MS) where
+  //    we keep the prior stream so its transcript isn't lost.
+  // 2. A soft, low-volume "heard you" tick earcon (NOT a spoken phrase)
+  //    plays in ~5 ms so we don't talk over the user. Spoken
+  //    acknowledgments now happen AFTER the user finishes (server-driven
+  //    `reflex` SSE event).
   // 3. The recording buffer prepends the rolling pre-roll so we don't
-  //    lose the first 200-300 ms of the user's voice.
+  //    clip the first ~400 ms of the user's voice.
+  const isContinuation = (Date.now() - (vadState.lastOffsetAt || 0)) < VAD_CONTINUATION_WINDOW_MS;
   bargeIn('vad_speech_onset', {
     halfContext: isHalfContextEnabled(),
-    playAck: isVadAckEnabled(),
+    playAck: false,             // onset ack is now the soft tick below, not a spoken reflex
+    keepStream: isContinuation, // don't drop the prior transcript on a quick resume
   });
+  if (isVadAckEnabled()) {
+    playOnsetTick();
+  }
   vadState.recordedChunks = vadPreRoll.slice();
   vadPreRoll = [];
 }
@@ -3861,6 +4541,7 @@ async function onVadSpeechOffset() {
   // Speech offset = end of utterance after hangover. Build the WAV
   // and hand it to the existing /voice/turn/stream pipeline. No mic
   // teardown — the stream stays open for the next utterance.
+  vadState.lastOffsetAt = Date.now();  // continuation window anchor
   const chunks = vadState.recordedChunks.slice();
   vadState.recordedChunks = [];
   if (chunks.length === 0) return;
@@ -3906,6 +4587,28 @@ if (settingsHalfContextToggle) {
   settingsHalfContextToggle.checked = isHalfContextEnabled();
   settingsHalfContextToggle.addEventListener('change', () => {
     localStorage.setItem(VAD_HALFCTX_KEY, settingsHalfContextToggle.checked ? 'true' : 'false');
+  });
+}
+const settingsVadAdaptiveToggle = document.getElementById('settingsVadAdaptive');
+if (settingsVadAdaptiveToggle) {
+  settingsVadAdaptiveToggle.checked = isVadAdaptiveEnabled();
+  settingsVadAdaptiveToggle.addEventListener('change', () => {
+    localStorage.setItem(VAD_ADAPTIVE_KEY, settingsVadAdaptiveToggle.checked ? 'true' : 'false');
+  });
+}
+const settingsThinkingAmbienceToggle = document.getElementById('settingsThinkingAmbience');
+if (settingsThinkingAmbienceToggle) {
+  settingsThinkingAmbienceToggle.checked = isThinkingAmbienceEnabled();
+  settingsThinkingAmbienceToggle.addEventListener('change', () => {
+    localStorage.setItem(THINKING_AMBIENCE_KEY, settingsThinkingAmbienceToggle.checked ? 'true' : 'false');
+    if (!settingsThinkingAmbienceToggle.checked) stopThinkingAmbient();
+  });
+}
+const settingsSpeakCompletionsToggle = document.getElementById('settingsSpeakCompletions');
+if (settingsSpeakCompletionsToggle) {
+  settingsSpeakCompletionsToggle.checked = isSpeakCompletionsEnabled();
+  settingsSpeakCompletionsToggle.addEventListener('change', () => {
+    localStorage.setItem(SPEAK_COMPLETIONS_KEY, settingsSpeakCompletionsToggle.checked ? 'true' : 'false');
   });
 }
 function bindVadSlider(slider, label, storageKey, fmt) {
