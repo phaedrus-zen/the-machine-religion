@@ -47,6 +47,16 @@ def test_launchers_require_contained_python():
         assert "require_venv_python" in script
 
 
+def test_supervisor_is_contained_python_watchdog():
+    supervise = (MS4 / "scripts" / "supervise_ms4.py").read_text(encoding="utf-8")
+
+    assert "venv_python" in supervise
+    assert "is_port_listening" in supervise
+    assert "(9080, 9180, 9181)" in supervise
+    assert "--skip-validation" in supervise
+    assert "supervisor" in supervise
+
+
 def test_runtime_scripts_are_cross_platform_python_entrypoints():
     forbidden_suffixes = {".ps1", ".sh", ".bat", ".cmd"}
     offenders = [
