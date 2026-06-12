@@ -1834,8 +1834,10 @@ def _run_ws_super_engine(
     synthesizes; the engine emits them as SSE ``audio_chunk`` events
     so the existing browser path consumes them unchanged.
 
-    Latency win (measured live): first audio drops from ~10s to
-    ~2.5s, total drops from ~25s to ~6s for a 4-sentence reply.
+    Experimental WS engine. Keep this branch available for quality /
+    provider experiments, but the current cluster default is the
+    sentence-chunked REST fan-out path because live evidence showed
+    better first-audio and total-turn latency there.
     """
     # Local import so the REST path never has to install websockets.
     if ws_engine_factory is None:
@@ -1937,7 +1939,7 @@ def _run_ws_super_engine(
         # Wait for isFinal with TWO budgets:
         #
         #   * first-audio budget: if no audio chunk has arrived within
-        #     ``MS4_TTS_WS_FIRST_AUDIO_TIMEOUT`` (default 15s) AFTER
+        #     ``MS4_TTS_WS_FIRST_AUDIO_TIMEOUT`` (default 6s) AFTER
         #     chat has finished flushing, HiveMind's TTS_SUPER GIM is
         #     almost certainly stuck. Bail early so the REST fallback
         #     can take over within seconds instead of after 60s.
@@ -1949,7 +1951,7 @@ def _run_ws_super_engine(
         # Live evidence (May 26 2026): operator hit a turn where chat
         # finished in <1s, the WS engine then waited the full 60s
         # without emitting a single chunk before the fallback kicked
-        # in. With the early bail, that becomes ~15s end-to-end
+        # in. With the early bail, that becomes a bounded fallback
         # because REST takes over the moment we know WS is dead.
         first_audio_timeout = float(os.environ.get("MS4_TTS_WS_FIRST_AUDIO_TIMEOUT", "6"))
         overall_timeout = float(os.environ.get("MS4_TTS_WS_FINAL_TIMEOUT", "60"))

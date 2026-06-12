@@ -89,7 +89,10 @@ DoubleAgentJobEnvelope.v1
   conversation_revision_id        integer; >= 1
   owner_identity                  "MachineSpirit4" only in phase 1
   foreground_lobe                 "ms4_face"
-  background_lobe_type            enum: deep_chat | deep_coder | diagnostic | research | verifier
+  background_lobe_type            enum: deep_chat | deep_coder | diagnostic | research | verifier |
+                                      oracle_deep_chat | oracle_deep_coder |
+                                      oracle_diagnostic | oracle_planner |
+                                      oracle_research | oracle_verifier
   user_visible_goal               string; <= 280 chars
   internal_goal                   string; <= 1024 chars
   priority                        enum: interactive | batch

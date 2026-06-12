@@ -49,6 +49,13 @@ def test_envelope_happy_path_passes_validate():
     assert dumped["status_policy"]["emit_raw_tokens"] is False
 
 
+@pytest.mark.parametrize("lobe_type", list(safety.BACKGROUND_LOBE_TYPES))
+def test_envelope_accepts_each_allowlisted_background_lobe_type(lobe_type):
+    env = JobEnvelope(**_good_envelope_kwargs(background_lobe_type=lobe_type))
+    env.validate()
+    assert env.background_lobe_type == lobe_type
+
+
 def test_envelope_refuses_unsafe_job_id():
     env = JobEnvelope(**_good_envelope_kwargs(job_id="bad id with spaces;rm -rf"))
     with pytest.raises(SchemaError):

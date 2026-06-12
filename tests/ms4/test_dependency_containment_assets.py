@@ -41,6 +41,22 @@ def test_setup_and_check_scripts_exist_with_expected_contracts():
     assert "desktop_control" in check_py
 
 
+def test_runtime_env_pins_hermes_home():
+    """The June 8 2026 Hermes upgrade moved the Windows platform-native
+    data home to %LOCALAPPDATA%/hermes, orphaning the real config.yaml
+    (with plugins.enabled: [ms4_consciousness]) in ~/.hermes and
+    breaking every Depth Lobe job with HermesUnavailable. Hermes issue
+    #18594: subprocess spawners must propagate HERMES_HOME explicitly.
+    ms4_env() must therefore pin HERMES_HOME (default ~/.hermes,
+    env-overridable) so the gateway, MCP, workers, and validators all
+    resolve the same Hermes data home."""
+    runtime_common = (MS4 / "scripts" / "runtime_common.py").read_text(encoding="utf-8")
+
+    assert "def hermes_home" in runtime_common
+    assert 'env.setdefault("HERMES_HOME", str(hermes_home()))' in runtime_common
+    assert '".hermes"' in runtime_common
+
+
 def test_launchers_require_contained_python():
     for script_name in ("run_ms4_gateway.py", "run_ms4_mcp.py", "start_ms4.py"):
         script = (MS4 / "scripts" / script_name).read_text(encoding="utf-8")

@@ -42,6 +42,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from machine_spirit_4.double_agent import safety  # noqa: E402
 from machine_spirit_4.double_agent.blackboard import Blackboard  # noqa: E402
+from machine_spirit_4.double_agent.plan_templates import (  # noqa: E402
+    GAMESTREAM_LOBE_TYPE,
+    build_gamestream_chat_runner,
+)
 from machine_spirit_4.double_agent.schemas import JobEnvelope, JobEvent  # noqa: E402
 from machine_spirit_4.double_agent.worker import (  # noqa: E402
     DoubleAgentWorker,
@@ -93,6 +97,12 @@ def _build_runner_or_die(envelope: JobEnvelope, blackboard: Blackboard):
     fake_spec = os.environ.get("MS4_DOUBLE_AGENT_FAKE_CHAT_RUNNER")
     if fake_spec:
         return _load_fake_chat_runner(fake_spec)
+    if envelope.background_lobe_type == GAMESTREAM_LOBE_TYPE:
+        # Deterministic plan-template lane: no Hermes import, no model.
+        # The template walks the GPU-P VM -> benchmark -> moonlight
+        # chain (dry-run by default) and reports through the same
+        # worker lifecycle callbacks as the Hermes lane.
+        return build_gamestream_chat_runner()
     try:
         from machine_spirit_4.gateway.hermes_runner import Ms4HermesRunner
 
@@ -160,6 +170,36 @@ def _load_fake_chat_runner(spec: str):
     return factory()
 
 
+def _resolve_depth_model_for_envelope(envelope: JobEnvelope) -> None:
+    """Let ``resource_request.model_class`` drive the model pick for
+    jobs that arrived WITHOUT an explicit ``model_override`` (e.g. REST
+    submits from the web UI's deep-job dialog — the auto-router path
+    always pins an override before submit).
+
+    Phase-4 seed of the capability-lease routing described in
+    ``docs/ARCHITECTURE.md`` ("phase 4 will route by
+    resource_request.model_class"). Fail-soft: any picker failure
+    leaves ``model_override`` unset so the worker falls back to the
+    runner's default model exactly as before."""
+    rr = envelope.resource_request
+    if rr.model_override:
+        return
+    if envelope.background_lobe_type == GAMESTREAM_LOBE_TYPE:
+        return  # deterministic template lane — no model in the loop
+    if os.environ.get("MS4_DOUBLE_AGENT_FAKE_CHAT_RUNNER"):
+        return  # hermetic test mode: never touch the network
+    try:
+        from machine_spirit_4.double_agent.depth_picker import choose_depth_model
+
+        choice = choose_depth_model(
+            hivemind_url=os.environ.get("MS4_HIVEMIND_URL", "http://127.0.0.1:6089"),
+            model_class=rr.model_class,
+        )
+        rr.model_override = choice.model_id
+    except Exception:  # noqa: BLE001 — picker must never kill the job
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Double Agent worker subprocess")
     parser.add_argument("--db", required=True, help="Path to the Double Agent SQLite blackboard.")
@@ -180,6 +220,7 @@ def main() -> int:
     blackboard = Blackboard(db_path)
     cancel_event = threading.Event()
     _install_signal_handlers(cancel_event)
+    _resolve_depth_model_for_envelope(envelope)
     chat_runner = _build_runner_or_die(envelope, blackboard)
 
     worker = DoubleAgentWorker(

@@ -22,8 +22,22 @@ BACKGROUND_LOBE_TYPES = (
     "deep_chat",
     "deep_coder",
     "diagnostic",
+    "oracle_deep_chat",
+    "oracle_deep_coder",
+    "oracle_diagnostic",
+    # Oracle front-door planner lane. Execution still uses the normal
+    # background worker substrate; the type makes delegated planning jobs
+    # visible as Oracle backend-lobe work instead of generic deep chat.
+    "oracle_planner",
+    "oracle_research",
+    "oracle_verifier",
     "research",
     "verifier",
+    # Deterministic Depth-job plan template: GPU-P game-stream VM ->
+    # PsyKyo benchmark -> moonlight stream-back. Executed by
+    # machine_spirit_4.double_agent.plan_templates (no Hermes loop);
+    # DRY-RUN by default, mirroring menta_game_session's mutation gate.
+    "gamestream_benchmark",
 )
 JOB_RESULT_STATUSES = ("success", "partial", "failed", "stale", "needs_user")
 CONFIDENCE_LEVELS = ("low", "medium", "high")

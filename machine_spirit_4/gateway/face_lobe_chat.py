@@ -272,7 +272,7 @@ class FaceLobeChat:
         *,
         session_id: str | None,
         model: str,
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: Callable[[str], Any] | None = None,
         extra_system: str | None = None,
     ) -> dict[str, Any]:
         """Run one chat turn directly against HiveMind /v1/chat/completions.
@@ -494,7 +494,7 @@ class FaceLobeChat:
     def _post_streaming(
         self,
         payload: dict[str, Any],
-        stream_callback: Callable[[str], None],
+        stream_callback: Callable[[str], Any],
     ) -> tuple[str, dict[str, Any]]:
         """Consume HiveMind's SSE chat-completions stream with a stall
         timeout.
@@ -602,7 +602,8 @@ class FaceLobeChat:
                                     first_token_at = time.monotonic()
                                 accumulated.append(fragment)
                                 try:
-                                    stream_callback(fragment)
+                                    if stream_callback(fragment) is False:
+                                        stop = True
                                 except Exception as exc:
                                     log.warning("face_lobe stream_callback raised: %s", exc)
                         continue
@@ -612,7 +613,8 @@ class FaceLobeChat:
                             first_token_at = time.monotonic()
                         accumulated.append(fragment)
                         try:
-                            stream_callback(fragment)
+                            if stream_callback(fragment) is False:
+                                stop = True
                         except Exception as exc:
                             log.warning("face_lobe stream_callback raised: %s", exc)
                 if stop:

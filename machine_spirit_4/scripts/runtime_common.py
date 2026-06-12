@@ -36,6 +36,21 @@ def hermes_dir() -> Path:
     return Path(os.environ.get("MS4_HERMES_DIR") or (Path.home() / "Documents" / "hermes-agent"))
 
 
+def hermes_home() -> Path:
+    """The Hermes DATA home (config.yaml, sessions, memories) — distinct
+    from :func:`hermes_dir` (the Hermes CODE checkout).
+
+    Pinned to the legacy ``~/.hermes`` this deployment has always used.
+    The June 8 2026 Hermes upgrade moved the platform-native default on
+    Windows to ``%LOCALAPPDATA%/hermes``, silently orphaning the real
+    config (including ``plugins.enabled: [ms4_consciousness]``) and
+    breaking every Depth Lobe job with ``HermesUnavailable: plugin not
+    enabled``. Hermes' own guidance (issue #18594) is that subprocess
+    spawners must propagate ``HERMES_HOME`` explicitly — this is that.
+    Override with ``HERMES_HOME`` in the environment."""
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+
+
 def playwright_browsers_path() -> Path:
     return MS4 / ".cache" / "playwright"
 
@@ -56,6 +71,7 @@ def ms4_env(
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("MS4_HERMES_DIR", str(hermes_dir()))
+    env.setdefault("HERMES_HOME", str(hermes_home()))
     env.setdefault("MS4_HIVEMIND_URL", "http://127.0.0.1:6089")
     env.setdefault("MS4_DEFAULT_MODEL", "qwen3-coder-next:latest")
     env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(playwright_browsers_path()))

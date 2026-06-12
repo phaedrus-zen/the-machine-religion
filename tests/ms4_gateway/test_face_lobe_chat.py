@@ -64,11 +64,17 @@ class _FakeHivemindHandler(BaseHTTPRequestHandler):
         chunks = plan.get("chunks") or []
         for c in chunks:
             event = {"choices": [{"delta": {"content": c}}]}
-            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
-            self.wfile.flush()
+            try:
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
         if plan.get("send_done", True):
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
         else:
             # Simulate a stalled stream that never sends [DONE].
             # The FaceLobeChat stall-timeout guard must fire and return
@@ -387,3 +393,38 @@ def test_stream_stall_returns_partial_text_without_hanging(fake_hivemind):
     # Generous upper bound: stall_timeout 2s + handler hang 6s but the
     # readline will time out at the socket-level stall.
     assert elapsed < 10.0, f"FaceLobeChat should not hang on stalled streams; took {elapsed:.2f}s"
+
+
+def test_stream_callback_false_stops_stream_early(fake_hivemind):
+    """The text SSE route uses ``stream_callback`` as its cooperative
+    disconnect signal. Returning False must stop the upstream Face Lobe
+    stream and return the partial text collected so far instead of
+    burning through the whole model response after the browser left.
+    """
+    fake_hivemind["script"]["per_model"] = {
+        "phi4-mini": {
+            "stream": True,
+            "chunks": ["first", " second", " third"],
+            "send_done": True,
+        },
+    }
+    flc = FaceLobeChat(
+        hivemind_url=fake_hivemind["url"],
+        empty_fallback_model="qwen3-coder-next:latest",
+    )
+    captured: list[str] = []
+
+    def stop_after_first(fragment: str) -> bool:
+        captured.append(fragment)
+        return False
+
+    result = flc.chat(
+        "Hi",
+        session_id="s-cancel",
+        model="phi4-mini",
+        stream_callback=stop_after_first,
+    )
+
+    assert captured == ["first"]
+    assert result["text"] == "first"
+    assert result["metrics"]["stream_chunks"] == 1

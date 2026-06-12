@@ -275,3 +275,120 @@ def test_vlm_chat_passes_messages(fake_mcp):
     args = fake_mcp.calls[-1]["body"]["params"]["arguments"]
     assert args["messages"] == msgs
     assert args["model"] == "qwen3-vl:4b"
+
+
+# ---------------------------------------------------------------------------
+# PsyKyo game-session benchmark bridge + moonlight (June 2026) — the
+# wrappers the Depth Lobe gamestream_benchmark plan template drives.
+# ---------------------------------------------------------------------------
+
+
+def test_psykyo_gs_list_capable_gpus(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.psykyo.game_session.list_capable_gpus@v1",
+        {"gpus": [{"uuid": "GPU-abc", "host": "desktop-1"}]},
+    )
+    body = hivemind_tools.psykyo_game_session_list_capable_gpus(
+        hm_url(fake_mcp), host_filter="desktop-1"
+    )
+    assert body["gpus"][0]["uuid"] == "GPU-abc"
+    last = fake_mcp.calls[-1]["body"]["params"]
+    assert last["name"] == "hivemind.psykyo.game_session.list_capable_gpus@v1"
+    assert last["arguments"] == {"host_filter": "desktop-1"}
+
+
+def test_psykyo_gs_start_benchmark_forces_benchmark_mode(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.psykyo.game_session.start_benchmark@v1",
+        {"job_id": "gs-1", "plan": {"job_id": "gs-1"}},
+    )
+    body = hivemind_tools.psykyo_game_session_start_benchmark(
+        hm_url(fake_mcp),
+        game="cyberpunk-2077",
+        benchmark_runs=3,
+        requires_stream=False,
+        gpu_uuid="GPU-abc",
+        host="desktop-1",
+        client="ms4-depth-lobe",
+    )
+    assert body["job_id"] == "gs-1"
+    last = fake_mcp.calls[-1]["body"]["params"]
+    assert last["name"] == "hivemind.psykyo.game_session.start_benchmark@v1"
+    args = last["arguments"]
+    assert args["game"] == "cyberpunk-2077"
+    assert args["mode"] == "benchmark"
+    assert args["benchmark_runs"] == 3
+    assert args["requires_stream"] is False
+    assert args["gpu_uuid"] == "GPU-abc"
+    assert args["host"] == "desktop-1"
+    assert args["client"] == "ms4-depth-lobe"
+
+
+def test_psykyo_gs_start_benchmark_requires_game(fake_mcp):
+    with pytest.raises(ValueError):
+        hivemind_tools.psykyo_game_session_start_benchmark(hm_url(fake_mcp), game="")
+
+
+def test_psykyo_gs_run_benchmark_one_shot(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.psykyo.game_session.run_benchmark@v1",
+        {"final_state": "COMPLETE", "benchmark_summary": {"avg_fps": 100.0}},
+    )
+    body = hivemind_tools.psykyo_game_session_run_benchmark(
+        hm_url(fake_mcp), game="cp2077", benchmark_runs=2
+    )
+    assert body["final_state"] == "COMPLETE"
+    last = fake_mcp.calls[-1]["body"]["params"]
+    assert last["name"] == "hivemind.psykyo.game_session.run_benchmark@v1"
+    assert last["arguments"]["mode"] == "benchmark"
+    assert last["arguments"]["benchmark_runs"] == 2
+
+
+def test_psykyo_gs_get_results_and_stop_session(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.psykyo.game_session.get_results@v1",
+        {"benchmark_summary": {"avg_fps": 99.9}},
+    )
+    body = hivemind_tools.psykyo_game_session_get_results(hm_url(fake_mcp), job_id="gs-1")
+    assert body["benchmark_summary"]["avg_fps"] == 99.9
+    assert fake_mcp.calls[-1]["body"]["params"]["arguments"] == {"job_id": "gs-1"}
+
+    fake_mcp.set_response(
+        "hivemind.psykyo.game_session.stop_session@v1", {"state": "CANCELLED"}
+    )
+    body = hivemind_tools.psykyo_game_session_stop_session(hm_url(fake_mcp), job_id="gs-1")
+    assert body["state"] == "CANCELLED"
+    last = fake_mcp.calls[-1]["body"]["params"]
+    assert last["name"] == "hivemind.psykyo.game_session.stop_session@v1"
+    assert last["arguments"] == {"job_id": "gs-1"}
+
+    with pytest.raises(ValueError):
+        hivemind_tools.psykyo_game_session_get_results(hm_url(fake_mcp), job_id="")
+
+
+def test_moonlight_stream_passes_verify_seconds(fake_mcp):
+    fake_mcp.set_response("hivemind.moonlight.stream@v1", {"ok": True, "verified": True})
+    body = hivemind_tools.moonlight_stream(
+        hm_url(fake_mcp),
+        host="192.168.1.50",
+        app="Desktop",
+        width=1920,
+        height=1080,
+        fps=60,
+        verify_seconds=10,
+    )
+    assert body["ok"] is True
+    last = fake_mcp.calls[-1]["body"]["params"]
+    assert last["name"] == "hivemind.moonlight.stream@v1"
+    args = last["arguments"]
+    assert args == {
+        "host": "192.168.1.50",
+        "app": "Desktop",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "verify_seconds": 10,
+    }
+
+    with pytest.raises(ValueError):
+        hivemind_tools.moonlight_stream(hm_url(fake_mcp), host="")

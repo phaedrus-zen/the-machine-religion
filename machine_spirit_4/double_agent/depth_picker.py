@@ -59,6 +59,48 @@ DEPTH_PRIORITY_PATTERNS: tuple[str, ...] = (
     "mistral",
 )
 
+# Coder-class ordering: strictly code-specialist families first, then
+# the general deep set as fallback. Used when the job envelope carries
+# ``resource_request.model_class == 'deep_coder'``.
+DEPTH_CODER_PRIORITY_PATTERNS: tuple[str, ...] = (
+    "qwen3-coder-next:latest",
+    "qwen3-coder",
+    "qwen2.5-coder:32b",
+    "qwen2.5-coder",
+    "deepseek-coder-v2",
+    "deepseek-coder",
+    "codestral",
+    "deepseek-v3",
+    "deepseek-r1",
+    "qwen3-next",
+    "qwen3.6:27b",
+    "qwen3.5",
+    "phi4-reasoning",
+    "phi4",
+    "qwen3-8b",
+    "qwen3",
+    "llama-3.3-70b",
+    "llama-3.1-70b",
+    "mistral",
+)
+
+# Reasoning-class ordering: reasoning/general families ahead of the
+# coder specialists. Used for ``model_class == 'deep_reasoning'`` —
+# which is also the schema default, so this MUST stay behaviorally
+# compatible with the legacy DEPTH_PRIORITY_PATTERNS pick for the
+# catalogs this cluster actually serves (the coder-next family stays
+# first because it IS the cluster's strongest reasoner today).
+DEPTH_REASONING_PRIORITY_PATTERNS: tuple[str, ...] = DEPTH_PRIORITY_PATTERNS
+
+# ``resource_request.model_class`` -> priority patterns. Unknown / None
+# classes use the default depth ordering (legacy behavior). The phase-4
+# HiveMind capability-lease routing will eventually replace this table;
+# until then it is the honest, local interpretation of model_class.
+CLASS_PRIORITY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "deep_reasoning": DEPTH_REASONING_PRIORITY_PATTERNS,
+    "deep_coder": DEPTH_CODER_PRIORITY_PATTERNS,
+}
+
 
 @dataclass
 class DepthChoice:
@@ -81,6 +123,7 @@ _CACHE: dict[str, Any] = {
     "fetched_at": 0.0,
     "hivemind_url": None,
     "override": None,
+    "model_class": None,
 }
 
 
@@ -88,14 +131,25 @@ def _hardcoded_default() -> str:
     return os.environ.get(DEFAULT_DEPTH_MODEL_ENV, HARDCODED_DEFAULT)
 
 
-def _pick_from_catalog(catalog: list[dict[str, Any]]) -> DepthChoice | None:
+def _patterns_for_class(model_class: str | None) -> tuple[str, ...]:
+    if not model_class:
+        return DEPTH_PRIORITY_PATTERNS
+    return CLASS_PRIORITY_PATTERNS.get(
+        str(model_class).strip().lower(), DEPTH_PRIORITY_PATTERNS
+    )
+
+
+def _pick_from_catalog(
+    catalog: list[dict[str, Any]],
+    patterns: tuple[str, ...] = DEPTH_PRIORITY_PATTERNS,
+) -> DepthChoice | None:
     if not catalog:
         return None
     normalized = [_normalize_model_entry(e) for e in catalog]
     normalized = [e for e in normalized if e["id"]]
     if not normalized:
         return None
-    for pattern in DEPTH_PRIORITY_PATTERNS:
+    for pattern in patterns:
         plower = pattern.lower()
         matches = [e for e in normalized if plower in e["id"].lower()]
         if not matches:
@@ -115,12 +169,18 @@ def choose_depth_model(
     *,
     hivemind_url: str,
     envelope_override: str | None = None,
+    model_class: str | None = None,
     force_refresh: bool = False,
 ) -> DepthChoice:
     """Pick the Depth Lobe model for the next dispatched job.
 
-    Cached for ``MODELS_TTL_SECS`` keyed on (hivemind_url, env_override).
-    The envelope_override path is never cached (it's per-job).
+    ``model_class`` (from ``resource_request.model_class``) selects the
+    priority-pattern table: ``deep_coder`` biases code-specialist
+    families to the front, ``deep_reasoning`` (the schema default) and
+    unknown/None classes keep the legacy depth ordering. The catalog
+    fetch is cached for ``MODELS_TTL_SECS`` keyed on
+    (hivemind_url, env_override, model_class). The envelope_override
+    path is never cached (it's per-job).
     """
     if envelope_override and envelope_override.strip():
         return DepthChoice(
@@ -130,6 +190,7 @@ def choose_depth_model(
         )
 
     env_override = os.environ.get(ENV_OVERRIDE, "").strip() or None
+    normalized_class = str(model_class).strip().lower() if model_class else None
     now = time.time()
     with _CACHE_LOCK:
         cached = _CACHE.get("choice")
@@ -138,6 +199,7 @@ def choose_depth_model(
             and not force_refresh
             and _CACHE.get("hivemind_url") == hivemind_url
             and _CACHE.get("override") == env_override
+            and _CACHE.get("model_class") == normalized_class
             and (now - _CACHE.get("fetched_at", 0.0)) < MODELS_TTL_SECS
         ):
             return cached
@@ -151,7 +213,7 @@ def choose_depth_model(
     else:
         try:
             catalog = _http_get_models(hivemind_url)
-            choice = _pick_from_catalog(catalog)
+            choice = _pick_from_catalog(catalog, _patterns_for_class(normalized_class))
             if choice is None:
                 choice = DepthChoice(
                     model_id=_hardcoded_default(),
@@ -170,6 +232,7 @@ def choose_depth_model(
         _CACHE["fetched_at"] = now
         _CACHE["hivemind_url"] = hivemind_url
         _CACHE["override"] = env_override
+        _CACHE["model_class"] = normalized_class
     return choice
 
 
@@ -179,3 +242,4 @@ def _clear_cache_for_tests() -> None:
         _CACHE["fetched_at"] = 0.0
         _CACHE["hivemind_url"] = None
         _CACHE["override"] = None
+        _CACHE["model_class"] = None
