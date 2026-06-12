@@ -86,6 +86,12 @@ class _FakeHivemindHandler(BaseHTTPRequestHandler):
     def log_message(self, *args, **kwargs):  # silence stdlib logging
         pass
 
+    def finish(self):
+        try:
+            super().finish()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
 
 @pytest.fixture
 def fake_hivemind():
