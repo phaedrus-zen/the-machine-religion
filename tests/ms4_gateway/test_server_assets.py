@@ -140,6 +140,69 @@ def test_ms4_web_has_voice_ptt_controls():
     assert "new MediaRecorder(" not in html, "MediaRecorder must not be reintroduced for voice capture"
 
 
+def test_server_chat_stream_has_cooperative_disconnect_guard():
+    """Text /chat/stream should not keep consuming Face Lobe tokens after
+    the browser SSE client disconnects. The worker API is cooperative
+    today: failed SSE writes clear client_alive, then stream_callback()
+    returns False so FaceLobeChat can close its upstream response.
+    """
+    server = (ROOT / "machine_spirit_4" / "gateway" / "server.py").read_text(encoding="utf-8")
+    stream_chat = server.split("def _stream_chat", 1)[1].split("def _serve_static", 1)[0]
+    assert "client_alive = threading.Event()" in stream_chat
+    assert "client_alive.set()" in stream_chat
+    assert "def stream_callback(delta: str) -> bool:" in stream_chat
+    assert "if not client_alive.is_set():" in stream_chat
+    assert "return False" in stream_chat
+    assert "client_alive.clear()" in stream_chat
+    assert stream_chat.count("client_alive.clear()") >= 4
+
+
+def test_ms4_web_renders_oracle_voice_front_door():
+    """MS4's first screen should be the Oracle/machine-spirit voice
+    front door, with the FleetOps/MDM honeycomb face language wired to
+    real voice lifecycle states instead of living only in Settings.
+    """
+    html = (ROOT / "machine_spirit_4" / "web" / "index.html").read_text(encoding="utf-8")
+
+    for required in (
+        'id="oracleStage"',
+        'id="oracleMirror"',
+        'id="oracleSubtitle"',
+        'id="oracleTranscriptLine"',
+        'id="oraclePresenceChip"',
+        'id="oracleTimingLine"',
+        'id="oracleLobeLine"',
+        'id="oracleLobesLine"',
+        'aria-label="Oracle voice front door"',
+        "Face Lobe front door",
+        "Backend lobes can run deep chat",
+        "oracle-mirror-cell",
+        "mirror-speaking-bars",
+        "mirror-speaking-cell",
+        "mirror-wave-cell",
+        "renderOracleMirror",
+        "oracleMirrorCellSpecs",
+        "setOracleStageState",
+        "setOracleStageTranscript",
+        "setOracleLobeState",
+        "setOracleStageFromVoiceStatus",
+        "Transcribing your voice.",
+        "Oracle is composing.",
+        "Oracle is speaking.",
+        "Full-duplex listening.",
+        "First audio in ${firstAudioAt}ms",
+    ):
+        assert required in html, f"missing Oracle front-door hook: {required}"
+
+    # The visible VAD default must match the runtime default. This was
+    # previously 700 ms in markup while the code used 1400 ms, making
+    # timing feel random before the user touched Settings.
+    assert 'id="settingsVadHangoverMs" type="range" min="200" max="2000" step="50" value="1400"' in html
+    assert 'id="settingsVadHangoverMsLabel" class="muted">1400 ms</span>' in html
+    assert "Server now defaults to ws_super" not in html
+    assert 'id="messageInput" autocomplete="off" placeholder="Talk to MS4 through Hermes..." autofocus' not in html
+
+
 def test_ms4_web_renders_full_duplex_vad_panel():
     """The Settings dialog must surface the full-duplex (VAD barge-in)
     panel: enable toggle + ack toggle + half-context toggle + three
@@ -273,6 +336,8 @@ def test_ms4_web_renders_may26_admin_expansion_panels():
     for required in (
         # Settings DOM ids
         'id="settingsHivemindOracle"',
+        'id="settingsHivemindOracleRefresh"',
+        'id="settingsOracleReadinessStatus"',
         'id="settingsOracleChatInput"',
         'id="settingsOracleChatBtn"',
         'id="settingsHivemindTraining"',
@@ -282,6 +347,7 @@ def test_ms4_web_renders_may26_admin_expansion_panels():
         'id="settingsHivemindLoadout"',
         'id="settingsHivemindLoadoutRefresh"',
         # JS functions
+        "renderOracleReadiness",
         "refreshHivemindOracle",
         "askOracle",
         "refreshHivemindTraining",
@@ -290,7 +356,7 @@ def test_ms4_web_renders_may26_admin_expansion_panels():
         "refreshHivemindLoadout",
         "applyLoadout",
         # Routes the panels call
-        "/hivemind/oracle/status",
+        "/hivemind/oracle/readiness",
         "/hivemind/oracle/chat",
         "/hivemind/training",
         "/hivemind/adapters",
@@ -434,6 +500,12 @@ def test_ms4_web_renders_double_agent_panel():
         "cancelDoubleAgentJob",
         "submitDoubleAgentJob",
         "Depth Lobe dispatched",
+        'value="oracle_deep_chat"',
+        'value="oracle_deep_coder"',
+        'value="oracle_diagnostic"',
+        'value="oracle_planner"',
+        'value="oracle_research"',
+        'value="oracle_verifier"',
         "/deep",
         "/direct",
     ):

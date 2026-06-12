@@ -131,6 +131,58 @@ def test_oracle_admin_status_wraps_schema(fake_mcp):
     assert snap["running_plans"] == 0
 
 
+def test_oracle_admin_readiness_surfaces_provisioning_gap(fake_mcp):
+    fake_mcp.set_response("hivemind.oracle.status", {"healthy": True, "running_plans": 0})
+    fake_mcp.set_response("hivemind.jobs.active@v1", {"total_active": 0, "summary": ""})
+    fake_mcp.set_response("hivemind.cluster.load@v1", {"trackers": {"amplification_ratio": 1.0}})
+    fake_mcp.set_response(
+        "hivemind.service_health@v1",
+        {
+            "menta_hli": {"name": "menta_hli", "healthy": True},
+            "menta_oracle": {"name": "menta_oracle", "healthy": False, "error": "not provisioned"},
+        },
+    )
+    snap = oracle_admin.readiness(hurl(fake_mcp))
+    assert snap["schema"] == "Ms4OracleReadiness.v1"
+    assert snap["ready"] is False
+    assert snap["readiness"] == "blocked"
+    assert snap["provisioning"]["automatic"] is False
+    assert snap["provisioning"]["state"] == "approval_required"
+    assert any("menta_oracle" in item for item in snap["blockers"])
+    assert any(
+        check["name"] == "oracle_service_health" and check["state"] == "fail"
+        for check in snap["checks"]
+    )
+
+
+def test_oracle_admin_readiness_degraded_is_not_labeled_safe(monkeypatch):
+    monkeypatch.setattr(
+        oracle_admin,
+        "status",
+        lambda *_args, **_kwargs: {"schema": "Ms4OracleSnapshot.v1", "status": "starting"},
+    )
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_combined_snapshot",
+        lambda *_args, **_kwargs: {
+            "mcp_base_url": "http://127.0.0.1:6105/mcp",
+            "active_jobs": {"total_active": 0},
+            "cluster_load": {},
+            "service_health": {"menta_hli": {"name": "menta_hli", "healthy": True}},
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(oracle_admin.hivemind_state, "hivemind_auth_configured", lambda: True)
+
+    snap = oracle_admin.readiness("http://hivemind.test:6089", timeout=1)
+    assert snap["readiness"] == "degraded"
+    assert snap["ready"] is False
+    assert snap["provisioning"]["state"] == "diagnostic_required"
+    labels = [action["label"] for action in snap["next_actions"]]
+    assert not any("safe to use" in label for label in labels)
+    assert any("Resolve readiness warnings" in label for label in labels)
+
+
 def test_oracle_admin_chat_passes_message(fake_mcp):
     fake_mcp.set_response("hivemind.oracle.chat", {"reply": "Run inventory first."})
     result = oracle_admin.chat(hurl(fake_mcp), "what should I do next?")
@@ -301,6 +353,31 @@ def test_route_oracle_status(fake_mcp):
     status, body = _read_response(handler)
     assert status == 200
     assert body["schema"] == "Ms4OracleSnapshot.v1"
+
+
+def test_route_oracle_readiness(fake_mcp):
+    fake_mcp.set_response("hivemind.oracle.status", {"healthy": True})
+    fake_mcp.set_response("hivemind.jobs.active@v1", {"total_active": 0, "summary": ""})
+    fake_mcp.set_response("hivemind.cluster.load@v1", {"trackers": {"amplification_ratio": 1.0}})
+    fake_mcp.set_response("hivemind.service_health@v1", {"menta_hli": {"healthy": True}})
+    handler = _make_handler(_DummyRunner(hurl(fake_mcp)), "GET", "/hivemind/oracle/readiness")
+    handler._hivemind_oracle_readiness_get()
+    status, body = _read_response(handler)
+    assert status == 200
+    assert body["schema"] == "Ms4OracleReadiness.v1"
+    assert body["provisioning"]["automatic"] is False
+
+
+def test_route_oracle_readiness_dispatches_get(fake_mcp):
+    fake_mcp.set_response("hivemind.oracle.status", {"healthy": True})
+    fake_mcp.set_response("hivemind.jobs.active@v1", {"total_active": 0, "summary": ""})
+    fake_mcp.set_response("hivemind.cluster.load@v1", {"trackers": {"amplification_ratio": 1.0}})
+    fake_mcp.set_response("hivemind.service_health@v1", {"menta_hli": {"healthy": True}})
+    handler = _make_handler(_DummyRunner(hurl(fake_mcp)), "GET", "/hivemind/oracle/readiness")
+    handler.do_GET()
+    status, body = _read_response(handler)
+    assert status == 200
+    assert body["schema"] == "Ms4OracleReadiness.v1"
 
 
 def test_route_oracle_chat_validates_message(fake_mcp):

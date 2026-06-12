@@ -461,6 +461,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             self._hivemind_crown_get()
             return
         # ---- New admin domains (May 26 2026 expansion) ----
+        if self.path == "/hivemind/oracle/readiness":
+            self._hivemind_oracle_readiness_get()
+            return
         if self.path == "/hivemind/oracle/status":
             self._hivemind_oracle_status_get()
             return
@@ -2567,6 +2570,16 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
     # /hivemind/oracle — planner status / configure / chat
     # ------------------------------------------------------------------
 
+    def _hivemind_oracle_readiness_get(self) -> None:
+        try:
+            snap = oracle_admin.readiness(self.runner.hivemind_url)
+        except Exception as exc:
+            self._emit_admin_error(exc)
+            return
+        if snap.get("errors"):
+            append_event("hivemind_oracle_readiness_partial_failure", {"errors": snap["errors"][:5]})
+        _json_response(self, 200, snap)
+
     def _hivemind_oracle_status_get(self) -> None:
         try:
             snap = oracle_admin.status(self.runner.hivemind_url)
@@ -3141,10 +3154,15 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 _json_response(self, 400, {"error": "message is required"})
                 return
             events: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
+            client_alive = threading.Event()
+            client_alive.set()
 
-            def stream_callback(delta: str) -> None:
+            def stream_callback(delta: str) -> bool:
+                if not client_alive.is_set():
+                    return False
                 if delta:
                     events.put(("token", {"text": delta}))
+                return client_alive.is_set()
 
             def worker() -> None:
                 try:
@@ -3155,16 +3173,21 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                         depth_model=body.get("depth_model_id") or body.get("depth_model") or None,
                         stream_callback=stream_callback,
                     )
-                    events.put(("done", result))
+                    if client_alive.is_set():
+                        events.put(("done", result))
                 except ValueError as exc:
-                    events.put(("error", {"error": str(exc), "model_incompatible": True}))
+                    if client_alive.is_set():
+                        events.put(("error", {"error": str(exc), "model_incompatible": True}))
                 except HermesUnavailable as exc:
-                    events.put(("error", {"error": str(exc), "fail_closed": True}))
+                    if client_alive.is_set():
+                        events.put(("error", {"error": str(exc), "fail_closed": True}))
                 except Exception as exc:
-                    events.put(("error", {"error": str(exc)}))
+                    if client_alive.is_set():
+                        events.put(("error", {"error": str(exc)}))
 
             _sse_start(self)
             if not _sse_event(self, "status", {"status": "started"}):
+                client_alive.clear()
                 return
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
@@ -3173,11 +3196,14 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     event, payload = events.get(timeout=2.0)
                 except queue.Empty:
                     if not _sse_event(self, "heartbeat", {"status": "running"}):
+                        client_alive.clear()
                         return
                     continue
                 if not _sse_event(self, event, payload):
+                    client_alive.clear()
                     return
                 if event in {"done", "error"}:
+                    client_alive.clear()
                     return
         except Exception as exc:
             _json_response(self, 500, {"error": str(exc)})

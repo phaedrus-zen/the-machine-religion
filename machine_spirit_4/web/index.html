@@ -37,6 +37,310 @@
     .banner button.secondary { background: transparent; border: 1px solid currentColor; color: inherit; }
     .banner .spinner { width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-right: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .oracle-stage {
+      --mirror-a-rgb: 139, 92, 246;
+      --mirror-b-rgb: 52, 211, 153;
+      --mirror-c-rgb: 56, 189, 248;
+      --audio-level: 0.12;
+      --audio-voice: 0.08;
+      --audio-air: 0.10;
+      --cell-audio: 0.20;
+      --link-audio: 0.16;
+      display: grid;
+      grid-template-columns: minmax(280px, 430px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+      min-height: 360px;
+      overflow: hidden;
+      background:
+        radial-gradient(72% 78% at 30% 42%, rgba(var(--mirror-a-rgb), 0.18), transparent 70%),
+        radial-gradient(48% 58% at 82% 18%, rgba(var(--mirror-c-rgb), 0.10), transparent 68%),
+        linear-gradient(135deg, rgba(16, 18, 31, 0.98), rgba(8, 12, 18, 0.98));
+      border-color: rgba(148, 163, 184, 0.24);
+    }
+    .oracle-stage[data-presence="listening"] {
+      --audio-level: 0.52;
+      --audio-voice: 0.20;
+      --audio-air: 0.62;
+      --cell-audio: 0.44;
+      --link-audio: 0.34;
+    }
+    .oracle-stage[data-presence="thinking"] {
+      --audio-level: 0.34;
+      --audio-voice: 0.12;
+      --audio-air: 0.34;
+      --cell-audio: 0.40;
+      --link-audio: 0.40;
+    }
+    .oracle-stage[data-presence="speaking"] {
+      --audio-level: 0.94;
+      --audio-voice: 0.88;
+      --audio-air: 0.74;
+      --cell-audio: 0.86;
+      --link-audio: 0.58;
+    }
+    .oracle-stage[data-presence="blocked"],
+    .oracle-stage[data-presence="error"] {
+      --mirror-a-rgb: 245, 158, 11;
+      --mirror-b-rgb: 248, 113, 113;
+      --audio-level: 0.46;
+      --audio-voice: 0.18;
+      --audio-air: 0.20;
+    }
+    .oracle-mirror-cell {
+      position: relative;
+      height: clamp(280px, 39vw, 390px);
+      min-height: 280px;
+      border: 1px solid rgba(245, 242, 255, 0.10);
+      border-radius: 10px;
+      overflow: hidden;
+      background:
+        radial-gradient(58% 50% at 50% 43%, rgba(245, 242, 255, 0.08), transparent 68%),
+        radial-gradient(78% 72% at 50% 42%, rgba(var(--mirror-a-rgb), 0.24), transparent 74%),
+        radial-gradient(78% 66% at 50% 68%, rgba(var(--mirror-b-rgb), 0.08), transparent 78%),
+        linear-gradient(180deg, rgba(245, 242, 255, 0.06), rgba(245, 242, 255, 0.014)),
+        rgba(3, 4, 8, 0.94);
+      box-shadow:
+        0 26px 68px rgba(0, 0, 0, 0.48),
+        0 0 76px rgba(var(--mirror-a-rgb), 0.13),
+        inset 0 1px 0 rgba(255, 255, 255, 0.09),
+        inset 0 0 0 1px rgba(245, 242, 255, 0.04);
+    }
+    .oracle-mirror-cell::before {
+      content: "";
+      position: absolute;
+      inset: -14%;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(var(--mirror-a-rgb), 0.18), transparent 44%),
+        radial-gradient(circle at 50% 64%, rgba(var(--mirror-b-rgb), 0.10), transparent 54%);
+      opacity: calc(0.36 + var(--audio-level) * 0.26);
+      filter: blur(18px);
+      pointer-events: none;
+    }
+    .oracle-mirror-cell .mirror-glass {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+    }
+    .oracle-mirror-cell .mirror-svg {
+      width: min(420px, 92%);
+      height: auto;
+      filter: saturate(1.12) contrast(1.04);
+      transform: translateY(-2px);
+    }
+    .oracle-mirror-cell .mirror-aura {
+      fill: none;
+      stroke: rgba(var(--mirror-a-rgb), 0.18);
+      stroke-width: 1.2;
+      stroke-dasharray: 5 18;
+      opacity: calc(0.34 + var(--audio-air) * 0.30);
+      transform-origin: center;
+      animation: oracle-breathe 5s ease-in-out infinite;
+    }
+    .oracle-mirror-cell .mirror-core {
+      fill: url(#ms4OracleMirrorCore);
+      stroke: rgba(245, 242, 255, 0.08);
+      opacity: 0.86;
+    }
+    .oracle-mirror-cell .mirror-face-energy {
+      fill: rgba(var(--mirror-a-rgb), 0.04);
+      stroke: rgba(var(--mirror-a-rgb), 0.18);
+      stroke-width: 1.35;
+      opacity: calc(0.18 + var(--audio-voice) * 0.34);
+      transform-origin: center;
+      animation: oracle-face-energy 4.8s ease-in-out infinite;
+    }
+    .oracle-mirror-cell .mirror-cell-link {
+      stroke: rgba(var(--mirror-a-rgb), 0.14);
+      stroke-width: 0.58;
+      opacity: var(--link-audio);
+    }
+    .oracle-mirror-cell .mirror-cell-link.is-backdrop {
+      stroke: rgba(245, 242, 255, 0.05);
+      opacity: 0.10;
+    }
+    .oracle-mirror-cell .mirror-cell {
+      fill: rgba(4, 4, 8, 0.16);
+      stroke: rgba(245, 242, 255, 0.09);
+      stroke-width: 0.68;
+      opacity: 0.28;
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .oracle-mirror-cell .mirror-cell.is-active {
+      fill: rgba(var(--mirror-a-rgb), 0.10);
+      stroke: rgba(var(--mirror-a-rgb), 0.34);
+      opacity: clamp(0.52, calc(0.36 + var(--cell-audio) * 0.74), 1);
+      filter: drop-shadow(0 0 7px rgba(var(--mirror-a-rgb), 0.20));
+      animation: oracle-cell-wake 4.4s ease-in-out infinite;
+      animation-delay: calc(var(--i) * -42ms);
+    }
+    .oracle-mirror-cell .mirror-cell.shape-eye.is-active {
+      fill: rgba(var(--mirror-b-rgb), 0.14);
+      stroke: rgba(var(--mirror-b-rgb), 0.68);
+      filter: drop-shadow(0 0 9px rgba(var(--mirror-b-rgb), 0.34));
+    }
+    .oracle-mirror-cell .mirror-face-outline {
+      fill: none;
+      stroke: rgba(245, 242, 255, 0.24);
+      stroke-width: 1.15;
+      opacity: 0.48;
+    }
+    .oracle-mirror-cell .mirror-eyes polygon {
+      fill: rgba(var(--mirror-b-rgb), 0.10);
+      stroke: rgba(var(--mirror-b-rgb), 0.62);
+      stroke-width: 1.2;
+      opacity: 0.92;
+    }
+    .oracle-mirror-cell .mirror-eyes circle {
+      fill: rgba(245, 242, 255, 0.80);
+      opacity: calc(0.68 + var(--audio-air) * 0.24);
+      filter: drop-shadow(0 0 10px rgba(var(--mirror-b-rgb), 0.38));
+    }
+    .oracle-mirror-cell .mirror-eye-rings polygon {
+      fill: none;
+      opacity: 0.64;
+      stroke: rgba(var(--mirror-b-rgb), 0.36);
+    }
+    .oracle-mirror-cell .mirror-speaking-bars {
+      opacity: 0.20;
+      transform-origin: center;
+    }
+    .oracle-mirror-cell .mirror-speaking-bar {
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .oracle-mirror-cell .mirror-speaking-cell {
+      fill: rgba(var(--mirror-a-rgb), 0.18);
+      stroke: rgba(var(--mirror-a-rgb), 0.34);
+      stroke-width: 0.42;
+      opacity: 0.18;
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .oracle-mirror-cell .mirror-wave {
+      opacity: 0.16;
+      transform-origin: center;
+    }
+    .oracle-mirror-cell .mirror-wave-cell {
+      fill: rgba(var(--mirror-c-rgb), 0.20);
+      stroke: rgba(var(--mirror-c-rgb), 0.40);
+      stroke-width: 0.38;
+      opacity: 0.20;
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .oracle-stage[data-presence="speaking"] .mirror-speaking-bars,
+    .oracle-stage[data-presence="speaking"] .mirror-wave,
+    .oracle-stage[data-presence="listening"] .mirror-wave {
+      opacity: 0.84;
+    }
+    .oracle-stage[data-presence="speaking"] .mirror-speaking-cell {
+      opacity: clamp(0.22, calc(0.24 + var(--audio-voice) * 0.70), 0.98);
+      animation: oracle-speaking-meter 1.4s ease-in-out infinite;
+      animation-delay: calc((var(--slot) + var(--column-distance)) * -66ms);
+    }
+    .oracle-stage[data-presence="speaking"] .mirror-wave-cell,
+    .oracle-stage[data-presence="listening"] .mirror-wave-cell {
+      opacity: clamp(0.26, calc(0.18 + var(--audio-air) * 0.72), 0.96);
+      animation: oracle-wave-talk 1.7s ease-in-out infinite;
+      animation-delay: calc(var(--i) * -36ms);
+    }
+    .oracle-console {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 12px;
+      align-self: stretch;
+      justify-content: center;
+    }
+    .oracle-kicker {
+      color: #93e6d4;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .oracle-title {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.06;
+      font-weight: 720;
+    }
+    .oracle-subtitle {
+      min-height: 44px;
+      color: #f7f7ff;
+      font-size: 17px;
+      line-height: 1.34;
+      overflow-wrap: anywhere;
+    }
+    .oracle-transcript,
+    .oracle-timing,
+    .oracle-lobes {
+      min-height: 22px;
+      color: #aab4c5;
+      font-size: 12px;
+      line-height: 1.38;
+      overflow-wrap: anywhere;
+    }
+    .oracle-status-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .oracle-state-chip {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: rgba(8, 12, 18, 0.62);
+      color: #d8e4ee;
+      font-size: 12px;
+      padding: 0 10px;
+      white-space: nowrap;
+    }
+    .oracle-state-chip strong {
+      color: #f6fbff;
+      font-weight: 650;
+    }
+    @media (max-width: 800px) {
+      .oracle-stage {
+        grid-template-columns: 1fr;
+        min-height: 0;
+      }
+      .oracle-mirror-cell {
+        height: clamp(260px, 74vw, 330px);
+      }
+      .oracle-title {
+        font-size: 28px;
+      }
+    }
+    @keyframes oracle-breathe {
+      0%, 100% { opacity: 0.34; transform: scale(0.98); }
+      50% { opacity: 0.72; transform: scale(1.025); }
+    }
+    @keyframes oracle-face-energy {
+      0%, 100% { opacity: 0.18; transform: scale(0.992); }
+      46% { opacity: 0.46; transform: scale(1.012); }
+      68% { opacity: 0.30; transform: scale(1.002); }
+    }
+    @keyframes oracle-cell-wake {
+      0%, 100% { opacity: 0.36; transform: scale(0.986); }
+      48% { opacity: 0.88; transform: scale(1.024); }
+    }
+    @keyframes oracle-speaking-meter {
+      0%, 100% { opacity: 0.28; transform: scaleY(0.52); }
+      28% { opacity: 0.88; transform: scaleY(1.08); }
+      58% { opacity: 0.48; transform: scaleY(0.68); }
+      78% { opacity: 0.94; transform: scaleY(0.92); }
+    }
+    @keyframes oracle-wave-talk {
+      0%, 100% { transform: translateY(0) scale(0.98); }
+      50% { transform: translateY(-3px) scale(1.08); }
+    }
     .version-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .version-line .pill { padding: 1px 6px; border-radius: 8px; background: #1d1d2d; border: 1px solid #33334a; font-size: 11px; }
     .version-line .pill.warn { background: rgba(245, 158, 11, 0.18); border-color: rgba(245, 158, 11, 0.5); color: #f5e7c2; }
@@ -90,6 +394,22 @@
       <small id="maintenanceBannerSubline"></small>
     </div>
   </div>
+
+  <section id="oracleStage" class="oracle-stage" data-presence="idle" data-turn-phase="ready" aria-label="Oracle voice front door">
+    <div id="oracleMirror" class="oracle-mirror-cell" aria-hidden="true"></div>
+    <div class="oracle-console">
+      <div class="oracle-kicker">Face Lobe front door</div>
+      <h2 class="oracle-title">Oracle</h2>
+      <div id="oracleSubtitle" class="oracle-subtitle" aria-live="polite">Ready for voice or chat.</div>
+      <div id="oracleTranscriptLine" class="oracle-transcript"></div>
+      <div class="oracle-status-row">
+        <span id="oraclePresenceChip" class="oracle-state-chip"><strong>Ready</strong></span>
+        <span id="oracleLobeLine" class="oracle-state-chip">Face Lobe foreground</span>
+      </div>
+      <div id="oracleTimingLine" class="oracle-timing">Voice timing appears here as ASR, first audio, and chunk metrics arrive.</div>
+      <div id="oracleLobesLine" class="oracle-lobes">Backend lobes can run deep chat, coding, diagnostic, research, and verifier work while the Oracle stays responsive.</div>
+    </div>
+  </section>
 
   <section class="grid">
     <div>
@@ -145,6 +465,12 @@
       <option value="deep_chat">deep_chat</option>
       <option value="deep_coder">deep_coder</option>
       <option value="diagnostic">diagnostic</option>
+      <option value="oracle_deep_chat">oracle_deep_chat</option>
+      <option value="oracle_deep_coder">oracle_deep_coder</option>
+      <option value="oracle_diagnostic">oracle_diagnostic</option>
+      <option value="oracle_planner">oracle_planner</option>
+      <option value="oracle_research">oracle_research</option>
+      <option value="oracle_verifier">oracle_verifier</option>
       <option value="research">research</option>
       <option value="verifier">verifier</option>
     </select>
@@ -266,8 +592,8 @@
       </label>
       <label style="display:flex; flex-direction:column;">
         <span class="muted">Silence hangover (ms)</span>
-        <input id="settingsVadHangoverMs" type="range" min="200" max="2000" step="50" value="700">
-        <span id="settingsVadHangoverMsLabel" class="muted">700 ms</span>
+        <input id="settingsVadHangoverMs" type="range" min="200" max="2000" step="50" value="1400">
+        <span id="settingsVadHangoverMsLabel" class="muted">1400 ms</span>
       </label>
     </div>
     <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
@@ -400,6 +726,10 @@
 
     <h4 style="margin:16px 0 6px;">Oracle (planner)</h4>
     <p class="muted" style="font-size:11px; margin:4px 0 8px;">HiveMind's reasoning / coordination surface via <code>hivemind.oracle.*</code>. Ask Oracle to plan a task; it sees the whole cluster state. Returns null sections gracefully when Oracle is disabled in the cluster config.</p>
+    <div style="display:flex; gap:8px; margin:4px 0 8px; align-items:center; flex-wrap:wrap;">
+      <button type="button" id="settingsHivemindOracleRefresh" class="secondary">Refresh readiness</button>
+      <span id="settingsOracleReadinessStatus" class="muted" style="font-size:11px;"></span>
+    </div>
     <div id="settingsHivemindOracle" style="font-size:12px;">Loading…</div>
     <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
       <input id="settingsOracleChatInput" type="text" placeholder="Ask Oracle to plan…" style="flex:1; min-width:200px;">
@@ -454,7 +784,7 @@
 
   <section>
     <form id="chatForm">
-      <input id="messageInput" autocomplete="off" placeholder="Talk to MS4 through Hermes..." autofocus>
+      <input id="messageInput" autocomplete="off" placeholder="Talk to MS4 through Hermes...">
       <button id="micButton" type="button" title="Push to talk (release to send)" aria-pressed="false" style="min-width:48px;">🎤</button>
       <button id="sendButton" type="submit">Send</button>
     </form>
@@ -475,6 +805,281 @@ const depthModelSelect = document.getElementById('depthModelSelect');
 // change; settings logic below keeps localStorage in sync.
 const streamToggle = document.getElementById('settingsStreamToggle');
 let sessionId = localStorage.getItem('ms4_session_id') || '';
+
+const oracleStage = document.getElementById('oracleStage');
+const oracleMirror = document.getElementById('oracleMirror');
+const oracleSubtitle = document.getElementById('oracleSubtitle');
+const oracleTranscriptLine = document.getElementById('oracleTranscriptLine');
+const oraclePresenceChip = document.getElementById('oraclePresenceChip');
+const oracleTimingLine = document.getElementById('oracleTimingLine');
+const oracleLobeLine = document.getElementById('oracleLobeLine');
+const oracleLobesLine = document.getElementById('oracleLobesLine');
+let oracleRenderedPresence = '';
+
+const ORACLE_PRESENCE_LABELS = {
+  idle: 'Ready',
+  listening: 'Listening',
+  thinking: 'Thinking',
+  speaking: 'Speaking',
+  blocked: 'Blocked',
+  error: 'Needs attention',
+};
+
+function oraclePreview(text, maxLen = 180) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return '';
+  return value.length > maxLen ? `${value.slice(0, maxLen - 1)}...` : value;
+}
+
+function setOracleStageState(presence, subtitle, detail) {
+  if (!oracleStage) return;
+  const safePresence = ORACLE_PRESENCE_LABELS[presence] ? presence : 'idle';
+  const changed = oracleStage.dataset.presence !== safePresence;
+  oracleStage.dataset.presence = safePresence;
+  oracleStage.dataset.turnPhase = safePresence;
+  if (oraclePresenceChip) {
+    oraclePresenceChip.textContent = '';
+    const strong = document.createElement('strong');
+    strong.textContent = ORACLE_PRESENCE_LABELS[safePresence];
+    oraclePresenceChip.appendChild(strong);
+  }
+  if (oracleSubtitle && subtitle !== undefined) {
+    oracleSubtitle.textContent = oraclePreview(subtitle, 220) || 'Ready for voice or chat.';
+  }
+  if (oracleTimingLine && detail !== undefined) {
+    oracleTimingLine.textContent = oraclePreview(detail, 220);
+  }
+  if (changed) renderOracleMirror();
+}
+
+function setOracleStageTranscript(text, speakerName) {
+  if (!oracleTranscriptLine) return;
+  const preview = oraclePreview(text, 190);
+  if (!preview) {
+    oracleTranscriptLine.textContent = '';
+    return;
+  }
+  oracleTranscriptLine.textContent = `${speakerName || 'You'}: ${preview}`;
+}
+
+function setOracleTiming(text) {
+  if (oracleTimingLine) oracleTimingLine.textContent = oraclePreview(text, 220);
+}
+
+function setOracleLobeState(jobs) {
+  if (!oracleLobeLine || !oracleLobesLine) return;
+  const activeJobs = (jobs || []).filter(job => job && (job.state === 'queued' || job.state === 'running'));
+  if (!activeJobs.length) {
+    oracleLobeLine.textContent = 'Face Lobe foreground';
+    oracleLobesLine.textContent = 'Backend lobes can run deep chat, coding, diagnostic, research, and verifier work while the Oracle stays responsive.';
+    return;
+  }
+  const kinds = Array.from(new Set(activeJobs.map(job => job.background_lobe_type || 'background').slice(0, 4)));
+  oracleLobeLine.textContent = `Backend lobes active: ${kinds.join(', ')}`;
+  oracleLobesLine.textContent = activeJobs
+    .slice(0, 3)
+    .map(job => `${job.background_lobe_type || 'lobe'} ${job.state}: ${oraclePreview(job.user_visible_goal || job.job_id, 60)}`)
+    .join(' | ');
+}
+
+function setOracleStageFromVoiceStatus(text, kind) {
+  const value = String(text || '');
+  if (!value) return;
+  if (kind === 'error') {
+    setOracleStageState('error', value, 'Voice or cluster path needs attention.');
+    return;
+  }
+  if (kind === 'ok') {
+    if (/First audio/i.test(value)) {
+      setOracleStageState('speaking', 'Oracle is speaking.', value);
+    } else if (/complete/i.test(value)) {
+      setOracleStageState('idle', 'Ready for the next turn.', value);
+    }
+  }
+}
+
+function oracleHexPoints(cx, cy, r) {
+  return Array.from({ length: 6 }, (_, index) => {
+    const angle = (Math.PI / 3) * index - Math.PI / 6;
+    return `${(cx + Math.cos(angle) * r).toFixed(1)},${(cy + Math.sin(angle) * r).toFixed(1)}`;
+  }).join(' ');
+}
+
+function oracleMirrorCellSpecs() {
+  const specs = [];
+  const center = 180;
+  const radius = 9.0;
+  const xStep = Math.sqrt(3) * radius;
+  const yStep = 1.5 * radius;
+  let rowIndex = 0;
+  for (let cy = 28; cy <= 300; cy += yStep, rowIndex += 1) {
+    const half = rowIndex % 2 ? 0.5 : 0;
+    const row = rowIndex - 10;
+    for (let col = -12; col <= 12; col += 1) {
+      const cx = center + (col + half) * xStep;
+      if (cx < 18 || cx > 342) continue;
+      if (Math.pow((cx - center) / 158, 2) + Math.pow((cy - 168) / 150, 2) >= 1) continue;
+      const inFace = oracleMirrorPointInFace(cx, cy);
+      if (!inFace && !oracleMirrorPointInCombField(cx, cy)) continue;
+      const shape = inFace ? oracleMirrorCellShapeForPoint(cx, cy, row, col) : 'backdrop';
+      const phase = oracleMirrorCellPhaseForPoint(cx, cy, row, col, shape);
+      const localRadius = shape === 'eye' ? 10.2 : shape === 'voice' ? 9.4 : shape === 'backdrop' ? 8.6 : radius;
+      specs.push([Number(cx.toFixed(1)), Number(cy.toFixed(1)), localRadius, phase, shape, row, col]);
+    }
+  }
+  return specs;
+}
+
+function oracleMirrorPointInCombField(cx, cy) {
+  return Math.pow((cx - 180) / 158, 2) + Math.pow((cy - 168) / 150, 2) < 1;
+}
+
+function oracleMirrorPointInFace(cx, cy) {
+  const ax = Math.abs(cx - 180);
+  const head = Math.pow(ax / 72, 2) + Math.pow((cy - 160) / 82, 2) < 1;
+  const jaw = cy >= 196 && cy < 252 && ax < 62 - (cy - 196) * 0.52;
+  const crown = cy < 96 && ax < 16 + (cy - 78) * 0.95;
+  return head || jaw || crown;
+}
+
+function oracleMirrorCellShapeForPoint(cx, cy, row, col) {
+  const ax = Math.abs(cx - 180);
+  if (Math.hypot((ax - 28) / 12, (cy - 150) / 10.5) < 1) return 'eye';
+  if (cy > 128 && cy < 140 && ax > 12 && ax < 44) return 'brow';
+  if (cy > 196 && cy < 226 && ax < 44) return 'voice';
+  if (cy > 228) return 'jaw';
+  if (oracleMirrorFaceEdge(cx, cy)) return 'edge';
+  if (ax < 48 && cy > 104 && cy < 222) return 'face';
+  return 'field';
+}
+
+function oracleMirrorCellPhaseForPoint(cx, cy, row, col, shape) {
+  if (shape === 'backdrop') return 'idle';
+  if (shape === 'eye' || shape === 'brow') return 'core';
+  if (shape === 'voice') return row % 2 === 0 ? 'voice' : 'soft';
+  if (shape === 'edge') return (row + Math.abs(col)) % 2 === 0 ? 'edge' : 'soft';
+  if (shape === 'jaw') return Math.abs(col) % 2 === 0 ? 'edge' : 'soft';
+  return ['a', 'b', 'c'][Math.abs(row + col) % 3];
+}
+
+function oracleMirrorFaceEdge(cx, cy) {
+  return (
+    oracleMirrorPointInFace(cx, cy) &&
+    Math.pow((cx - 180) / 72, 2) + Math.pow((cy - 164) / 92, 2) > 0.6
+  );
+}
+
+function oracleMirrorEyeCenters(cellSpecs) {
+  const average = (cells, fallback) => {
+    if (!cells.length) return fallback;
+    const total = cells.reduce((acc, [x, y]) => ({x: acc.x + x, y: acc.y + y}), {x: 0, y: 0});
+    return {x: Number((total.x / cells.length).toFixed(1)), y: Number((total.y / cells.length).toFixed(1))};
+  };
+  const left = cellSpecs.filter(([x, , , , shape]) => shape === 'eye' && x < 180);
+  const right = cellSpecs.filter(([x, , , , shape]) => shape === 'eye' && x >= 180);
+  return {
+    left: average(left, {x: 153.6, y: 166.6}),
+    right: average(right, {x: 205.9, y: 166.6}),
+  };
+}
+
+function oracleMirrorCellLinks(cellSpecs) {
+  const links = [];
+  for (let sourceIndex = 0; sourceIndex < cellSpecs.length; sourceIndex += 1) {
+    const [x1, y1, , , sourceShape] = cellSpecs[sourceIndex];
+    for (let targetIndex = sourceIndex + 1; targetIndex < cellSpecs.length; targetIndex += 1) {
+      const [x2, y2, , , targetShape] = cellSpecs[targetIndex];
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > 14 && distance < 20) {
+        const linkShape = sourceShape === 'backdrop' || targetShape === 'backdrop' ? 'is-backdrop' : 'is-face';
+        links.push(`<line class="mirror-cell-link ${linkShape}" style="--i:${links.length}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"></line>`);
+      }
+    }
+  }
+  return links.join('');
+}
+
+function oracleMirrorCellActive(presence, phase, index, shape, row, col) {
+  if (shape === 'backdrop') return false;
+  if (shape === 'eye' || shape === 'brow' || shape === 'voice') return true;
+  const coord = (row + Math.abs(col)) % 2 === 0;
+  if (presence === 'listening') return shape === 'edge' || shape === 'jaw' || (shape === 'field' && coord);
+  if (presence === 'thinking') return phase !== 'c' || index % 5 === 0;
+  if (presence === 'speaking') return shape !== 'backdrop' && (shape !== 'field' || coord || index % 3 === 0);
+  if (presence === 'blocked' || presence === 'error') return shape === 'edge' || shape === 'jaw' || (shape === 'field' && index % 9 === 0);
+  return shape === 'edge' || shape === 'jaw' || shape === 'face' || (shape === 'field' && index % 8 === 0);
+}
+
+function renderOracleMirror() {
+  if (!oracleMirror || !oracleStage) return;
+  const presence = oracleStage.dataset.presence || 'idle';
+  if (oracleRenderedPresence === presence && oracleMirror.innerHTML) return;
+  oracleRenderedPresence = presence;
+  const cellSpecs = oracleMirrorCellSpecs();
+  const eyeCenters = oracleMirrorEyeCenters(cellSpecs);
+  const mouthCenterX = Number(((eyeCenters.left.x + eyeCenters.right.x) / 2).toFixed(1));
+  const mouthCenterY = 205.5;
+  const cells = cellSpecs.map(([cx, cy, r, phase, shape, row, col], index) => {
+    const active = oracleMirrorCellActive(presence, phase, index, shape, row, col) ? ' is-active' : '';
+    const symIndex = Math.abs(col) * 13 + Math.abs(row);
+    return `<polygon class="mirror-cell phase-${phase} shape-${shape}${active}" data-cell-shape="${shape}" style="--i:${symIndex}; --cell-x:${cx}; --cell-y:${cy}; --cell-col:${Math.abs(col)}; --cell-row:${Math.abs(row)}" points="${oracleHexPoints(cx, cy, r)}"></polygon>`;
+  }).join('');
+  const voiceBars = Array.from({ length: 21 }, (_, index) => {
+    const columnOffset = index - 10;
+    const x = mouthCenterX + columnOffset * 5.9;
+    const distance = Math.abs(columnOffset);
+    const miniCells = Array.from({ length: 7 }, (_cell, cellIndex) => {
+      const rowOffset = cellIndex - 3;
+      const stagger = index % 2 === 0 ? 0 : 2.05;
+      const y = mouthCenterY + rowOffset * 4.75 + stagger;
+      return `<polygon class="mirror-speaking-cell cell-row-${cellIndex}" style="--slot:${cellIndex}; --cell-row-offset:${rowOffset}; --cell-column-offset:${columnOffset}; --cell-distance:${Math.abs(rowOffset)}; --column-distance:${distance}" points="${oracleHexPoints(x, y, 2.46)}"></polygon>`;
+    }).join('');
+    return `<g class="mirror-speaking-bar" style="--i:${index}">${miniCells}</g>`;
+  }).join('');
+  const waveCells = Array.from({ length: 41 }, (_, index) => {
+    const pointOffset = index - 20;
+    const spread = Math.abs(pointOffset) / 20;
+    const amplitude = 7.2 * (1 - spread * 0.44);
+    const x = mouthCenterX + pointOffset * 3.15;
+    const y = mouthCenterY - 0.9 + Math.sin(index * 0.78) * amplitude;
+    return `<polygon class="mirror-wave-cell" style="--i:${index}; --wave-distance:${spread.toFixed(2)}" points="${oracleHexPoints(x, y, 1.98)}"></polygon>`;
+  }).join('');
+  oracleMirror.innerHTML = `
+    <div class="mirror-glass">
+      <svg class="mirror-svg" viewBox="0 0 360 360" role="presentation" focusable="false">
+        <defs>
+          <radialGradient id="ms4OracleMirrorCore" cx="50%" cy="42%" r="58%">
+            <stop offset="0%" stop-color="rgba(245,242,255,0.22)"></stop>
+            <stop offset="48%" stop-color="rgba(168,85,255,0.12)"></stop>
+            <stop offset="100%" stop-color="rgba(2,2,4,0)"></stop>
+          </radialGradient>
+        </defs>
+        <circle class="mirror-aura" cx="180" cy="172" r="128"></circle>
+        <circle class="mirror-core" cx="180" cy="174" r="96"></circle>
+        <path class="mirror-face-energy" d="M180 70 C143 80 122 116 124 166 C126 219 151 261 180 282 C209 261 234 219 236 166 C238 116 217 80 180 70 Z"></path>
+        <g class="mirror-cell-links">${oracleMirrorCellLinks(cellSpecs)}</g>
+        <g class="mirror-cells">${cells}</g>
+        <g class="mirror-wave mirror-wave-cells">${waveCells}</g>
+        <g class="mirror-speaking-bars">${voiceBars}</g>
+        <path class="mirror-face-outline" d="M180 70 C143 80 122 116 124 166 C126 219 151 261 180 282 C209 261 234 219 236 166 C238 116 217 80 180 70 Z"></path>
+        <g class="mirror-eyes">
+          <g class="mirror-eye-rings">
+            <polygon points="${oracleHexPoints(eyeCenters.left.x, eyeCenters.left.y, 18)}"></polygon>
+            <polygon points="${oracleHexPoints(eyeCenters.right.x, eyeCenters.right.y, 18)}"></polygon>
+          </g>
+          <polygon points="${oracleHexPoints(eyeCenters.left.x, eyeCenters.left.y, 11)}"></polygon>
+          <polygon points="${oracleHexPoints(eyeCenters.right.x, eyeCenters.right.y, 11)}"></polygon>
+          <circle cx="${eyeCenters.left.x}" cy="${eyeCenters.left.y}" r="3.3"></circle>
+          <circle cx="${eyeCenters.right.x}" cy="${eyeCenters.right.y}" r="3.3"></circle>
+        </g>
+      </svg>
+    </div>
+  `;
+}
+
+renderOracleMirror();
 
 function _fmtTime(iso) {
   if (!iso) return '';
@@ -652,11 +1257,10 @@ function settingsApplyToForm(serverDefaults) {
   const defaultLabel = (label, fallback) =>
     `Use server default — ${label || fallback}`;
   const engineFirst = settingsTtsEngine.options[0];
-  // Server now defaults to ws_super (May 22 2026) — much faster first
-  // audio. Older browser sessions may still have ms4_tts_engine=rest
-  // pinned in localStorage from when REST was the default; clear it
-  // once so they pick up the new server default automatically. Users
-  // who explicitly want REST can re-select it from the dropdown.
+  // Server defaults can move as cluster evidence changes. Clear any stale
+  // pinned browser override once so the user inherits the current measured
+  // default automatically; they can deliberately re-pick the non-default
+  // engine after the clear.
   const serverEngineDefault = serverDefaults?.voice?.tts_engine_default;
   const storedEngine = localStorage.getItem(SETTINGS_LS_KEYS.ttsEngine);
   // localStorage migration: when the stored engine no longer matches
@@ -1594,24 +2198,77 @@ if (settingsGamePlanRunBtn) settingsGamePlanRunBtn.addEventListener('click', pla
 // ----- Oracle panel -------------------------------------------------
 
 const settingsHivemindOracle = document.getElementById('settingsHivemindOracle');
+const settingsHivemindOracleRefresh = document.getElementById('settingsHivemindOracleRefresh');
+const settingsOracleReadinessStatus = document.getElementById('settingsOracleReadinessStatus');
 const settingsOracleChatInput = document.getElementById('settingsOracleChatInput');
 const settingsOracleChatBtn = document.getElementById('settingsOracleChatBtn');
 const settingsOracleStatus = document.getElementById('settingsOracleStatus');
+
+function renderOracleReadiness(data) {
+  const lines = [];
+  const checks = Array.isArray(data.checks) ? data.checks : [];
+  const blockers = Array.isArray(data.blockers) ? data.blockers : [];
+  const actions = Array.isArray(data.next_actions) ? data.next_actions : [];
+  const provisioning = data.provisioning || {};
+  lines.push(`readiness   = ${data.readiness || (data.ready ? 'ready' : 'unknown')}`);
+  lines.push(`auth        = ${data.auth_configured ? 'configured' : 'not configured'}`);
+  if (data.mcp_base_url) lines.push(`mcp         = ${data.mcp_base_url}`);
+  lines.push(`provision   = ${provisioning.automatic ? 'automatic' : (provisioning.state || 'approval_required')}`);
+  if (checks.length) {
+    lines.push('');
+    lines.push('checks');
+    for (const check of checks.slice(0, 8)) {
+      lines.push(`  ${check.name || 'check'}: ${check.state || 'unknown'}${check.detail ? ' - ' + check.detail : ''}`);
+    }
+  }
+  if (blockers.length) {
+    lines.push('');
+    lines.push('blockers');
+    for (const blocker of blockers.slice(0, 8)) lines.push(`  - ${blocker}`);
+  }
+  if (actions.length) {
+    lines.push('');
+    lines.push('next');
+    for (const action of actions.slice(0, 5)) {
+      const approval = action.requires_approval ? 'approval required' : 'safe';
+      lines.push(`  - ${action.label || 'action'} (${approval})`);
+    }
+  }
+
+  settingsHivemindOracle.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+  pre.textContent = lines.join('\n');
+  settingsHivemindOracle.appendChild(pre);
+
+  const details = document.createElement('details');
+  details.style.cssText = 'margin-top:6px;';
+  const summary = document.createElement('summary');
+  summary.style.cssText = 'cursor:pointer; color:#9999b4; font-size:11px;';
+  summary.textContent = 'Raw readiness snapshot';
+  const raw = document.createElement('pre');
+  raw.style.cssText = 'margin:6px 0 0; max-height:260px; overflow:auto; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
+  raw.textContent = JSON.stringify(data, null, 2).slice(0, 6000);
+  details.appendChild(summary);
+  details.appendChild(raw);
+  settingsHivemindOracle.appendChild(details);
+}
 
 async function refreshHivemindOracle() {
   if (!settingsHivemindOracle) return;
   settingsHivemindOracle.textContent = 'Loading…';
   try {
-    const r = await fetch('/hivemind/oracle/status', {cache: 'no-store'});
+    if (settingsOracleReadinessStatus) settingsOracleReadinessStatus.textContent = 'Refreshing...';
+    const r = await fetch('/hivemind/oracle/readiness', {cache: 'no-store'});
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
     const data = await r.json();
-    settingsHivemindOracle.innerHTML = '';
-    const pre = document.createElement('pre');
-    pre.style.cssText = 'margin:0; white-space:pre-wrap; background:#0e0f17; padding:6px; border-radius:6px; border:1px solid #2d2d44; font-size:11px;';
-    pre.textContent = JSON.stringify(data, null, 2).slice(0, 2000);
-    settingsHivemindOracle.appendChild(pre);
+    renderOracleReadiness(data);
+    if (settingsOracleReadinessStatus) {
+      settingsOracleReadinessStatus.textContent = `state=${data.readiness || 'unknown'}`;
+    }
   } catch (exc) {
-    settingsHivemindOracle.textContent = `/hivemind/oracle/status failed: ${exc.message || exc}`;
+    settingsHivemindOracle.textContent = `/hivemind/oracle/readiness failed: ${exc.message || exc}`;
+    if (settingsOracleReadinessStatus) settingsOracleReadinessStatus.textContent = 'failed';
   }
 }
 
@@ -1642,6 +2299,7 @@ async function askOracle() {
   }
 }
 if (settingsOracleChatBtn) settingsOracleChatBtn.addEventListener('click', askOracle);
+if (settingsHivemindOracleRefresh) settingsHivemindOracleRefresh.addEventListener('click', refreshHivemindOracle);
 
 // ----- Training panel -----------------------------------------------
 
@@ -3185,6 +3843,7 @@ function daAnnounceTerminalJobs(jobs) {
 async function refreshDoubleAgent() {
   if (!sessionId) {
     daPanel.style.display = 'none';
+    setOracleLobeState([]);
     return;
   }
   const q = new URLSearchParams({conversation_id: sessionId, limit: '20'}).toString();
@@ -3197,6 +3856,7 @@ async function refreshDoubleAgent() {
     const revData = revResp.ok ? await revResp.json() : {revision_id: null};
     const jobs = jobsData.jobs || [];
     renderDoubleAgentJobs(jobs, revData.revision_id);
+    setOracleLobeState(jobs);
     daAnnounceTerminalJobs(jobs);  // proactive completion delivery
     const anyInFlight = jobs.some(j => j.state === 'queued' || j.state === 'running');
     if (anyInFlight && !daPollHandle) {
@@ -3287,6 +3947,7 @@ let recordingStartedAt = 0;
 function setVoiceStatus(text, kind) {
   voiceStatusLine.textContent = text || '';
   voiceStatusLine.style.color = kind === 'error' ? '#ef4444' : (kind === 'ok' ? '#22c55e' : '#9999b4');
+  setOracleStageFromVoiceStatus(text, kind);
 }
 
 // Preferred mic constraints: mono + echo/noise processing. These can
@@ -3369,6 +4030,8 @@ async function startRecording() {
   micButton.setAttribute('aria-pressed', 'true');
   micButton.textContent = '⏺';
   setVoiceStatus('Recording… release to send', null);
+  setOracleStageState('listening', 'Listening.', 'Release the mic to send this turn.');
+  setOracleStageTranscript('');
 }
 
 function teardownRecording() {
@@ -3604,6 +4267,7 @@ function bargeIn(reason, options) {
 
   if (reason) {
     setVoiceStatus(`Interrupted (${reason}) — listening`, null);
+    setOracleStageState('listening', 'Interrupted. Listening now.', reason);
   }
 }
 
@@ -3884,6 +4548,13 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
     null,
   );
 
+  setOracleStageState(
+    'thinking',
+    'Voice captured. Routing through HiveMind.',
+    `${sourceLabel.toUpperCase()} audio ${durationSec.toFixed(1)}s; waiting on ASR.`
+  );
+  setOracleStageTranscript('');
+
   const form = new FormData();
   form.append('file', wavBlob, 'mic.wav');
   const params = voiceQueryParams();
@@ -3965,6 +4636,11 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
 
         if (eventName === 'status') {
           const phase = payload.phase || payload.status;
+          if (phase === 'transcribing') {
+            setOracleStageState('thinking', 'Transcribing your voice.', 'ASR is producing text.');
+          } else if (phase === 'thinking') {
+            setOracleStageState('thinking', 'Oracle is composing.', 'Face Lobe foreground is preparing the reply.');
+          }
           if (phase === 'transcribing') setVoiceStatus('Transcribing…', null);
           else if (phase === 'thinking') setVoiceStatus('Thinking…', null);
         } else if (eventName === 'transcript') {
@@ -3983,6 +4659,8 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           assistantState.text = '';
           transcriptShown = true;
           const asrLine = `Transcribed in ${payload.asr_ms ?? '?'}ms`;
+          setOracleStageTranscript(voiceUserText, speakerName);
+          setOracleStageState('thinking', 'I heard you. Preparing the response.', asrLine);
           const speakerLine = speakerName
             ? ` · speaker ${speakerName} (${Math.round((speaker.score || 0) * 100)}%)`
             : '';
@@ -3994,6 +4672,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           const speaker = payload.speaker;
           const speakerName = (speaker && speaker.accepted && speaker.name) ? speaker.name : null;
           if (speakerName && voiceUserBubble) {
+            setOracleStageTranscript(voiceUserText, speakerName);
             voiceUserBubble.textContent = `🎤 ${speakerName}: ${voiceUserText}`;
           }
         } else if (eventName === 'reflex') {
@@ -4004,6 +4683,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           // reflex; cancel that timer so they don't double up.
           if (firstAudioAt === null && currentVoiceTurnId === myTurnId && payload.id) {
             if (thinkingBridgeTimer) { clearTimeout(thinkingBridgeTimer); thinkingBridgeTimer = null; }
+            setOracleStageState('thinking', payload.label || 'One moment.', 'Reflex audio is covering the wait.');
             playReflex(payload.id);
           }
         } else if (eventName === 'egg') {
@@ -4025,12 +4705,18 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           assistantState.textNode.nodeValue = assistantState.text || '…';
           messages.scrollTop = messages.scrollHeight;
           accumulatedDeltas.push(payload.text || '');
+          setOracleStageState(
+            firstAudioAt === null ? 'thinking' : 'speaking',
+            assistantState.text || 'Oracle is responding.',
+            firstAudioAt === null ? 'Text is streaming; waiting for first audio.' : `Audio started in ${firstAudioAt}ms.`
+          );
         } else if (eventName === 'chunk_scheduled') {
           // optional: visualize backlog
         } else if (eventName === 'audio_chunk') {
           if (firstAudioAt === null) {
             firstAudioAt = Date.now() - turnStart;
             setVoiceStatus(`First audio in ${firstAudioAt}ms`, 'ok');
+            setOracleStageState('speaking', 'Oracle is speaking.', `First audio in ${firstAudioAt}ms.`);
             // Real audio has arrived; cancel the thinking bridge and stop
             // the ambience so neither plays on top of the actual reply.
             if (thinkingBridgeTimer) {
@@ -4043,6 +4729,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           await enqueueAudioChunk(payload.audio_base64, payload.audio_mime || 'audio/wav', myTurnId);
         } else if (eventName === 'audio_error') {
           console.warn('audio_error for chunk', payload.index, payload.error);
+          setOracleStageState('blocked', 'Audio chunk failed.', payload.error || `chunk ${payload.index}`);
         } else if (eventName === 'done') {
           // The reply is complete — release any still-held prebuffer
           // immediately so a short (one-chunk) reply plays without
@@ -4089,6 +4776,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
             }
             voicePill.textContent = parts.join(' · ');
             voicePill.title = JSON.stringify(vm, null, 2);
+            setOracleStageState('idle', finalText || 'Ready for the next turn.', voicePill.textContent);
             assistantState.el.appendChild(voicePill);
           }
           setVoiceStatus(`Voice turn complete in ${payload.metrics?.total_ms ?? '?'}ms`, 'ok');
@@ -4167,6 +4855,7 @@ function micPressedDown() {
       playAck: false,  // VAD will fire its own ack on speech onset
     });
     setVoiceStatus('Full-duplex on — just speak (mic button is hands-free)', null);
+    setOracleStageState('listening', 'Full-duplex listening.', 'Hands-free VAD is already active.');
     return;
   }
   bargeIn('mic press');
@@ -4364,6 +5053,7 @@ async function enableFullDuplex() {
   vadPreRoll = [];
   vadState.pollTimer = setInterval(vadTick, 30);
   setVoiceStatus('Full-duplex on — listening continuously', 'ok');
+  setOracleStageState('listening', 'Full-duplex listening.', 'VAD is armed for hands-free turns.');
   setVadStateLabel();
   micButton.textContent = '📡';
   micButton.title = 'Full-duplex listening (VAD). Disable in Settings to return to push-to-talk.';
@@ -4395,6 +5085,7 @@ function disableFullDuplex(options) {
   micButton.textContent = '🎤';
   micButton.title = '';
   if (!opts.silent) setVoiceStatus('Full-duplex off', null);
+  if (!opts.silent) setOracleStageState('idle', 'Ready for voice or chat.', 'Push-to-talk mode is active.');
 }
 
 // Rolling pre-roll buffer of audio frames captured BEFORE the VAD

@@ -1148,9 +1148,9 @@ def crown_calibration_profiles_activate(hivemind_url: str, *, profile_id: str) -
 # ===========================================================================
 
 
-def oracle_status(hivemind_url: str) -> Any:
+def oracle_status(hivemind_url: str, *, timeout: int = 15) -> Any:
     """``hivemind.oracle.status``  — Oracle planner state."""
-    return _call_tool(hivemind_url, "hivemind.oracle.status")
+    return _call_tool(hivemind_url, "hivemind.oracle.status", timeout=timeout)
 
 
 def oracle_configure(hivemind_url: str, *, config: dict[str, Any]) -> Any:
@@ -1634,4 +1634,208 @@ def psykyo_vlm_consensus(
         args["models"] = models
     return _call_tool(
         hivemind_url, "hivemind.psykyo.vlm_consensus@v1", args, timeout=30
+    )
+
+
+# ===========================================================================
+# PsyKyo game-session benchmark bridge (June 2026) -- wraps the
+# menta_game_session orchestrator (:6166) via the HiveMind MCP gateway.
+# The orchestrator is DRY-RUN by default: every mutating phase records a
+# ``would_call hivemind.vm.X@v1`` evidence row instead of executing it,
+# unless the responding host sets MENTA_GAME_SESSION_ALLOW_MUTATIONS=1.
+# These wrappers therefore inherit the server-side gate -- callers do
+# not need their own mutation guard for the orchestrated lane. The
+# Depth Lobe gamestream plan template
+# (machine_spirit_4.double_agent.plan_templates) is the primary consumer.
+# ===========================================================================
+
+
+def psykyo_game_session_list_capable_gpus(
+    hivemind_url: str,
+    *,
+    host_filter: str | None = None,
+) -> Any:
+    """``hivemind.psykyo.game_session.list_capable_gpus@v1`` — list the
+    cluster's gamestream-capable GPUs from the canonical cross-cluster
+    source (SyncDB ``NodeInfo.gamestream_capable_gpus[]``). Read-only;
+    the natural first step before pinning ``gpu_uuid`` / ``host`` on a
+    benchmark plan."""
+    args: dict[str, Any] = {}
+    if host_filter:
+        args["host_filter"] = host_filter
+    return _call_tool(
+        hivemind_url,
+        "hivemind.psykyo.game_session.list_capable_gpus@v1",
+        args,
+        timeout=10,
+    )
+
+
+def psykyo_game_session_start_benchmark(
+    hivemind_url: str,
+    *,
+    game: str,
+    benchmark_runs: int | None = None,
+    benchmark_classify: bool | None = None,
+    requires_stream: bool | None = None,
+    quality: str | None = None,
+    gpu_uuid: str | None = None,
+    host: str | None = None,
+    client: str | None = None,
+    approval_token: str | None = None,
+    **extra: Any,
+) -> Any:
+    """``hivemind.psykyo.game_session.start_benchmark@v1`` — plan a
+    benchmark game-streaming session. Wraps menta_game_session's
+    ``POST /api/v1/game_session/plan`` with ``intent.mode`` forced to
+    ``benchmark``. Returns ``{job_id, plan, ...}``; follow with
+    ``hivemind.game_session.run@v1`` (or use
+    :func:`psykyo_game_session_run_benchmark` for the one-shot path)
+    and read results via :func:`psykyo_game_session_get_results`.
+    Dry-run server-side unless the host enables mutations."""
+    if not game:
+        raise ValueError("game is required")
+    args: dict[str, Any] = {"game": game, "mode": "benchmark"}
+    if benchmark_runs is not None:
+        args["benchmark_runs"] = int(benchmark_runs)
+    if benchmark_classify is not None:
+        args["benchmark_classify"] = bool(benchmark_classify)
+    if requires_stream is not None:
+        args["requires_stream"] = bool(requires_stream)
+    if quality:
+        args["quality"] = quality
+    if gpu_uuid:
+        args["gpu_uuid"] = gpu_uuid
+    if host:
+        args["host"] = host
+    if client:
+        args["client"] = client
+    if approval_token:
+        args["approval_token"] = approval_token
+    args.update(extra)
+    return _call_tool(
+        hivemind_url,
+        "hivemind.psykyo.game_session.start_benchmark@v1",
+        args,
+        timeout=30,
+    )
+
+
+def psykyo_game_session_run_benchmark(
+    hivemind_url: str,
+    *,
+    game: str,
+    benchmark_runs: int | None = None,
+    benchmark_classify: bool | None = None,
+    quality: str | None = None,
+    gpu_uuid: str | None = None,
+    host: str | None = None,
+    client: str | None = None,
+    approval_token: str | None = None,
+    timeout: int = 1800,
+    **extra: Any,
+) -> Any:
+    """``hivemind.psykyo.game_session.run_benchmark@v1`` — ONE-SHOT
+    plan+run: plans the benchmark WorkloadIntent AND walks the full
+    state machine to terminal in a single call, returning
+    ``final_state`` + ``benchmark_summary`` + ``benchmark_report``.
+    The catalog timeout is 30 minutes (real multi-run benchmarks);
+    dry-run walks complete in seconds."""
+    if not game:
+        raise ValueError("game is required")
+    args: dict[str, Any] = {"game": game, "mode": "benchmark"}
+    if benchmark_runs is not None:
+        args["benchmark_runs"] = int(benchmark_runs)
+    if benchmark_classify is not None:
+        args["benchmark_classify"] = bool(benchmark_classify)
+    if quality:
+        args["quality"] = quality
+    if gpu_uuid:
+        args["gpu_uuid"] = gpu_uuid
+    if host:
+        args["host"] = host
+    if client:
+        args["client"] = client
+    if approval_token:
+        args["approval_token"] = approval_token
+    args.update(extra)
+    return _call_tool(
+        hivemind_url,
+        "hivemind.psykyo.game_session.run_benchmark@v1",
+        args,
+        timeout=timeout,
+    )
+
+
+def psykyo_game_session_get_results(hivemind_url: str, *, job_id: str) -> Any:
+    """``hivemind.psykyo.game_session.get_results@v1`` — read the
+    per-job evidence ledger for a benchmark/stream session including
+    the cross-run ``benchmark_summary`` (avg/min/max/p1_low/p99_high/
+    stddev over avg_fps) and the rendered ``benchmark_report``.
+    Read-only; safe to poll."""
+    if not job_id:
+        raise ValueError("job_id is required")
+    return _call_tool(
+        hivemind_url,
+        "hivemind.psykyo.game_session.get_results@v1",
+        {"job_id": job_id},
+        timeout=10,
+    )
+
+
+def psykyo_game_session_stop_session(hivemind_url: str, *, job_id: str) -> Any:
+    """``hivemind.psykyo.game_session.stop_session@v1`` — cancel an
+    in-flight benchmark/stream session (terminal CANCELLED, distinct
+    from FAILED_*). Idempotent on already-terminal jobs."""
+    if not job_id:
+        raise ValueError("job_id is required")
+    return _call_tool(
+        hivemind_url,
+        "hivemind.psykyo.game_session.stop_session@v1",
+        {"job_id": job_id},
+        timeout=10,
+    )
+
+
+# ===========================================================================
+# Moonlight viewer bridge -- launch the managed Moonlight client against
+# a paired Sunshine host (the "stream it back" leg of the gamestream
+# demo). MUTATING: spawns a real viewer process on the responding node.
+# ===========================================================================
+
+
+def moonlight_stream(
+    hivemind_url: str,
+    *,
+    host: str,
+    app: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    fps: int | None = None,
+    display: str | None = None,
+    verify_seconds: int | None = None,
+) -> Any:
+    """``hivemind.moonlight.stream@v1`` — launch the managed Moonlight
+    client against a paired Sunshine ``host``. Pass ``verify_seconds``
+    (3..=60) to run bounded and capture decode logs PROVING frames flow
+    guest->node; omit it for fire-and-forget (dhc-ui viewer lane).
+    Mutating — the Depth Lobe plan template only calls this in live
+    mode (never in its default dry-run)."""
+    if not host:
+        raise ValueError("host is required")
+    args: dict[str, Any] = {"host": host}
+    if app:
+        args["app"] = app
+    if width is not None:
+        args["width"] = int(width)
+    if height is not None:
+        args["height"] = int(height)
+    if fps is not None:
+        args["fps"] = int(fps)
+    if display:
+        args["display"] = display
+    if verify_seconds is not None:
+        args["verify_seconds"] = int(verify_seconds)
+    return _call_tool(
+        hivemind_url, "hivemind.moonlight.stream@v1", args, timeout=90
     )
