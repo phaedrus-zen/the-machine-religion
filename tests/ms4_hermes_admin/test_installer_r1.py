@@ -625,8 +625,12 @@ def test_rollback_failure_is_fatal_and_preserves_both_errors(tmp_path, monkeypat
 # --------------------------------------------------------------------------- #
 def test_rollback_emits_no_destructive_git_or_deletion_commands(tmp_path, monkeypatch):
     """The full failure+rollback lifecycle must never emit ``git reset --hard``,
-    ``git clean``, ``git restore``, ``git checkout -- <path>``, or ``git rm``,
-    and the only recursive filesystem delete must target the managed subtree.
+    ``git clean``, ``git restore``, or ``git rm``, and the only recursive
+    filesystem delete must target the managed subtree. When the whole-commit
+    rollback checkout already restores the prior tree (this scenario) no
+    path-level ``git checkout <prior> -- <path>`` is emitted either; that
+    scoped repair exists only for paths the forward checkout clobbered and is
+    proven in ``test_product_update_gate.py`` (ignore-case collision).
     """
     target, baseline, _commits, plugin_src, vetted_origin = _prime_editable_failure(tmp_path, monkeypatch)
 

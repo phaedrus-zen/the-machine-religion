@@ -16,6 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -79,21 +80,44 @@ def _make_product_fixture(
     tmp_path: Path,
     *,
     tag_message: str = "fake signed release",
+    prior_files: dict[str, bytes] | None = None,
+    target_mutation: Callable[[Path], None] | None = None,
+    checkout: Path | None = None,
+    checkout_config: dict[str, str] | None = None,
 ) -> _ProductFixture:
+    """Disposable packaged release: ``prior`` (installed) -> ``TARGET_TAG``.
+
+    ``prior_files`` land in the prior commit byte-for-byte (the seed pins
+    ``core.autocrlf=false`` so CRLF payloads survive ``git add`` on a Windows
+    host whose system config sets ``autocrlf=true``). ``target_mutation`` runs
+    inside the seed just before the target commit, so a scenario can rewrite,
+    delete, or -- via plumbing -- add a case-colliding path outside the
+    managed paths. ``checkout_config`` is applied to the installed clone only
+    (never the global config).
+    """
     remote = tmp_path / "release-remote.git"
     seed = tmp_path / "release-seed"
-    checkout = tmp_path / "installed-editable"
+    if checkout is None:
+        checkout = tmp_path / "installed-editable"
     _init_repo(seed)
+    _git(seed, "config", "core.autocrlf", "false")
 
     package_version = seed / "package-version.txt"
     package_version.write_bytes(f"{PRIOR_VERSION}\n".encode())
     _git(seed, "add", "package-version.txt")
+    for relpath, payload in (prior_files or {}).items():
+        target = seed.joinpath(*relpath.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        _git(seed, "add", relpath)
     _git(seed, "commit", "-q", "-m", "packaged Hermes 1.0.0")
     prior_commit = _git(seed, "rev-parse", "HEAD")
     _git(seed, "branch", "prior", prior_commit)
 
     package_version.write_bytes(f"{TARGET_VERSION}\n".encode())
     _git(seed, "add", "package-version.txt")
+    if target_mutation is not None:
+        target_mutation(seed)
     _git(seed, "commit", "-q", "-m", "packaged Hermes 2.0.0")
     target_commit = _git(seed, "rev-parse", "HEAD")
     _git(seed, "tag", "-a", TARGET_TAG, "-m", tag_message, target_commit)
@@ -101,8 +125,11 @@ def _make_product_fixture(
     _git(None, "clone", "-q", "--bare", str(seed), str(remote))
     _assert_isolated_repo(remote, bare=True)
     _git(None, "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
+    checkout.parent.mkdir(parents=True, exist_ok=True)
     _git(None, "clone", "-q", "--no-tags", "--branch", "prior", str(remote), str(checkout))
     _assert_isolated_repo(checkout, bare=False)
+    for key, value in (checkout_config or {}).items():
+        _git(checkout, "config", key, value)
 
     plugin_src = tmp_path / "ms4_consciousness"
     plugin_src.mkdir()
@@ -508,3 +535,370 @@ def test_unsigned_newest_under_require_signed_still_refuses_before_job(
         )
     assert state.last_update(refresh=True) is None
     assert _git(fixture.checkout, "rev-parse", "HEAD") == before_head
+
+
+# --------------------------------------------------------------------------- #
+# Live Windows reproduction (jobs b892a866 / 91fe4bd0, 2026-09-07).
+#
+# hermes-agent v2026.8.31 adds ``contributors/emails/agent@Agents-Mac-mini.local``
+# next to the existing ``agent@agents-Mac-mini.local``. On an ignore-case
+# filesystem (``core.ignorecase=true``, every Windows clone) both index entries
+# share ONE on-disk file: the forward checkout writes the new entry over the
+# old one, ``status`` reports the untouched entry as `` M``, the old updater
+# mistook its own checkout for an operator edit and rolled back, and the
+# whole-commit rollback checkout unlinked the shared file (`` D``). The blobs
+# themselves are LF-only; the line-ending hypothesis is refuted by the
+# ``autocrlf=true`` CRLF scenario below, which completes on the OLD gate too.
+# --------------------------------------------------------------------------- #
+COLLIDING_LOWER = "contributors/emails/agent@agents-Mac-mini.local"
+COLLIDING_UPPER = "contributors/emails/agent@Agents-Mac-mini.local"
+LIVE_CHECKOUT_CONFIG = {"core.autocrlf": "true", "core.ignorecase": "true"}
+REFUSAL_TEXT = (
+    "Hermes checkout has tracked or untracked changes outside the MS4-managed "
+    "updater paths"
+)
+
+
+def _filesystem_folds_case(root: Path) -> bool:
+    probe = root / "CaseProbe.tmp"
+    probe.write_bytes(b"")
+    try:
+        return (root / "caseprobe.tmp").exists()
+    finally:
+        probe.unlink()
+
+
+def _add_case_colliding_contributor(seed: Path) -> None:
+    """Add ``COLLIDING_UPPER`` through the index only (plumbing), exactly as the
+    upstream release carries it; on an ignore-case host a worktree write would
+    silently overwrite ``COLLIDING_LOWER`` instead of adding a second entry."""
+    blob_source = seed.parent / "colliding-blob.txt"
+    blob_source.write_bytes(b"skip-agent\n")
+    blob = _git(seed, "hash-object", "-w", str(blob_source))
+    _git(seed, "update-index", "--add", "--cacheinfo", f"100644,{blob},{COLLIDING_UPPER}")
+    assert sorted(_git(seed, "ls-files", "--", "contributors/").splitlines()) == sorted(
+        [COLLIDING_LOWER, COLLIDING_UPPER]
+    )
+
+
+def _status(checkout: Path) -> str:
+    """Raw porcelain status (NOT stripped: the leading status column matters)."""
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def _status_outside_managed(checkout: Path) -> list[str]:
+    """Status lines other than the (always untracked) re-stamped managed plugin."""
+    return [
+        line
+        for line in _status(checkout).splitlines()
+        if line.strip() and not line[3:].startswith(installer.MANAGED_PLUGIN_RELPOSIX + "/")
+    ]
+
+
+def _worktree_matches(checkout: Path, commit: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(checkout), "diff", "--quiet", commit, "--"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _notes(snapshot: state.UpdateJobSnapshot) -> list[str]:
+    return [entry.get("note") or "" for entry in snapshot.progress]
+
+
+def _install_runner(
+    fixture: _ProductFixture,
+    fake_python: Path,
+    *,
+    fail_first_install: bool = False,
+):
+    """pip/validate fakes; git stays real. Returns (runner, install_heads)."""
+    real_run = installer._run
+    install_heads: list[str] = []
+
+    def run(cmd, *, cwd=None, timeout=600):
+        if Path(cmd[0]) == fake_python and cmd[1:4] == ["-m", "pip", "install"]:
+            directory = Path(cmd[-1])
+            install_heads.append(installer._git_head(directory))
+            fixture.installed_version.write_bytes(_packaged_version_bytes(directory))
+            if fail_first_install and len(install_heads) == 1:
+                raise RuntimeError("simulated mid-install failure")
+            return subprocess.CompletedProcess(cmd, 0, stdout="installed\n", stderr="")
+        if Path(cmd[0]) == fake_python and cmd[1:2] == ["-c"]:
+            installed = fixture.installed_version.read_text(encoding="utf-8").strip()
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{installed}\n", stderr="")
+        return real_run(cmd, cwd=cwd, timeout=timeout)
+
+    return run, install_heads
+
+
+def _run_product_update(
+    fixture: _ProductFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    fail_first_install: bool = False,
+) -> tuple[state.UpdateJobSnapshot, list[str]]:
+    _wire_offline_release(monkeypatch, fixture)
+    state._reset_for_tests(tmp_path / "state" / "update.json")
+    fake_python = tmp_path / "fake-python"
+    run, install_heads = _install_runner(
+        fixture, fake_python, fail_first_install=fail_first_install
+    )
+    monkeypatch.setattr(installer, "_run", run)
+    accepted = installer.trigger_update(
+        plugin_src=fixture.plugin_src,
+        venv_python=fake_python,
+        request_user="product-gate",
+    )
+    return _await_terminal(accepted.job_id), install_heads
+
+
+def _emulate_pre_fix_updater(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two repairs, switched off: no updater-produced waivers, no path-level
+    tree restore. Everything else (baseline plumbing included) is production."""
+    monkeypatch.setattr(installer, "_explain_updater_status_entry", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        installer,
+        "_restore_prior_tree",
+        lambda _pre, _target: installer._TreeRestoreReport((), (), (), ()),
+    )
+
+
+def _colliding_fixture(tmp_path: Path) -> _ProductFixture:
+    if not _filesystem_folds_case(tmp_path):
+        pytest.skip("ignore-case filename collision needs a case-insensitive filesystem")
+    return _make_product_fixture(
+        tmp_path,
+        prior_files={COLLIDING_LOWER: b"momomojo\n"},
+        target_mutation=_add_case_colliding_contributor,
+        checkout_config=LIVE_CHECKOUT_CONFIG,
+    )
+
+
+def test_case_colliding_release_reproduces_live_refusal_and_lost_file_without_the_fix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _colliding_fixture(tmp_path)
+    _emulate_pre_fix_updater(monkeypatch)
+    assert _status_outside_managed(fixture.checkout) == []
+
+    final, install_heads = _run_product_update(fixture, monkeypatch, tmp_path)
+
+    assert final.status == "failed"
+    assert REFUSAL_TEXT in (final.error or "")
+    assert f" M {COLLIDING_LOWER}" in (final.error or "")
+    assert "rolled back to the prior state" in (final.error or "")
+    assert install_heads == [fixture.prior_commit]  # only the rollback reinstall
+    assert _git(fixture.checkout, "rev-parse", "HEAD") == fixture.prior_commit
+    # The live symptom: the rollback checkout unlinked the shared file.
+    assert f" D {COLLIDING_LOWER}" in _status(fixture.checkout)
+    assert not fixture.checkout.joinpath(*COLLIDING_LOWER.split("/")).exists()
+
+
+def test_case_colliding_release_completes_and_reports_new_installed_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _colliding_fixture(tmp_path)
+
+    final, install_heads = _run_product_update(fixture, monkeypatch, tmp_path)
+
+    assert final.status == "success", final.error
+    assert final.phase == "done"
+    assert final.to_version == TARGET_VERSION
+    assert fixture.installed_version.read_bytes() == f"{TARGET_VERSION}\n".encode()
+    assert _git(fixture.checkout, "rev-parse", "HEAD") == fixture.target_commit
+    assert install_heads == [fixture.target_commit]
+    waiver = (
+        f"status entry is the updater's own, not operator dirt:  M {COLLIDING_LOWER} "
+        f"(case-insensitive filename collision with {COLLIDING_UPPER})"
+    )
+    assert waiver in _notes(final)
+    # The collision is permanent on this filesystem; the NEXT update's
+    # pre-mutation gate must not refuse it either (it is not operator dirt).
+    state.start_job(from_version=TARGET_VERSION, to_version="3.0.0", install_mode="editable")
+    assert f" M {COLLIDING_LOWER}" in installer._ensure_clean_checkout(fixture.checkout)
+
+
+def test_mid_install_failure_after_case_colliding_checkout_restores_full_prior_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _colliding_fixture(tmp_path)
+
+    final, install_heads = _run_product_update(
+        fixture, monkeypatch, tmp_path, fail_first_install=True
+    )
+
+    assert final.status == "failed"
+    assert "simulated mid-install failure" in (final.error or "")
+    assert "rolled back to the prior state" in (final.error or "")
+    assert install_heads == [fixture.target_commit, fixture.prior_commit]
+    assert _git(fixture.checkout, "rev-parse", "HEAD") == fixture.prior_commit
+    restored = fixture.checkout.joinpath(*COLLIDING_LOWER.split("/"))
+    assert restored.read_bytes().replace(b"\r\n", b"\n") == b"momomojo\n"
+    assert _status_outside_managed(fixture.checkout) == []
+    assert _worktree_matches(fixture.checkout, fixture.prior_commit)
+    notes = _notes(final)
+    assert any(
+        note.startswith("rollback restored 1 path(s) from") and COLLIDING_LOWER in note
+        for note in notes
+    )
+    assert any(
+        "rollback tree verified: working tree matches" in note
+        and "(restored 1, removed 0)" in note
+        for note in notes
+    )
+    phases = [entry["phase"] for entry in final.progress]
+    assert "rolled_back" in phases
+    assert "rollback_failed" not in phases
+
+
+def test_release_rewriting_file_to_crlf_completes_under_autocrlf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refutes the line-ending hypothesis for the live failure: a release that
+    turns an LF file into CRLF is stable under ``core.autocrlf=true`` (modern git
+    never re-normalizes a blob that already carries CR), so it never produced
+    the refusal -- even with the repairs switched off it completes. Either way
+    the update must land the CRLF bytes and leave a clean status."""
+    notes_path = "docs/NOTES.txt"
+
+    def rewrite_to_crlf(seed: Path) -> None:
+        (seed / "docs" / "NOTES.txt").write_bytes(b"line one\r\nline two\r\n")
+        _git(seed, "add", notes_path)
+
+    fixture = _make_product_fixture(
+        tmp_path,
+        prior_files={notes_path: b"line one\nline two\n"},
+        target_mutation=rewrite_to_crlf,
+        checkout_config=LIVE_CHECKOUT_CONFIG,
+    )
+    _emulate_pre_fix_updater(monkeypatch)
+
+    final, install_heads = _run_product_update(fixture, monkeypatch, tmp_path)
+
+    assert final.status == "success", final.error
+    assert final.to_version == TARGET_VERSION
+    assert install_heads == [fixture.target_commit]
+    assert (fixture.checkout / "docs" / "NOTES.txt").read_bytes() == b"line one\r\nline two\r\n"
+    assert _status_outside_managed(fixture.checkout) == []
+
+
+def test_release_deleting_file_outside_managed_paths_rolls_back_full_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retired = "contributors/emails/retired@example.invalid"
+
+    def delete_contributor(seed: Path) -> None:
+        _git(seed, "rm", "-q", "--", retired)
+
+    fixture = _make_product_fixture(
+        tmp_path,
+        prior_files={retired: b"retired\n"},
+        target_mutation=delete_contributor,
+        checkout_config=LIVE_CHECKOUT_CONFIG,
+    )
+
+    final, install_heads = _run_product_update(
+        fixture, monkeypatch, tmp_path, fail_first_install=True
+    )
+
+    assert final.status == "failed"
+    assert "rolled back to the prior state" in (final.error or "")
+    assert install_heads == [fixture.target_commit, fixture.prior_commit]
+    assert _git(fixture.checkout, "rev-parse", "HEAD") == fixture.prior_commit
+    assert fixture.checkout.joinpath(*retired.split("/")).read_bytes().replace(
+        b"\r\n", b"\n"
+    ) == b"retired\n"
+    assert _status_outside_managed(fixture.checkout) == []
+    assert _worktree_matches(fixture.checkout, fixture.prior_commit)
+    assert any(
+        "rollback tree verified: working tree matches" in note
+        and "(restored 0, removed 0)" in note
+        for note in _notes(final)
+    )
+
+
+def test_operator_edit_outside_managed_paths_is_still_refused_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The managed checkout topology of the live box: an operator edit to a
+    tracked file outside the managed paths is refused before fetch/checkout."""
+    notes_path = "docs/NOTES.txt"
+    ms4_root = tmp_path / "ms4"
+    managed = ms4_root / "runtime" / "hermes-managed"
+    monkeypatch.setattr(installer, "MS4_ROOT", ms4_root)
+    fixture = _make_product_fixture(
+        tmp_path,
+        prior_files={notes_path: b"line one\n"},
+        checkout=managed,
+        checkout_config=LIVE_CHECKOUT_CONFIG,
+    )
+    edited = fixture.checkout / "docs" / "NOTES.txt"
+    edited.write_bytes(b"operator edit\n")
+    before_installed = fixture.installed_version.read_bytes()
+
+    final, install_heads = _run_product_update(fixture, monkeypatch, tmp_path)
+
+    assert final.status == "failed"
+    assert REFUSAL_TEXT in (final.error or "")
+    assert f" M {notes_path}" in (final.error or "")
+    assert "rolled back" not in (final.error or "")
+    assert install_heads == []
+    assert _git(fixture.checkout, "rev-parse", "HEAD") == fixture.prior_commit
+    assert edited.read_bytes() == b"operator edit\n"
+    assert fixture.installed_version.read_bytes() == before_installed
+    assert not any("checkout --detach" in note or " fetch " in note for note in _notes(final))
+
+
+def test_line_ending_only_difference_is_not_operator_dirt(
+    tmp_path: Path,
+) -> None:
+    """A tracked file whose only difference is CR at EOL (an editor saved it
+    with CRLF on an ``autocrlf=false`` clone) is not dirt; a content edit is."""
+    notes_path = "docs/NOTES.txt"
+    fixture = _make_product_fixture(
+        tmp_path,
+        prior_files={notes_path: b"line one\nline two\n"},
+        checkout_config={"core.autocrlf": "false"},
+    )
+    state._reset_for_tests(tmp_path / "state" / "update.json")
+    state.start_job(from_version=PRIOR_VERSION, to_version=TARGET_VERSION, install_mode="editable")
+    notes = fixture.checkout / "docs" / "NOTES.txt"
+
+    notes.write_bytes(b"line one\r\nline two\r\n")
+    assert f" M {notes_path}" in _status(fixture.checkout)  # git does report it
+    assert f" M {notes_path}" in installer._ensure_clean_checkout(fixture.checkout)
+    assert notes.read_bytes() == b"line one\r\nline two\r\n"  # never rewritten
+
+    notes.write_bytes(b"line one\r\nline 2\r\n")
+    with pytest.raises(installer.HermesDirtyCheckoutError, match=REFUSAL_TEXT) as caught:
+        installer._ensure_clean_checkout(fixture.checkout)
+    assert notes_path in str(caught.value)

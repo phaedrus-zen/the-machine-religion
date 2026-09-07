@@ -36,12 +36,33 @@ failure; and a step's wall-clock budget is enforced by the updater itself,
 because ``subprocess.run(timeout=...)`` provably does not bound its own
 runtime once grandchildren inherit the captured pipes.
 
-Rollback (F3): in-place managed updates retain the exact prior HEAD and
-checkout mode. First migration failures retain the dirty source bytes
-without reinstalling from them; a post-install failure is fatal/manual
-recovery rather than executing dirty source. Neither path uses ``git
-reset --hard``, ``git clean``, ``git restore``, or ``git checkout --
-<path>``. PyPI updates rely on pip's own wheel replacement.
+Rollback (F3): in-place managed updates retain the exact prior HEAD,
+checkout mode, and the prior commit's FULL tree. A whole-commit ``git
+checkout <prior>`` only rewrites paths whose index entry differs between
+the two commits, so what the forward checkout clobbered without changing
+its own entry stays broken (on the live Windows box an ignore-case
+filename collision in hermes-agent v2026.8.31 left
+``contributors/emails/agent@agents-Mac-mini.local`` deleted after two
+rollbacks). Rollback therefore also restores, from the prior commit and
+strictly limited to paths that are neither in the pre-mutation baseline
+nor managed, every tracked path the checkout left modified or missing,
+removes untracked leftovers that only the target tree knows, verifies
+the status is clean apart from the managed paths, and records the result
+in the job. First migration failures retain the dirty source bytes without
+reinstalling from them; a post-install failure is fatal/manual recovery
+rather than executing dirty source. Neither path uses ``git reset
+--hard``, ``git clean``, or ``git restore``; ``git checkout <prior> --
+<path>`` is issued only for those proven updater-clobbered paths, never
+for an operator-owned one. PyPI updates rely on pip's own wheel
+replacement.
+
+Dirty-check semantics: the F2 gate refuses OPERATOR changes only. It runs
+before any mutation (establishing a baseline) and again after the
+detached checkout, where it judges only entries new since the baseline
+and waives what the updater's own checkout produced: ignore-case filename
+collisions between two tracked paths, CR-at-EOL-only differences, and
+paths the checkout itself wrote. Real operator edits outside the managed
+paths are still refused before fetch/checkout/plugin mutation.
 """
 
 from __future__ import annotations
@@ -1171,20 +1192,159 @@ def _ensure_pristine_external_checkout(directory: Path) -> None:
     )
 
 
-def _ensure_clean_checkout(directory: Path) -> None:
-    """Refuse an editable update against a dirty checkout (F2).
+def _nul_separated_paths(result: subprocess.CompletedProcess) -> list[str] | None:
+    """Decode a ``-z`` git listing; ``None`` (fail closed) on anything odd."""
+    raw = result.stdout
+    if result.returncode != 0 or not isinstance(raw, bytes):
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return [path for path in text.split("\0") if path]
 
-    Ignored changes are limited to the safely contained managed plugin and
-    untracked legacy MS4 backup artifacts described in the module docstring.
-    Anything else fails closed -- no user-owned file is deleted or reset.
+
+def _repo_ignores_case(directory: Path) -> bool:
+    """Git's own verdict (set at init/clone) that the filesystem folds case."""
+    result = _run_capture(
+        ["git", "-C", str(directory), "config", "--type=bool", "--get", "core.ignorecase"],
+        timeout=30,
+    )
+    return result.returncode == 0 and (result.stdout or "").strip() == "true"
+
+
+def _case_collision_groups(directory: Path) -> dict[str, list[str]]:
+    """Index paths that fold to the same name as another index entry.
+
+    On a case-insensitive filesystem (``core.ignorecase=true``) two such
+    entries share ONE on-disk file, so only one of them can match its blob:
+    git reports the other as modified for as long as both are tracked, and a
+    checkout that drops either entry unlinks the shared file. This is exactly
+    what the live Windows updater hit: hermes-agent v2026.8.31 added
+    ``contributors/emails/agent@Agents-Mac-mini.local`` next to the existing
+    ``agent@agents-Mac-mini.local`` (jobs b892a866 / 91fe4bd0). Empty when the
+    filesystem is case-sensitive, so the exemption never applies there.
+    """
+    if not _repo_ignores_case(directory):
+        return {}
+    listing = _run_capture_bytes(
+        ["git", "-C", str(directory), "-c", "core.quotePath=false", "ls-files", "-z"],
+        timeout=60,
+    )
+    paths = _nul_separated_paths(listing)
+    if not paths:
+        return {}
+    folded: dict[str, list[str]] = {}
+    for path in paths:
+        folded.setdefault(path.lower(), []).append(path)
+    return {key: group for key, group in folded.items() if len(group) > 1}
+
+
+_EOL_ONLY_STATUS_CODES = frozenset({" M", "M ", "MM"})
+
+
+def _differs_only_by_line_endings(directory: Path, path: str) -> bool:
+    """True iff worktree, index, and HEAD agree on ``path`` modulo CR at EOL."""
+    for scope in ((), ("--cached",)):
+        result = _run_capture(
+            [
+                "git",
+                "-C",
+                str(directory),
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--quiet",
+                "--ignore-cr-at-eol",
+                *scope,
+                "--",
+                path,
+            ],
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return False
+    return True
+
+
+def _explain_updater_status_entry(
+    directory: Path,
+    line: str,
+    paths: list[str],
+    *,
+    changed_paths: frozenset[str] | None,
+    collision_groups: dict[str, list[str]],
+) -> str | None:
+    """Return why a status entry is NOT an operator change, or ``None``.
+
+    Three mechanisms are recognized, in this order:
+
+    1. a tracked entry that shares its case-folded name with another tracked
+       entry on an ignore-case filesystem (see :func:`_case_collision_groups`);
+    2. a modification whose only difference against the index AND HEAD is
+       CR-at-EOL (an editor or ``core.autocrlf`` re-terminated the lines --
+       the content is identical);
+    3. after a checkout: a path the checkout itself wrote or removed
+       (``changed_paths`` is the ``prior..target`` name list), which by
+       construction was not there in the pre-mutation baseline.
+
+    Everything else -- including any untracked file outside the managed
+    paths -- is an operator change and stays refused.
+    """
+    code = line[:2]
+    if code != "??" and paths and all(path.lower() in collision_groups for path in paths):
+        partners = sorted(
+            partner
+            for path in paths
+            for partner in collision_groups[path.lower()]
+            if partner != path
+        )
+        return "case-insensitive filename collision with " + ", ".join(partners)
+    if (
+        code in _EOL_ONLY_STATUS_CODES
+        and len(paths) == 1
+        and _differs_only_by_line_endings(directory, paths[0])
+    ):
+        return "differs from HEAD only by line endings"
+    if changed_paths is not None and paths and all(path in changed_paths for path in paths):
+        return "path written by the updater's own checkout"
+    return None
+
+
+def _ensure_clean_checkout(
+    directory: Path,
+    *,
+    baseline: tuple[str, ...] | list[str] | None = None,
+    changed_paths: frozenset[str] | None = None,
+) -> list[str]:
+    """Refuse an editable update against an OPERATOR-dirty checkout (F2).
+
+    Ignored changes are limited to the safely contained managed plugin,
+    untracked legacy MS4 backup artifacts described in the module docstring,
+    and entries proven to be the updater's own doing
+    (:func:`_explain_updater_status_entry`). Anything else fails closed -- no
+    user-owned file is deleted or reset.
+
+    Called twice per editable update. Before any mutation it establishes the
+    baseline and returns every status line it saw (all vetted). After the
+    detached checkout it is called again with that ``baseline`` and the
+    ``changed_paths`` of the checkout, and judges only entries that are NEW
+    relative to the baseline; the updater's own checkout must never be
+    mistaken for an operator edit (which is what refused, then rolled back,
+    then lost a file on the live Windows box).
     """
     dirty = _dirty_checkout_lines(directory)
     if not dirty:
-        return
+        return []
 
+    baseline_lines = set(baseline or ())
     offending: list[str] = []
+    waived: list[tuple[str, str]] = []
+    candidates: list[tuple[str, list[str]]] = []
     managed_plugin_dirty = False
     for line in dirty:
+        if line in baseline_lines:
+            continue
         paths = _status_paths(line)
         if paths is None:
             offending.append(line)
@@ -1194,8 +1354,39 @@ def _ensure_clean_checkout(directory: Path) -> None:
             _managed_backup_path_is_safely_contained(directory, path) for path in paths
         ):
             continue
-        else:
+        elif line[:2] == "??" and not (
+            changed_paths is not None and all(path in changed_paths for path in paths)
+        ):
+            # An untracked file is never a collision or a CR-only rewrite:
+            # refuse without spending a single further git query.
             offending.append(line)
+        else:
+            candidates.append((line, paths))
+
+    if offending and candidates:
+        # A definite refusal reports every non-managed entry, in status order,
+        # without spending a single probe on the explainable ones.
+        candidate_lines = {line for line, _paths in candidates}
+        offending_lines = set(offending)
+        offending = [
+            line for line in dirty if line in offending_lines or line in candidate_lines
+        ]
+    elif candidates:
+        # Read-only probes (config/ls-files/diff --quiet) run only once every
+        # entry is at least explainable; a definite refusal never reaches them.
+        collision_groups = _case_collision_groups(directory)
+        for line, paths in candidates:
+            reason = _explain_updater_status_entry(
+                directory,
+                line,
+                paths,
+                changed_paths=changed_paths,
+                collision_groups=collision_groups,
+            )
+            if reason is None:
+                offending.append(line)
+            else:
+                waived.append((line, reason))
 
     if (
         not offending
@@ -1208,7 +1399,13 @@ def _ensure_clean_checkout(directory: Path) -> None:
         offending = list(dirty)
 
     if not offending:
-        return
+        for line, reason in waived[:8]:
+            state.append_progress(
+                f"status entry is the updater's own, not operator dirt: {line} ({reason})"
+            )
+        if len(waived) > 8:
+            state.append_progress(f"and {len(waived) - 8} more updater-produced entries")
+        return dirty
 
     preview = "; ".join(offending[:8])
     suffix = f"; and {len(offending) - 8} more" if len(offending) > 8 else ""
@@ -2030,6 +2227,10 @@ class _EditablePreState:
     commit: str
     mode: str  # "branch" | "detached"
     branch: str | None
+    # Vetted ``status --porcelain=v1`` lines present BEFORE the first
+    # mutation (managed plugin, legacy backups, updater-explained entries).
+    # Rollback restores the tree until nothing else remains.
+    baseline: tuple[str, ...] = ()
 
 
 def _git_current_branch(directory: Path) -> str | None:
@@ -2048,8 +2249,13 @@ def _git_current_branch(directory: Path) -> str | None:
     return branch or None
 
 
-def _capture_editable_prestate(directory: Path) -> _EditablePreState:
-    """Capture the exact pre-update HEAD commit and checkout mode (F3).
+def _capture_editable_prestate(
+    directory: Path,
+    *,
+    baseline: tuple[str, ...] | None = None,
+) -> _EditablePreState:
+    """Capture the exact pre-update HEAD commit, checkout mode, and the
+    vetted dirty baseline (F3).
 
     Must run AFTER the clean-check passes and BEFORE the first working-tree
     mutation (the detached checkout). Read-only.
@@ -2057,7 +2263,15 @@ def _capture_editable_prestate(directory: Path) -> _EditablePreState:
     commit = _git_head(directory)
     branch = _git_current_branch(directory)
     mode = "branch" if branch is not None else "detached"
-    return _EditablePreState(directory=directory, commit=commit, mode=mode, branch=branch)
+    if baseline is None:
+        baseline = tuple(_dirty_checkout_lines(directory))
+    return _EditablePreState(
+        directory=directory,
+        commit=commit,
+        mode=mode,
+        branch=branch,
+        baseline=tuple(baseline),
+    )
 
 
 def _restore_editable_commit(pre: _EditablePreState) -> None:
@@ -2067,9 +2281,10 @@ def _restore_editable_commit(pre: _EditablePreState) -> None:
     was never moved -- a detached checkout does not move branches), preserving
     "on a branch". A detached pre-state is restored by re-detaching onto the
     exact commit. Uses ONLY ``git checkout`` of a whole ref/commit -- never
-    ``git reset --hard``, ``git clean``, ``git restore``, or
-    ``git checkout -- <path>`` -- so untracked and pre-existing non-managed
-    changes are never discarded.
+    ``git reset --hard``, ``git clean``, or ``git restore`` -- so untracked
+    and pre-existing non-managed changes are never discarded. Whatever the
+    whole-commit checkout leaves behind is repaired path-by-path afterwards
+    by :func:`_restore_prior_tree`.
     """
     directory = pre.directory
     if pre.mode == "branch" and pre.branch and not pre.branch.startswith("-"):
@@ -2106,6 +2321,205 @@ def _restore_editable_commit(pre: _EditablePreState) -> None:
         )
 
 
+def _tree_paths(directory: Path, commit: str) -> frozenset[str] | None:
+    """Every path in ``commit``'s tree; ``None`` (fail closed) if unreadable."""
+    listing = _run_capture_bytes(
+        [
+            "git",
+            "-C",
+            str(directory),
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            commit,
+        ],
+        timeout=120,
+    )
+    paths = _nul_separated_paths(listing)
+    return None if paths is None else frozenset(paths)
+
+
+def _forward_changed_paths(
+    directory: Path,
+    prior: str | None,
+    target: str,
+) -> frozenset[str] | None:
+    """Paths the ``prior -> target`` checkout wrote or removed.
+
+    A ``None`` prior (unborn managed checkout on the F2 migration path) means
+    the checkout materialized the whole target tree. ``None`` result = could
+    not be determined; callers then simply do not grant that exemption.
+    """
+    if prior is None:
+        return _tree_paths(directory, target)
+    listing = _run_capture_bytes(
+        [
+            "git",
+            "-C",
+            str(directory),
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            prior,
+            target,
+        ],
+        timeout=120,
+    )
+    paths = _nul_separated_paths(listing)
+    return None if paths is None else frozenset(paths)
+
+
+def _remove_checkout_file(directory: Path, path: str) -> bool:
+    """Unlink one target-added regular file/symlink strictly inside ``directory``."""
+    if not path or "\\" in path or path.startswith("/"):
+        return False
+    segments = path.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return False
+    full = directory.joinpath(*segments)
+    if not os.path.lexists(full) or (full.is_dir() and not full.is_symlink()):
+        return False
+    root = os.path.normcase(_normalized_real_path(directory))
+    parent = os.path.normcase(_normalized_real_path(full.parent))
+    if parent != root and not parent.startswith(root + os.sep):
+        return False
+    os.unlink(full)
+    return True
+
+
+@dataclass(frozen=True)
+class _TreeRestoreReport:
+    restored: tuple[str, ...]
+    removed: tuple[str, ...]
+    residual_tracked: tuple[str, ...]
+    residual_untracked: tuple[str, ...]
+
+
+def _rollback_residual_lines(pre: _EditablePreState) -> list[str]:
+    """Status lines after rollback that are neither baseline nor managed."""
+    baseline = set(pre.baseline)
+    residual: list[str] = []
+    for line in _dirty_checkout_lines(pre.directory):
+        if line in baseline:
+            continue
+        paths = _status_paths(line)
+        if paths is not None and all(_is_within_managed_plugin(path) for path in paths):
+            continue
+        if (
+            paths is not None
+            and line[:2] == "??"
+            and all(
+                _managed_backup_path_is_safely_contained(pre.directory, path)
+                for path in paths
+            )
+        ):
+            continue
+        residual.append(line)
+    return residual
+
+
+def _restore_prior_tree(
+    pre: _EditablePreState,
+    target_commit: str | None,
+) -> _TreeRestoreReport:
+    """Bring the working tree back to the prior commit's FULL tree (F3).
+
+    ``git checkout <prior>`` only rewrites paths whose index entry changes
+    between the two commits, so a file that the forward checkout clobbered
+    without changing its own entry (the ignore-case collision the live job
+    hit) comes back as `` D`` -- the file is simply gone. After the
+    whole-commit checkout this walks the status entries that are neither in
+    the pre-mutation baseline nor managed, and:
+
+    * restores every such path that exists in the prior tree from the prior
+      commit (``git checkout <prior> -- <paths>``; HEAD does not move);
+    * removes every such untracked path that the target tree added and the
+      prior tree lacks;
+    * re-reads the status and reports what remains. Residual TRACKED entries
+      mean the tree could not be proven restored (the caller fails the
+      rollback loudly); residual untracked entries are reported only -- an
+      unknown untracked file is never deleted.
+    """
+    directory = pre.directory
+    residual = _rollback_residual_lines(pre)
+    if not residual:
+        return _TreeRestoreReport((), (), (), ())
+    prior_tree = _tree_paths(directory, pre.commit)
+    target_tree = _tree_paths(directory, target_commit) if target_commit else frozenset()
+    restore: list[str] = []
+    remove: list[str] = []
+    for line in residual:
+        paths = _status_paths(line)
+        if paths is None or len(paths) != 1 or prior_tree is None:
+            continue
+        path = paths[0]
+        if line[:2] == "??":
+            if path not in prior_tree and target_tree is not None and path in target_tree:
+                remove.append(path)
+        elif path in prior_tree:
+            restore.append(path)
+
+    removed: list[str] = []
+    for path in remove:
+        if _remove_checkout_file(directory, path):
+            removed.append(path)
+    if removed:
+        state.append_progress(
+            f"rollback removed {len(removed)} target-added path(s) absent from "
+            f"{pre.commit[:12]}: " + "; ".join(removed[:8])
+        )
+    if restore:
+        # Chunked so a large release diff cannot overflow the Windows
+        # command line (32 KiB), never one process per file.
+        chunk: list[str] = []
+        chunk_bytes = 0
+        for path in [*restore, None]:
+            if path is None or (chunk and chunk_bytes + len(path) > 12000):
+                _run(
+                    [
+                        "git",
+                        "-C",
+                        str(directory),
+                        "-c",
+                        "core.quotePath=false",
+                        "checkout",
+                        pre.commit,
+                        "--",
+                        *chunk,
+                    ],
+                    timeout=300,
+                )
+                chunk, chunk_bytes = [], 0
+            if path is not None:
+                chunk.append(path)
+                chunk_bytes += len(path) + 3
+        state.append_progress(
+            f"rollback restored {len(restore)} path(s) from {pre.commit[:12]} that the "
+            "whole-commit checkout left behind: " + "; ".join(restore[:8])
+        )
+    head = _git_head(directory)
+    if head != pre.commit:
+        raise HermesUpgradeError(
+            f"rollback tree restore moved HEAD to {head}, expected {pre.commit}"
+        )
+
+    remaining = _rollback_residual_lines(pre)
+    residual_tracked = tuple(line for line in remaining if line[:2] != "??")
+    residual_untracked = tuple(line for line in remaining if line[:2] == "??")
+    return _TreeRestoreReport(
+        restored=tuple(restore),
+        removed=tuple(removed),
+        residual_tracked=residual_tracked,
+        residual_untracked=residual_untracked,
+    )
+
+
 def _restamp_managed_plugin(plugin_src: Path, directory: Path) -> None:
     """Idempotently re-stamp ONLY the managed plugin subtree.
 
@@ -2140,8 +2554,16 @@ def _rollback_editable(
     venv_python: Path,
     primary: HermesUpgradeError,
     marker_prestate: _MarkerPreState | None = None,
+    *,
+    target_commit: str | None = None,
 ) -> None:
     """Restore the exact pre-update editable state, then re-raise (F3).
+
+    Restores the prior commit AND its full tree (:func:`_restore_prior_tree`),
+    then the managed plugin, the editable install, and the marker. The tree
+    verification result is recorded in the job; residual tracked dirt fails
+    the rollback AFTER the install/plugin/marker restore so as much as
+    possible is back in place before the loud failure.
 
     Records the primary and rollback outcomes as distinct progress phases.
     Always raises: on a successful rollback it raises a HermesUpgradeError
@@ -2156,10 +2578,33 @@ def _rollback_editable(
         phase_error = exc
     try:
         _restore_editable_commit(pre)
+        tree = _restore_prior_tree(pre, target_commit)
+        if tree.residual_tracked:
+            state.append_progress(
+                "rollback tree verification FAILED: tracked changes remain outside "
+                "the managed paths: " + "; ".join(tree.residual_tracked[:8])
+            )
+        else:
+            state.append_progress(
+                "rollback tree verified: working tree matches "
+                f"{pre.commit[:12]} apart from the managed paths "
+                f"(restored {len(tree.restored)}, removed {len(tree.removed)})"
+            )
+        if tree.residual_untracked:
+            state.append_progress(
+                "rollback left untracked paths outside the managed paths in place "
+                "(never deleted; the next update will refuse until they are "
+                "removed): " + "; ".join(tree.residual_untracked[:8])
+            )
         _restamp_managed_plugin(plugin_src, pre.directory)
         _reinstall_editable(venv_python, pre.directory)
         if marker_prestate is not None:
             _restore_active_marker(marker_prestate)
+        if tree.residual_tracked:
+            raise HermesUpgradeError(
+                "rollback could not restore the prior tree; tracked changes remain "
+                "outside the managed paths: " + "; ".join(tree.residual_tracked[:8])
+            )
     except Exception as failure:
         rollback_error = _as_upgrade_error(failure, "rollback failed")
         try:
@@ -2173,7 +2618,7 @@ def _rollback_editable(
     try:
         state.set_phase(
             "rolled_back",
-            note="restored prior commit, editable install, and managed plugin",
+            note="restored prior commit and tree, editable install, and managed plugin",
         )
     except Exception as exc:
         phase_error = phase_error or exc
@@ -2837,12 +3282,21 @@ def _run_update_job_locked(
             _require_unrewritten_git_url(editable_directory, fetch_origin)
             # Pre-activation gates + rollback pre-state capture. Migration may
             # have initialized the contained target, but the operator checkout
-            # and active install are still untouched here.
+            # and active install are still untouched here. The dirty baseline
+            # (already vetted by the clean gate above) is what the
+            # post-checkout gate and the rollback tree restore compare against.
+            baseline_lines = tuple(_dirty_checkout_lines(editable_directory))
             pre_state = (
-                _capture_editable_prestate(editable_directory)
+                _capture_editable_prestate(editable_directory, baseline=baseline_lines)
                 if migration_source is None
                 else None
             )
+            if pre_state is not None:
+                prior_head: str | None = pre_state.commit
+            elif _is_unborn_checkout(editable_directory):
+                prior_head = None
+            else:
+                prior_head = _git_head(editable_directory)
             marker_prestate = (
                 _capture_active_marker_prestate()
                 if migration_source is None
@@ -2915,7 +3369,18 @@ def _run_update_job_locked(
             install_attempted = False
             try:
                 _git_detach_checkout(editable_directory, expected_commit)
-                _ensure_clean_checkout(editable_directory)
+                # Judge only what is NEW since the pre-mutation baseline, and
+                # never the checkout's own doing (ignore-case collisions,
+                # CR-only rewrites, paths the checkout itself wrote).
+                _ensure_clean_checkout(
+                    editable_directory,
+                    baseline=baseline_lines,
+                    changed_paths=_forward_changed_paths(
+                        editable_directory,
+                        prior_head,
+                        expected_commit,
+                    ),
+                )
                 _restamp_managed_plugin(plugin_src, editable_directory)
                 install_attempted = True
                 _pip_install_editable(venv_python, editable_directory)
@@ -2958,6 +3423,7 @@ def _run_update_job_locked(
                     venv_python,
                     primary,
                     marker_prestate,
+                    target_commit=expected_commit,
                 )
                 raise  # unreachable: rollback helpers always raise
         elif mode["mode"] == "pypi":
