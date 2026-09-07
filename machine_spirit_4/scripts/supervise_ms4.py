@@ -10,6 +10,11 @@ from pathlib import Path
 
 from runtime_common import MS4, ROOT, is_port_listening, venv_python
 
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from machine_spirit_4.retention import retention_schedule_seconds, run_retention_cycle
+
 # Idempotent bring-up + watchdog for MS3 + MS4 (gateway/MCP).
 # Launched in user context by the HiveMind Oracle Startup shortcut. Watch mode
 # keeps the correct Hermes/WSL/desktop identity while checking every five
@@ -32,6 +37,25 @@ def log_path() -> Path:
 def write_log(message: str) -> None:
     with log_path().open("a", encoding="utf-8") as handle:
         handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {message}\n")
+
+
+def enforce_retention() -> dict:
+    """Reuse the watchdog cadence; never expose file names or payloads in its log."""
+    try:
+        report = run_retention_cycle(
+            root=ROOT,
+            manifest_path=MS4 / "retention_manifest.json",
+        )
+    except Exception:
+        report = {"ok": False, "reason": "cycle_failed", "actions": []}
+    actions = list(report.get("actions") or [])
+    failed = sum(1 for action in actions if action.get("success") is False)
+    outcome = report.get("status") or report.get("reason") or "unknown"
+    write_log(
+        f"retention outcome={outcome} actions={len(actions)} "
+        f"failures={failed} disk_pressure={bool(report.get('disk_pressure'))}"
+    )
+    return report
 
 
 def hivemind_health_status() -> str:
@@ -105,6 +129,7 @@ def open_oracle_ui_once() -> None:
 
 def supervise_once() -> int:
     SUPERVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    retention_report = enforce_retention()
 
     python = venv_python()
     if not python.exists():
@@ -112,6 +137,11 @@ def supervise_once() -> int:
         return 1
 
     down = down_ports()
+    if retention_report.get("disk_pressure") and down:
+        write_log(
+            f"ABORT: retention disk pressure blocks launch of {len(down)} missing service(s)"
+        )
+        return 1
 
     write_log(
         "down=[{}] hivemind /v1/health={} -> start_ms4 --skip-validation".format(
@@ -166,7 +196,8 @@ def main() -> int:
     if not acquire_watch_mutex():
         return 0
 
-    interval = max(30, args.interval_seconds)
+    retention_interval = retention_schedule_seconds(MS4 / "retention_manifest.json")
+    interval = max(30, min(args.interval_seconds, retention_interval))
     SUPERVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
     write_log(f"user watchdog started interval_seconds={interval}")
     while True:

@@ -53,11 +53,14 @@ def _isolate_voice_turn_last_good():
 def _isolate_gateway_caches(_isolate_gateway_audit_log: Path):
     from machine_spirit_4.gateway import context as ctx_module
     from machine_spirit_4.double_agent import model_picker as picker_module
+    from machine_spirit_4.gateway.quartermaster import catalog as catalog_module
 
     ctx_module.clear_grounding_cache()
+    catalog_module.reset_catalog_cache_for_tests()
     if hasattr(picker_module, "_clear_cache_for_tests"):
         picker_module._clear_cache_for_tests()
     yield
     ctx_module.clear_grounding_cache()
+    catalog_module.reset_catalog_cache_for_tests()
     if hasattr(picker_module, "_clear_cache_for_tests"):
         picker_module._clear_cache_for_tests()

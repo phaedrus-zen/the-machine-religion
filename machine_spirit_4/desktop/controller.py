@@ -258,7 +258,9 @@ class DesktopController:
             "action_id": response["action_id"],
             "action": action,
             "ok": response["ok"],
-            "payload_excerpt": str({k: v for k, v in payload.items() if k != "text"})[:500],
+            "parameter_names": sorted(
+                key for key in ("x", "y", "keys", "seconds") if key in payload
+            ),
         })
         return response
 

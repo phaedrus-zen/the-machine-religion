@@ -18,17 +18,7 @@ class _Runner:
 
 def test_rest_starts_next_inorder_chunk_before_first_audio_delivery(monkeypatch):
     """Default six-worker REST keeps chunk 2 on the pre-delivery priority path."""
-    monkeypatch.setenv("MS4_VOICE_FIRST_CHUNK_DEADLINE_S", "0")
-    monkeypatch.setenv("MS4_VOICE_SMART_REFLEX", "0")
-    monkeypatch.setenv("MS4_VOICE_EGG_HONORABLE", "0")
-    monkeypatch.setenv("MS4_VOICE_RUNTIME_QA", "0")
-    monkeypatch.setattr(voice, "TTS_FILTER_ENABLED", False)
-    monkeypatch.setattr(
-        voice,
-        "check_voice_ready",
-        lambda *_args, **_kwargs: {"voice_input_ready": True},
-    )
-    monkeypatch.setattr(voice, "_identify_speaker_async", lambda *_args, **_kwargs: None)
+    _configure_voice_test(monkeypatch)
 
     pieces = (
         "The first chunk is ready.",
@@ -225,6 +215,20 @@ def test_rest_starts_next_inorder_chunk_before_first_audio_delivery(monkeypatch)
 
 
 def _configure_voice_test(monkeypatch) -> None:
+    monkeypatch.setenv("MS4_VOICE_TTS_CAPACITY", "2")
+    proof = voice._voice_rest_concurrency_verdict(
+        single_ms=2000,
+        concurrent_wall_ms=2200,
+        concurrent_requests=2,
+        valid_audio_results=2,
+        warmup_audio_valid=True,
+        single_audio_valid=True,
+        provenance_sample_count=4,
+        provenance_non_cloud_count=4,
+        location_policy="peer_only",
+    )
+    assert proof["passed"] is True
+    assert voice._record_voice_rest_concurrency_observation(proof) == 2
     monkeypatch.setenv("MS4_VOICE_FIRST_CHUNK_DEADLINE_S", "0")
     monkeypatch.setenv("MS4_VOICE_SMART_REFLEX", "0")
     monkeypatch.setenv("MS4_VOICE_EGG_HONORABLE", "0")
@@ -626,12 +630,14 @@ def test_cancellation_after_three_leads_start_emits_no_audio(monkeypatch):
 
     turn = threading.Thread(target=run_turn, name="rest-cancel-capacity-two-leads")
     turn.start()
-    for index in (0, 1):
-        assert started_events[index].wait(timeout=5)
-    assert started_events[2].is_set() is False
-    assert started_events[3].is_set() is False
-    cancel_event.set()
-    turn.join(timeout=5)
+    try:
+        for index in (0, 1):
+            assert started_events[index].wait(timeout=5)
+        assert started_events[2].is_set() is False
+        assert started_events[3].is_set() is False
+    finally:
+        cancel_event.set()
+        turn.join(timeout=5)
     assert not turn.is_alive()
     assert sorted(started) == [0, 1]
     assert [payload["index"] for event, payload in events if event == "chunk_scheduled"] == [

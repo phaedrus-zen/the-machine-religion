@@ -30,6 +30,7 @@ from typing import Any
 
 from .blackboard import Blackboard, default_blackboard
 from .runner import JobRunner, default_runner
+from .schemas import result_matches_job_identity
 
 
 _ANTI_HALLUCINATION_RULES = (
@@ -69,6 +70,7 @@ def face_lobe_turn_start(
     conversation_id: str,
     user_message: str,
     runner: JobRunner | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     """Mark the start of a Face Lobe turn.
 
@@ -80,7 +82,11 @@ def face_lobe_turn_start(
     excerpt = (user_message or "").strip().replace("\n", " ")
     if len(excerpt) > 200:
         excerpt = excerpt[:197] + "..."
-    outcome = active_runner.bump_revision(conversation_id, user_message_excerpt=excerpt)
+    outcome = active_runner.bump_revision(
+        conversation_id,
+        user_message_excerpt=excerpt,
+        turn_id=turn_id,
+    )
     return outcome
 
 
@@ -104,16 +110,21 @@ def _bounded_structured_text(text: Any, *, limit: int) -> str:
     return value
 
 
-def _verified_success_text(result: dict[str, Any] | None) -> str:
-    if not isinstance(result, dict):
+def _verified_success_text(
+    job: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> str:
+    if not result_matches_job_identity(job, result):
         return ""
+    assert isinstance(result, dict)
     if str(result.get("status") or "").lower() != "success":
         return ""
     return str(result.get("text") or result.get("summary") or "").strip()
 
 
 def _terminal_status_text(job: dict[str, Any], result: dict[str, Any] | None) -> str:
-    if isinstance(result, dict):
+    if result_matches_job_identity(job, result):
+        assert isinstance(result, dict)
         summary = _single_line(result.get("summary") or "", limit=400)
         status = str(result.get("status") or "unknown").strip() or "unknown"
         if summary:
@@ -203,7 +214,7 @@ def build_face_lobe_context_block(
         jid = job.get("job_id", "?")
         state = str(job.get("state", "?"))
         result = bb.get_result(jid) if hasattr(bb, "get_result") else None
-        verified_text = _verified_success_text(result) if state == "completed" else ""
+        verified_text = _verified_success_text(job, result) if state == "completed" else ""
         if verified_text:
             verified_completed.append((job, verified_text))
         else:

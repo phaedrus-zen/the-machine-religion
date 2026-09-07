@@ -4,8 +4,8 @@ Two layers of test:
 
 1. ``chat()`` integration via the patchable ``_try_quartermaster_inline``
    seam: inline-hit skips Depth and Face inference and emits the
-   authoritative payload directly; depth-fallback (None) dispatches Depth
-   exactly as before.
+   authoritative payload directly; malformed or unadmitted mappings are
+   refused without a Depth or Face effect.
 2. ``_try_quartermaster_inline`` end-to-end against a fake MCP server
    (catalog tools/list + tool exec) with an injected ethics evaluator,
    proving a real read-only query runs inline and surfaces a block.
@@ -172,7 +172,7 @@ def _patch_deep_route(monkeypatch):
     monkeypatch.setattr(
         "machine_spirit_4.gateway.hermes_runner.router_route",
         lambda message: type("R", (), {
-            "kind": "deep", "cleaned_message": message, "goal": "g",
+            "kind": "deep", "cleaned_message": message, "goal": message,
             "to_dict": lambda self: {"kind": "deep"},
         })(),
     )
@@ -330,6 +330,7 @@ def test_inline_success_preserves_two_gpu_records_without_face_inference(tmp_pat
             _TWO_GPU_BLOCK,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": _INLINE_TOOL,
                 "inline_result": _TWO_GPU_RESULT,
@@ -356,6 +357,64 @@ def test_inline_success_preserves_two_gpu_records_without_face_inference(tmp_pat
     assert resp["api_calls"] == 0
     assert "Depth Lobe" not in resp["text"]
     assert "depth_lobe_dispatched" not in resp["grounding_source"]
+
+
+def test_unreceipted_result_shaped_inline_outcome_has_zero_effects(
+    tmp_path,
+    monkeypatch,
+):
+    runner = _runner(tmp_path, monkeypatch)
+    query = "what gpus are available"
+    monkeypatch.setattr(
+        runner,
+        "_try_quartermaster_inline",
+        lambda _message: (
+            _TWO_GPU_BLOCK,
+            {
+                "schema": "Ms4ToolRouteDecision.v1",
+                "verdict": "inline",
+                "query": query,
+                "inline_tool": _INLINE_TOOL,
+                "inline_executed": True,
+                "inline_executed_tool": _INLINE_TOOL,
+                "inline_result": _TWO_GPU_RESULT,
+                "inline_result_text": _TWO_GPU_TEXT,
+            },
+        ),
+    )
+    _patch_deep_route(monkeypatch)
+    monkeypatch.setattr(runner, "_try_cluster_time", lambda: None)
+    monkeypatch.setattr(
+        hermes_runner_module,
+        "_catalog_proves_inline_execute",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        hermes_runner_module,
+        "face_lobe_turn_start",
+        lambda **_kwargs: {"revision": {"revision_id": 1}, "marked_stale": []},
+    )
+
+    class _NoEffectRunner:
+        def list(self, **_kwargs):
+            return []
+
+        def submit(self, _envelope):
+            raise AssertionError("unreceipted inline outcome dispatched Depth")
+
+    monkeypatch.setattr(hermes_runner_module, "default_runner", lambda: _NoEffectRunner())
+
+    response = runner.chat(query, session_id="unreceipted-inline", model="m")
+
+    assert response["api_calls"] == 0
+    assert response["dispatched_job"] is None
+    assert response["quartermaster_inline"] is False
+    assert response["tool_trace"] == []
+    assert response["metrics"]["block_reason"] == "admission_refused"
+    assert "inline execution receipt missing" in response["text"]
+    assert runner.face_lobe_chat.calls == []
+    assert runner.face_lobe_chat.authoritative_calls == []
+    assert runner.face_lobe_chat._sessions == {}
 
 
 class _ModelTrapFaceLobeChat(FaceLobeChat):
@@ -430,6 +489,7 @@ def test_inline_stream_uses_guard_once_commits_truthful_history_and_zero_api_cal
             _TWO_GPU_BLOCK,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": _INLINE_TOOL,
                 "inline_result": _TWO_GPU_RESULT,
@@ -536,6 +596,7 @@ def test_voice_inline_verbose_oracle_status_is_one_bounded_grounded_sentence(
             inline_block,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": executed_tool,
                 "inline_executed_tool": executed_tool,
@@ -621,6 +682,7 @@ def test_inline_public_trace_reports_actual_tool_metadata_without_private_fields
             block,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": "hivemind.cluster.summary@v1",
                 "inline_executed_tool": executed_tool,
@@ -696,6 +758,7 @@ def test_inline_stream_callback_false_cancels_without_history_or_followup_chunks
             _TWO_GPU_BLOCK,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": _INLINE_TOOL,
                 "inline_executed_tool": _INLINE_TOOL,
@@ -751,6 +814,7 @@ def test_inline_wrapper_prefers_actual_executed_tool_identity(tmp_path, monkeypa
             block,
             {
                 "verdict": "inline",
+                "inline_invoked": True,
                 "inline_executed": True,
                 "inline_tool": selected_tool,
                 "inline_executed_tool": executed_tool,
@@ -813,7 +877,7 @@ def test_pre_cancelled_inline_turn_emits_nothing_and_changes_no_history(tmp_path
     assert state.messages == before
 
 
-def test_depth_fallback_when_inline_returns_none(tmp_path, monkeypatch):
+def test_malformed_depth_mapping_is_refused_without_effects(tmp_path, monkeypatch):
     runner = _runner(tmp_path, monkeypatch)
     monkeypatch.setattr(
         runner, "_try_quartermaster_inline",
@@ -828,10 +892,12 @@ def test_depth_fallback_when_inline_returns_none(tmp_path, monkeypatch):
     )
 
     resp = runner.chat("refactor the whole module and run the tests", session_id="s2", model="m")
-    # Depth path taken: a job was dispatched (or attempted), inline false.
     assert resp["quartermaster_inline"] is False
-    assert resp["dispatched_job"] is not None
+    assert resp["dispatched_job"] is None
     assert resp["quartermaster"] == {"verdict": "depth", "reason": "needs args"}
+    assert resp["api_calls"] == 0
+    assert resp["metrics"]["block_reason"] == "admission_refused"
+    assert runner.face_lobe_chat.calls == []
 
 
 def test_inline_helper_exception_is_fail_soft(tmp_path, monkeypatch):
@@ -1042,13 +1108,16 @@ def test_confirmation_depth_outcome_submits_offered_goal_once(tmp_path, monkeypa
         "machine_spirit_4.gateway.hermes_runner.build_grounded_user_message",
         lambda message, _url: (message, "none"),
     )
-    offered_goal = "investigate the open cluster issue in the background"
+    offered_goal = (
+        "Explain why a 35B Depth lobe might outperform a 4B Face lobe. "
+        "Give the recommendation, mechanism, tradeoffs, and a concrete example."
+    )
     runner._pending_deep_goal["confirm-depth"] = offered_goal
     quartermaster_calls: list[str] = []
 
     def depth_outcome(message):
         quartermaster_calls.append(message)
-        return None, _valid_depth_outcome(message)
+        return None, _valid_none_outcome(message)
 
     monkeypatch.setattr(runner, "_try_quartermaster_inline", depth_outcome)
     submitted: list[Any] = []
@@ -1256,6 +1325,60 @@ def _seed_persisted_exact_read_missing_job(
     return job_id
 
 
+def test_persisted_exact_read_refuses_foreign_voice_turn_result() -> None:
+    job_id = double_agent_safety.new_job_id()
+    owner_turn_id = "ms4-turn-aaaaaaaaaaaaaaaa"
+    envelope = JobEnvelope(
+        job_id=job_id,
+        parent_conversation_id="conv-turn-owner",
+        conversation_revision_id=1,
+        background_lobe_type="deep_chat",
+        user_visible_goal="Use hivemind.app.get@v1.",
+        internal_goal="Use hivemind.app.get@v1.",
+        resource_request=ResourceRequest(
+            enabled_toolsets=["mcp-hivemind-exact-read"],
+        ),
+        turn_id=owner_turn_id,
+    )
+    job = envelope.to_dict()
+    job.update(state="completed", finished_at="2026-07-11T06:00:00+00:00")
+    tool_call_id = "call-foreign-turn"
+    result = JobResult(
+        job_id=job_id,
+        status="success",
+        summary="FOREIGN_TURN_SUMMARY",
+        text="FOREIGN_TURN_PRIVATE_RESULT",
+        evidence=[
+            {
+                "kind": "verified_tool_result",
+                "tool": "hivemind_exact_read",
+                "tool_call_id": tool_call_id,
+                "evidence_ref": f"tool_call:{tool_call_id}",
+                "result_excerpt": json.dumps(
+                    {
+                        "status": "missing_required_arguments",
+                        "success": False,
+                        "canonical_tool": "hivemind.app.get@v1",
+                        "missing_required_keys": ["id"],
+                    },
+                    separators=(",", ":"),
+                ),
+            }
+        ],
+        actions_taken=[
+            {"tool": "hivemind_exact_read", "tool_call_id": tool_call_id}
+        ],
+        confidence="high",
+        conversation_revision_id=1,
+        turn_id="ms4-turn-bbbbbbbbbbbbbbbb",
+    ).to_dict()
+
+    assert (
+        hermes_runner_module._persisted_exact_read_missing_source(job, result)
+        is None
+    )
+
+
 def _patch_persisted_continuation_catalog(
     monkeypatch,
     *tool_specs: dict[str, Any],
@@ -1436,6 +1559,10 @@ def test_explicit_single_exact_read_narrows_depth_envelope_to_bridge_only(
     query = "Oracle, use hivemind.app.get@v1 to show me one registered app."
     canonical_tool = "hivemind.app.get@v1"
     outcome = _exact_read_depth_outcome(query, canonical_tool=canonical_tool)
+    _patch_persisted_continuation_catalog(
+        monkeypatch,
+        {"name": canonical_tool, "required": ("id",)},
+    )
 
     runner, response, submitted, depth_picker_calls = _capture_depth_envelope(
         tmp_path,
@@ -1480,6 +1607,10 @@ def test_explicit_depth_model_wins_verbatim_for_strict_exact_read(
 ):
     query = "Oracle, use hivemind.app.get@v1 to show me one registered app."
     outcome = _exact_read_depth_outcome(query)
+    _patch_persisted_continuation_catalog(
+        monkeypatch,
+        {"name": "hivemind.app.get@v1", "required": ("id",)},
+    )
 
     _runner_instance, response, submitted, depth_picker_calls = _capture_depth_envelope(
         tmp_path,
@@ -1515,6 +1646,10 @@ def test_invalid_foreground_model_falls_back_to_depth_picker_for_exact_read(
 ):
     query = "Oracle, use hivemind.app.get@v1 to show me one registered app."
     outcome = _exact_read_depth_outcome(query)
+    _patch_persisted_continuation_catalog(
+        monkeypatch,
+        {"name": "hivemind.app.get@v1", "required": ("id",)},
+    )
 
     _runner_instance, response, submitted, depth_picker_calls = _capture_depth_envelope(
         tmp_path,
@@ -1553,7 +1688,7 @@ def test_explicit_single_gated_tool_uses_background_only_gated_bridge(
         monkeypatch,
         query=query,
         outcome=outcome,
-        route_kind="direct",
+        route_kind="deep",
     )
 
     assert len(submitted) == 1
@@ -1603,7 +1738,7 @@ def test_natural_deterministic_gated_result_uses_gated_toolset_and_warm_face_mod
         monkeypatch,
         query=query,
         outcome=outcome,
-        route_kind="direct",
+        route_kind="deep",
     )
 
     assert len(submitted) == 1
@@ -1663,7 +1798,7 @@ def test_real_cascade_natural_service_result_feeds_exact_gated_directive(
         monkeypatch,
         query=query,
         outcome=outcome,
-        route_kind="direct",
+        route_kind="deep",
     )
 
     assert len(submitted) == 1
@@ -1674,7 +1809,7 @@ def test_real_cascade_natural_service_result_feeds_exact_gated_directive(
     assert '"service_name": "menta_human_bridge"' in envelope.internal_goal
 
 
-def test_natural_embeddings_gated_result_remains_broad_and_uses_picker(
+def test_natural_embeddings_gated_result_is_refused_without_broad_fallback(
     tmp_path,
     monkeypatch,
 ):
@@ -1699,14 +1834,12 @@ def test_natural_embeddings_gated_result_remains_broad_and_uses_picker(
         route_kind="deep",
     )
 
-    assert len(submitted) == 1
-    envelope = submitted[0]
-    assert envelope.resource_request.enabled_toolsets != [
-        "mcp-hivemind-exact-gated"
-    ]
-    assert envelope.resource_request.model_override == "picked-depth-model"
-    assert len(depth_picker_calls) == 1
-    assert response["depth_lobe_model"]["source"] == "loaded"
+    assert submitted == []
+    assert depth_picker_calls == []
+    assert response["dispatched_job"] is None
+    assert response["depth_lobe_model"] is None
+    assert response["api_calls"] == 0
+    assert response["metrics"]["block_reason"] == "admission_refused"
 
 
 def test_natural_strict_gated_explicit_depth_override_wins(
@@ -1729,7 +1862,7 @@ def test_natural_strict_gated_explicit_depth_override_wins(
         monkeypatch,
         query=query,
         outcome=outcome,
-        route_kind="direct",
+        route_kind="deep",
         depth_model="llama3.1:8b",
     )
 
@@ -1758,7 +1891,7 @@ def test_natural_strict_gated_invalid_face_model_falls_back_to_picker(
         monkeypatch,
         query=query,
         outcome=outcome,
-        route_kind="direct",
+        route_kind="deep",
         face_model="",
     )
 
@@ -1932,7 +2065,7 @@ def test_real_deep_service_conflict_vetoes_all_submission(tmp_path, monkeypatch)
     assert runner.face_lobe_chat.calls == []
 
 
-def test_real_unrelated_deep_prompt_still_submits_once(tmp_path, monkeypatch):
+def test_real_unrelated_deep_prompt_is_refused_without_broad_fallback(tmp_path, monkeypatch):
     from machine_spirit_4.gateway.quartermaster import ToolRouter
     from machine_spirit_4.gateway.quartermaster import router as qm_router
 
@@ -1975,11 +2108,12 @@ def test_real_unrelated_deep_prompt_still_submits_once(tmp_path, monkeypatch):
     response = runner.chat(query, session_id="deep-control", model="face-model")
 
     assert response["router"]["kind"] == "deep"
-    assert len(submitted) == 1
-    assert submitted[0].resource_request.enabled_toolsets != [
-        "mcp-hivemind-exact-gated"
-    ]
-    assert response["dispatched_job"]["job_id"] == submitted[0].job_id
+    assert submitted == []
+    assert response["dispatched_job"] is None
+    assert response["depth_lobe_model"] is None
+    assert response["api_calls"] == 0
+    assert response["metrics"]["block_reason"] == "admission_refused"
+    assert runner.face_lobe_chat.calls == []
 
 
 @pytest.mark.parametrize(
@@ -2137,7 +2271,10 @@ def test_final_pre_submit_cancellation_seam_submits_no_job(
     runner = _runner(tmp_path, monkeypatch)
     _patch_deep_route(monkeypatch)
     monkeypatch.setattr(runner, "_try_cluster_time", lambda: None)
-    query = "investigate this open-ended issue before submitting background work"
+    query = (
+        "Explain why a 35B Depth lobe might outperform a 4B Face lobe. "
+        "Give the recommendation, mechanism, tradeoffs, and a concrete example."
+    )
     monkeypatch.setattr(
         runner,
         "_try_quartermaster_inline",
@@ -2333,7 +2470,7 @@ def test_persisted_exact_read_continuation_accepts_only_bounded_key_forms(
         "another-canonical",
     ],
 )
-def test_persisted_exact_read_continuation_rejections_keep_normal_routing(
+def test_persisted_exact_read_continuation_rejections_have_zero_effects(
     tmp_path,
     monkeypatch,
     case,
@@ -2426,16 +2563,18 @@ def test_persisted_exact_read_continuation_rejections_keep_normal_routing(
         route_kind="deep",
     )
 
-    runner.chat(literal_message, session_id=conversation_id, model="face-model")
+    response = runner.chat(
+        literal_message,
+        session_id=conversation_id,
+        model="face-model",
+    )
 
     assert quartermaster_calls == [literal_message]
-    assert len(persisted_runner.submitted) == 1
-    envelope = persisted_runner.submitted[0]
-    assert envelope.resource_request.enabled_toolsets != [
-        "mcp-hivemind-exact-read"
-    ]
-    assert "complete the prior exact read" not in envelope.internal_goal
-    assert runner.face_lobe_chat.calls[0]["message"] == literal_message
+    assert persisted_runner.submitted == []
+    assert response["dispatched_job"] is None
+    assert response["api_calls"] == 0
+    assert response["metrics"]["block_reason"] == "admission_refused"
+    assert runner.face_lobe_chat.calls == []
     if source_job_id is not None:
         assert _persisted_continuation_links(board, source_job_id) == []
 
@@ -2528,17 +2667,18 @@ def test_persisted_exact_read_source_is_consumed_across_fresh_runner_view(
         route_kind="deep",
     )
 
-    second_runner.chat(
+    second_response = second_runner.chat(
         second_literal,
         session_id=conversation_id,
         model="face-model",
     )
 
     assert second_qm_calls == [second_literal]
-    assert len(fresh_persisted_runner.submitted) == 1
-    assert fresh_persisted_runner.submitted[0].resource_request.enabled_toolsets != [
-        "mcp-hivemind-exact-read"
-    ]
+    assert fresh_persisted_runner.submitted == []
+    assert second_response["dispatched_job"] is None
+    assert second_response["api_calls"] == 0
+    assert second_response["metrics"]["block_reason"] == "admission_refused"
+    assert second_runner.face_lobe_chat.calls == []
     assert len(_persisted_continuation_links(fresh_board, source_job_id)) == 1
 
 
@@ -2705,7 +2845,7 @@ def test_non_strict_quartermaster_outcomes_do_not_activate_exact_read_bridge(cas
     ) is None
 
 
-def test_normal_broad_depth_request_keeps_existing_toolsets_and_goal(
+def test_normal_broad_depth_request_is_refused_without_default_toolsets(
     tmp_path,
     monkeypatch,
 ):
@@ -2720,25 +2860,12 @@ def test_normal_broad_depth_request_keeps_existing_toolsets_and_goal(
         route_kind="deep",
     )
 
-    assert len(submitted) == 1
-    envelope = submitted[0]
-    assert envelope.resource_request.enabled_toolsets == [
-        "hermes-cli",
-        "mcp-hivemind",
-    ]
-    assert "mcp-hivemind-exact-read" not in envelope.resource_request.enabled_toolsets
-    assert envelope.resource_request.model_override == "picked-depth-model"
-    assert len(depth_picker_calls) == 1
-    assert depth_picker_calls[0]["envelope_override"] is None
-    assert response["depth_lobe_model"] == {
-        "schema": "Ms4DepthModel.v1",
-        "model_id": "picked-depth-model",
-        "source": "loaded",
-        "detail": "test depth picker",
-    }
-    assert response["depth_lobe_model"]["source"] != "foreground_reuse_exact_read"
-    assert envelope.internal_goal == query
-    assert envelope.user_visible_goal == "g"
+    assert submitted == []
+    assert depth_picker_calls == []
+    assert response["dispatched_job"] is None
+    assert response["depth_lobe_model"] is None
+    assert response["api_calls"] == 0
+    assert response["metrics"]["block_reason"] == "admission_refused"
 
 
 # ---------------------------------------------------------------------------
@@ -3401,7 +3528,9 @@ def test_inline_time_protocol_error_keeps_existing_date_grounding_lookup(
     assert response["quartermaster"]["inline_executed"] is False
     assert response["quartermaster_inline"] is False
     assert response["tool_trace"] == []
-    assert response["api_calls"] == 1
+    assert response["api_calls"] == 0
+    assert response["metrics"]["block_reason"] == "inline_terminal_failure"
+    assert runner.face_lobe_chat.calls == []
 
 
 def test_other_inline_tool_keeps_existing_registered_time_grounding_lookup(

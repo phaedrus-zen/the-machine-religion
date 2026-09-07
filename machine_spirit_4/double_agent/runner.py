@@ -409,6 +409,7 @@ class JobRunner:
                 ],
                 confidence="high",
                 conversation_revision_id=envelope.conversation_revision_id,
+                turn_id=envelope.turn_id,
             )
         )
         self.blackboard.update_job_state(
@@ -643,6 +644,7 @@ class JobRunner:
             if envelope is not None
             else int(snap.get("conversation_revision_id") or 1)
         )
+        turn_id = envelope.turn_id if envelope is not None else snap.get("turn_id")
         if result_excerpt:
             summary = (
                 f"{tool or 'Tool'} completed, but the Depth model final answer timed out. "
@@ -660,6 +662,7 @@ class JobRunner:
                 ],
                 confidence="low",
                 conversation_revision_id=revision,
+                turn_id=turn_id,
             )
             self.blackboard.insert_result(result)
             self.blackboard.insert_event(
@@ -692,6 +695,7 @@ class JobRunner:
             actions_taken=[{"tool": tool or None}],
             confidence="low",
             conversation_revision_id=revision,
+            turn_id=turn_id,
         )
         self.blackboard.insert_result(result)
         self.blackboard.insert_event(
@@ -920,10 +924,17 @@ class JobRunner:
                 return True, "classifier"
         return False, "none"
 
-    def bump_revision(self, conversation_id: str, *, user_message_excerpt: str = "") -> dict[str, Any]:
+    def bump_revision(
+        self,
+        conversation_id: str,
+        *,
+        user_message_excerpt: str = "",
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
         revision = self.blackboard.bump_revision(
             conversation_id,
             user_message_excerpt=user_message_excerpt,
+            turn_id=turn_id,
         )
         # May 30 2026: auto-staling is OFF by default. Deep jobs now run
         # to completion regardless of subsequent turns, and the system

@@ -12,6 +12,7 @@ contacted in this suite.
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import types
@@ -687,7 +688,16 @@ def test_depth_dispatch_envelope_includes_prior_face_context(monkeypatch, tmp_pa
         model_id="depth-model",
         to_dict=lambda: {"model_id": "depth-model", "source": "test"},
     ))
-    monkeypatch.setattr(hr, "face_lobe_turn_start", lambda **_k: {"revision": {"revision_id": 7}})
+    monkeypatch.setattr(
+        hr,
+        "face_lobe_turn_start",
+        lambda **kwargs: {
+            "revision": {
+                "revision_id": 7,
+                "turn_id": kwargs.get("turn_id"),
+            },
+        },
+    )
     captured = {}
 
     class _CapturingRunner:
@@ -703,7 +713,13 @@ def test_depth_dispatch_envelope_includes_prior_face_context(monkeypatch, tmp_pa
         lambda message: (None, _exact_read_outcome(message)),
     )
 
-    response = runner.chat(EXACT_READ_GOAL, session_id="s-prior", model="face-model")
+    turn_id = "ms4-turn-0123456789abcdef"
+    response = runner.chat(
+        EXACT_READ_GOAL,
+        session_id="s-prior",
+        model="face-model",
+        turn_id=turn_id,
+    )
 
     envelope = captured["envelope"]
     assert envelope.prior_context == [
@@ -712,6 +728,12 @@ def test_depth_dispatch_envelope_includes_prior_face_context(monkeypatch, tmp_pa
     ]
     assert EXACT_READ_GOAL not in str(envelope.prior_context)
     assert response["depth_lobe_prior_context_count"] == 2
+    assert envelope.conversation_revision_id == 7
+    assert envelope.turn_id == turn_id
+    assert response["turn_id"] == turn_id
+    assert response["revision_id"] == 7
+    assert response["face_lobe"]["revision"]["turn_id"] == turn_id
+    assert response["dispatched_job"]["job_id"] == envelope.job_id
 
 
 EXACT_READ_CANONICAL = "hivemind.app.get@v1"
@@ -1191,6 +1213,8 @@ def test_accepted_exact_depth_route_submits_once_with_exact_toolset(monkeypatch,
 
 def test_accepted_direct_exact_wrapper_is_one_handler_call(monkeypatch, tmp_path):
     counters = _SeamCounters()
+    audit_events = []
+    sentinel = "DO_NOT_PERSIST_ARGUMENT_OR_RESULT"
     _patch_catalog(monkeypatch, _inline_catalog(EXACT_READ_CANONICAL))
     runner = Ms4HermesRunner(
         hermes_dir=str(tmp_path),
@@ -1205,18 +1229,34 @@ def test_accepted_direct_exact_wrapper_is_one_handler_call(monkeypatch, tmp_path
         counters.direct += 1
         assert tool_name == "hivemind_exact_read"
         assert args["canonical_tool"] == EXACT_READ_CANONICAL
-        return '{"ok":true}'
+        return f'{{"ok":true,"value":"{sentinel}"}}'
 
     monkeypatch.setitem(sys.modules, "model_tools", type("M", (), {
         "handle_function_call": staticmethod(fake_handle),
         "get_toolset_for_tool": staticmethod(lambda _name: "mcp-hivemind-exact-read"),
     }))
+    monkeypatch.setattr(
+        hr,
+        "append_event",
+        lambda event_type, data: audit_events.append({"event_type": event_type, **data}),
+    )
     result = runner.dispatch_hermes_tool(
         "hivemind_exact_read",
-        {"canonical_tool": EXACT_READ_CANONICAL, "arguments": {"id": "demo"}},
+        {"canonical_tool": EXACT_READ_CANONICAL, "arguments": {"id": sentinel}},
     )
     assert counters.inline == 0
     assert counters.submit == 0
     assert counters.direct == 1
-    assert result["result"] == '{"ok":true}'
+    assert sentinel in result["result"]
     assert result.get("refused") is not True
+    assert audit_events == [
+        {
+            "event_type": "hermes_tool_call",
+            "tool": "hivemind_exact_read",
+            "toolset": "mcp-hivemind-exact-read",
+            "argument_count": 2,
+            "result_present": True,
+            "result_type": "str",
+        }
+    ]
+    assert sentinel not in json.dumps(audit_events)

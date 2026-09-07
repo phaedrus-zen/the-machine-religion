@@ -31,8 +31,9 @@ def _snapshot(
     conversation_id: str = "conv-a",
     state: str = "completed",
     goal: str = "Explain the recovery plan",
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    snapshot = {
         "schema": "DoubleAgentJobEnvelope.v1",
         "job_id": job_id,
         "parent_conversation_id": conversation_id,
@@ -43,6 +44,9 @@ def _snapshot(
         "state": state,
         "is_stale": False,
     }
+    if turn_id is not None:
+        snapshot["turn_id"] = turn_id
+    return snapshot
 
 
 def _result(
@@ -50,8 +54,9 @@ def _result(
     *,
     status: str = "success",
     text: str = "Complete verified Depth answer.",
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "schema": "DoubleAgentJobResult.v1",
         "job_id": job_id,
         "status": status,
@@ -60,6 +65,9 @@ def _result(
         "confidence": "high",
         "conversation_revision_id": 1,
     }
+    if turn_id is not None:
+        result["turn_id"] = turn_id
+    return result
 
 
 class _FakeDepthRunner:
@@ -226,9 +234,10 @@ def test_runner_delivers_verified_success_once_to_exact_conversation(
     face = FaceLobeChat(hivemind_url="http://hive.test:6089")
     face.get_or_create_session("conv-a", "face-test")
     job_id = _job_id()
+    turn_id = "ms4-turn-0123456789abcdef"
     depth = _FakeDepthRunner(
-        {job_id: _snapshot(job_id)},
-        {job_id: _result(job_id, text="Full answer for the operator.")},
+        {job_id: _snapshot(job_id, turn_id=turn_id)},
+        {job_id: _result(job_id, text="Full answer for the operator.", turn_id=turn_id)},
     )
     monkeypatch.setattr(hermes_module, "default_runner", lambda: depth)
     runner = _runner(tmp_path, face)
@@ -243,11 +252,49 @@ def test_runner_delivers_verified_success_once_to_exact_conversation(
     assert first["already_bound"] is False
     assert first["job_id"] == job_id
     assert first["conversation_id"] == "conv-a"
+    assert first["turn_id"] == turn_id
     assert first["result"]["text"] == "Full answer for the operator."
     assert second["delivery_kind"] == "answer"
     assert second["history_bound"] is True
     assert second["already_bound"] is True
     assert len(face._sessions["conv-a"].messages) == count_after_first
+
+
+@pytest.mark.parametrize(
+    "mismatch_field",
+    ["turn_id", "conversation_revision_id", "job_id"],
+)
+def test_runner_redacts_depth_result_with_foreign_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mismatch_field: str,
+) -> None:
+    face = FaceLobeChat(hivemind_url="http://hive.test:6089")
+    job_id = _job_id()
+    owner_turn_id = "ms4-turn-aaaaaaaaaaaaaaaa"
+    foreign_result = _result(
+        job_id,
+        text="FOREIGN_TURN_PRIVATE_RESULT",
+        turn_id=owner_turn_id,
+    )
+    foreign_result[mismatch_field] = {
+        "turn_id": "ms4-turn-bbbbbbbbbbbbbbbb",
+        "conversation_revision_id": 2,
+        "job_id": _job_id(),
+    }[mismatch_field]
+    depth = _FakeDepthRunner(
+        {job_id: _snapshot(job_id, turn_id=owner_turn_id)},
+        {job_id: foreign_result},
+    )
+    monkeypatch.setattr(hermes_module, "default_runner", lambda: depth)
+
+    delivery = _runner(tmp_path, face).deliver_depth_result(job_id, "conv-a")
+
+    assert delivery["delivery_kind"] == "incomplete"
+    assert delivery["reason"] == "result_identity_mismatch"
+    assert delivery["result"] is None
+    assert "FOREIGN_TURN_PRIVATE_RESULT" not in str(delivery)
+    assert face._sessions == {}
 
 
 def test_runner_rejects_wrong_conversation_without_creating_or_mutating_session(

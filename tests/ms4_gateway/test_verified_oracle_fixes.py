@@ -34,7 +34,20 @@ _HEALTHY_CHAT_LIFECYCLE = {
 }
 
 
+def _patch_healthy_foreground_model(monkeypatch) -> None:
+    monkeypatch.setattr(
+        oracle_admin,
+        "choose_foreground_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="nemotron-3-nano:4b",
+            source="loaded",
+            detail="test catalog admission",
+        ),
+    )
+
+
 def test_oracle_readiness_inspects_nested_asr_service(monkeypatch) -> None:
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",
@@ -85,6 +98,7 @@ def test_oracle_readiness_inspects_nested_asr_service(monkeypatch) -> None:
 
 
 def test_oracle_readiness_accepts_one_healthy_asr_alternative(monkeypatch) -> None:
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",
@@ -146,6 +160,7 @@ def test_oracle_readiness_accepts_one_healthy_asr_alternative(monkeypatch) -> No
 def _patch_healthy_oracle_and_voice(monkeypatch) -> None:
     """Pin every non-chat-plane gate healthy so a readiness test isolates
     the chat-plane / lifecycle behaviour under test."""
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",
@@ -266,6 +281,43 @@ def test_oracle_readiness_ready_when_chat_plane_healthy(monkeypatch) -> None:
         check["name"] == "chat_plane" and check["state"] == "pass"
         for check in snap["checks"]
     )
+    assert snap["model_admission"] == {
+        "status": "ready",
+        "model_id": "nemotron-3-nano:4b",
+        "source": "loaded",
+        "detail": "test catalog admission",
+        "error": None,
+    }
+
+
+def test_oracle_readiness_degrades_when_foreground_model_admission_fails(
+    monkeypatch,
+) -> None:
+    _patch_healthy_oracle_and_voice(monkeypatch)
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_lifecycle_state",
+        lambda *_args, **_kwargs: dict(_HEALTHY_CHAT_LIFECYCLE),
+    )
+
+    def picker_failure(**_kwargs):
+        raise RuntimeError("no admitted foreground model")
+
+    monkeypatch.setattr(oracle_admin, "choose_foreground_model", picker_failure)
+
+    snap = oracle_admin.readiness("http://hivemind.test:6089", timeout=1)
+
+    assert snap["ready"] is False
+    assert snap["readiness"] == "degraded"
+    assert snap["chat_plane"]["status"] == "ready"
+    assert snap["model_admission"]["status"] == "failed"
+    assert snap["model_admission"]["model_id"] is None
+    assert "no admitted foreground model" in snap["model_admission"]["error"]
+    assert any(
+        check["name"] == "model_admission" and check["state"] == "fail"
+        for check in snap["checks"]
+    )
+    assert not any("model admission" in blocker.lower() for blocker in snap["blockers"])
 
 
 class _FailingFaceLobe:
@@ -276,6 +328,8 @@ class _FailingFaceLobe:
     def chat(self, _message: str, **kwargs: Any) -> dict[str, Any]:
         self.session_ids.append(kwargs["session_id"])
         raise FaceLobeChatError("HiveMind /v1/chat/completions (stream) unreachable: timed out")
+
+    chat_authoritative = chat
 
     def sessions(self) -> list[dict[str, Any]]:
         return []
@@ -298,7 +352,14 @@ def test_quartermaster_result_survives_face_lobe_timeout(monkeypatch, tmp_path) 
         "_try_quartermaster_inline",
         lambda _message: (
             block,
-            {"verdict": "inline", "inline_executed": True, "inline_result": result},
+            {
+                "verdict": "inline",
+                "inline_invoked": True,
+                "inline_executed": True,
+                "inline_executed_tool": "hivemind.gpu.availability@v1",
+                "inline_result": result,
+                "inline_result_text": json.dumps(result, ensure_ascii=False),
+            },
         ),
     )
     monkeypatch.setattr(runner, "_try_cluster_time", lambda: None)
@@ -359,9 +420,16 @@ def test_quartermaster_inline_outcome_retains_successful_tool_payload(monkeypatc
         ),
         resolution=types.SimpleNamespace(tier="deterministic"),
         to_dict=lambda: {
+            "schema": "Ms4ToolRouteDecision.v1",
             "verdict": "inline",
+            "query": "Which GPUs are available?",
             "inline_tool": "hivemind.gpu.availability@v1",
         },
+    )
+    monkeypatch.setattr(
+        hermes_runner_module,
+        "_catalog_proves_inline_execute",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(quartermaster, "decide", lambda *_args, **_kwargs: decision)
     monkeypatch.setattr(

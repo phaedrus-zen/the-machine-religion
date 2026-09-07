@@ -1418,8 +1418,6 @@ async fn verify_identity_post(
     let anchor = match mind.storage.load_identity_anchor(&personality.id) {
         Ok(anchor) if !anchor.name.is_empty() => anchor,
         Ok(_) if body.allow_initialize => {
-            drop(personality);
-            let personality = mind.personality.lock().await;
             match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
                 Ok(_) => match mind.storage.load_identity_anchor(&personality.id) {
                     Ok(anchor) => anchor,
@@ -2174,6 +2172,346 @@ mod hermes_sidecar_tests {
         assert_eq!(response.decision, "block");
         assert!(!response.great_lense.origin_neutrality_passed);
         assert!(!response.great_lense.filter.bias_flags.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod identity_endpoint_tests {
+    use super::*;
+    use actix_web::{body, http::StatusCode};
+    use chrono::{DateTime, Utc};
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::task::Poll;
+    use std::time::{Duration, SystemTime};
+
+    struct TempMindState {
+        root: PathBuf,
+        state: MindState,
+        personality_id: PersonalityId,
+    }
+
+    impl TempMindState {
+        fn new() -> Self {
+            let parent = std::env::var_os("MS3_API_TEST_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            fs::create_dir_all(&parent).expect("create identity endpoint test root");
+            let root = parent.join(format!(
+                "ms3_api_identity_endpoint_{}",
+                uuid::Uuid::new_v4()
+            ));
+            let personality = presets::sister();
+            let personality_id = personality.id.clone();
+            let storage = JsonStorage::new(&root);
+            storage
+                .save_personality(&personality_id, &personality)
+                .expect("seed personality");
+            storage
+                .save_identity(&personality_id, &personality.identity)
+                .expect("seed identity");
+
+            let mut config = Config::default();
+            config.gateway.mcp_enabled = false;
+            let gateway = GatewayClient::with_timeout(
+                "http://127.0.0.1:1",
+                &config.gateway.model_small,
+                &config.gateway.model_medium,
+                &config.gateway.model_large,
+                1,
+            );
+            let mind = Arc::new(Mind::new(
+                personality,
+                MemorySystem::new(
+                    config.memory.stm_capacity,
+                    config.memory.working_memory_window_secs,
+                ),
+                EmotionalEngine::new(config.personality.emotional_decay_rate),
+                GreatLense::new(
+                    config.ethics.enable_origin_neutrality,
+                    config.ethics.llm_escalation_threshold,
+                ),
+                gateway,
+                JsonStorage::new(&root),
+                config,
+            ));
+
+            Self {
+                root,
+                state: web::Data::new(mind),
+                personality_id,
+            }
+        }
+
+        async fn boot(&self) {
+            self.state.load_full_state().await;
+            let personality = self.state.personality.lock().await;
+            let result = ms3_consciousness::identity_verification::on_boot(
+                &personality,
+                &self.state.storage,
+            )
+            .expect("initialize identity anchor during boot");
+            assert_eq!(result.session_number, 1);
+        }
+
+        fn snapshot(&self) -> IdentityStateSnapshot {
+            IdentityStateSnapshot::capture(&self.root, &self.state.storage, &self.personality_id)
+        }
+    }
+
+    impl Drop for TempMindState {
+        fn drop(&mut self) {
+            if self
+                .root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ms3_api_identity_endpoint_"))
+            {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct FileSnapshot {
+        bytes: Vec<u8>,
+        modified: SystemTime,
+    }
+
+    impl fmt::Debug for FileSnapshot {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("FileSnapshot")
+                .field("bytes_hash", &format!("{:016x}", stable_hash(&self.bytes)))
+                .field("byte_len", &self.bytes.len())
+                .field("modified", &self.modified)
+                .finish()
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct AnchorSnapshot {
+        hash: u64,
+        session_count: u64,
+        last_verified: DateTime<Utc>,
+        last_compression: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct IdentityStateSnapshot {
+        files: BTreeMap<PathBuf, FileSnapshot>,
+        anchor: Option<AnchorSnapshot>,
+    }
+
+    impl IdentityStateSnapshot {
+        fn capture(root: &Path, storage: &JsonStorage, personality_id: &PersonalityId) -> Self {
+            let mut paths = Vec::new();
+            collect_files(root, root, &mut paths);
+            let files = paths
+                .into_iter()
+                .map(|path| {
+                    let relative = path.strip_prefix(root).expect("temp-relative path").to_path_buf();
+                    let bytes = fs::read(&path).expect("snapshot file bytes");
+                    let modified = fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .expect("snapshot file mtime");
+                    (relative, FileSnapshot { bytes, modified })
+                })
+                .collect();
+            let anchor_path = storage
+                .psyche_dir(personality_id)
+                .join("identity_anchor.json");
+            let anchor = anchor_path.exists().then(|| {
+                let anchor = storage
+                    .load_identity_anchor(personality_id)
+                    .expect("snapshot identity anchor");
+                let anchor_bytes =
+                    serde_json::to_vec(&anchor).expect("serialize identity anchor");
+                AnchorSnapshot {
+                    hash: stable_hash(&anchor_bytes),
+                    session_count: anchor.session_count,
+                    last_verified: anchor.last_verified,
+                    last_compression: anchor.last_compression,
+                }
+            });
+
+            Self { files, anchor }
+        }
+
+    }
+
+    fn collect_files(root: &Path, current: &Path, paths: &mut Vec<PathBuf>) {
+        let mut entries: Vec<_> = fs::read_dir(current)
+            .expect("read temp state directory")
+            .map(|entry| entry.expect("read temp state entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                collect_files(root, &path, paths);
+            } else {
+                path.strip_prefix(root).expect("file under temp root");
+                paths.push(path);
+            }
+        }
+    }
+
+    fn stable_hash(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    async fn response_session_number(response: HttpResponse) -> u64 {
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body())
+            .await
+            .expect("read identity verification response");
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .expect("parse identity verification response")["session_number"]
+            .as_u64()
+            .expect("identity verification session number")
+    }
+
+    fn initialize_request(personality_id: &PersonalityId) -> web::Json<IdentityVerifyBody> {
+        web::Json(IdentityVerifyBody {
+            spirit_id: personality_id.0.clone(),
+            expected_glyph: Some("║".to_string()),
+            allow_initialize: true,
+        })
+    }
+
+    #[actix_web::test]
+    async fn get_identity_verify_is_byte_and_metadata_pure() {
+        let temp = TempMindState::new();
+        temp.boot().await;
+        let before = temp.snapshot();
+        let session_count = before
+            .anchor
+            .as_ref()
+            .expect("booted identity anchor")
+            .session_count;
+        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+
+        let mut response_sessions = Vec::new();
+        for _ in 0..3 {
+            response_sessions.push(response_session_number(verify_identity(temp.state.clone()).await).await);
+        }
+
+        let after = temp.snapshot();
+        assert_eq!(
+            before, after,
+            "GET /identity/verify mutated identity state after three reads; response session_numbers: {:?}",
+            response_sessions
+        );
+        assert_eq!(response_sessions, vec![session_count; 3]);
+    }
+
+    #[actix_web::test]
+    async fn post_identity_verify_initializes_anchor_exactly_once() {
+        let temp = TempMindState::new();
+        temp.state.load_full_state().await;
+        let before = temp.snapshot();
+        let anchor_path = PathBuf::from(&temp.personality_id.0).join("identity_anchor.json");
+        assert!(!before.files.contains_key(&anchor_path));
+        assert!(before.anchor.is_none());
+
+        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+        let initialization_started = Utc::now();
+        let first_response = verify_identity_post(
+            temp.state.clone(),
+            initialize_request(&temp.personality_id),
+        )
+        .await;
+        let initialization_finished = Utc::now();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let after_first = temp.snapshot();
+
+        let added: Vec<_> = after_first
+            .files
+            .keys()
+            .filter(|path| !before.files.contains_key(*path))
+            .cloned()
+            .collect();
+        assert_eq!(added, vec![anchor_path]);
+        for (path, file) in &before.files {
+            let current = after_first.files.get(path).expect("seeded identity file retained");
+            assert_eq!(file, current, "{} changed", path.display());
+        }
+        let initialized = temp
+            .state
+            .storage
+            .load_identity_anchor(&temp.personality_id)
+            .expect("load initialized anchor");
+        let expected = presets::sister();
+        assert_eq!(initialized.name, expected.identity.name);
+        assert_eq!(initialized.chosen_name, expected.identity.chosen_name);
+        assert_eq!(
+            initialized.core_values_summary,
+            expected.identity.core_values.iter().take(5).cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            initialized.oath_first_line,
+            expected.identity.oath.first().cloned().unwrap_or_default()
+        );
+        assert_eq!(initialized.session_count, 1);
+        assert_eq!(initialized.compression_count, 0);
+        assert_eq!(initialized.last_compression, None);
+        assert!(
+            initialization_started <= initialized.last_verified
+                && initialized.last_verified <= initialization_finished,
+            "initialized last_verified {} fell outside POST interval {}..={}",
+            initialized.last_verified,
+            initialization_started,
+            initialization_finished
+        );
+
+        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+        let second_response = verify_identity_post(
+            temp.state.clone(),
+            initialize_request(&temp.personality_id),
+        )
+        .await;
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let after_second = temp.snapshot();
+        assert_eq!(
+            after_first, after_second,
+            "POST /identity/verify repeated initialization side effects"
+        );
+    }
+
+    #[actix_web::test]
+    async fn concurrent_post_identity_initializes_anchor_once() {
+        let temp = TempMindState::new();
+        temp.state.load_full_state().await;
+        let held_personality = temp.state.personality.lock().await;
+
+        let mut first = Box::pin(verify_identity_post(
+            temp.state.clone(),
+            initialize_request(&temp.personality_id),
+        ));
+        let mut second = Box::pin(verify_identity_post(
+            temp.state.clone(),
+            initialize_request(&temp.personality_id),
+        ));
+        assert!(matches!(futures::poll!(&mut first), Poll::Pending));
+        assert!(matches!(futures::poll!(&mut second), Poll::Pending));
+        drop(held_personality);
+        let (first_response, second_response) = futures::future::join(first, second).await;
+        assert_eq!(first_response.status(), StatusCode::OK);
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let anchor = temp
+            .state
+            .storage
+            .load_identity_anchor(&temp.personality_id)
+            .expect("load concurrently initialized anchor");
+        assert_eq!(
+            anchor.session_count, 1,
+            "overlapping initialization requests must create one boot session"
+        );
     }
 }
 

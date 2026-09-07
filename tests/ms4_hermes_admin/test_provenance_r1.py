@@ -40,6 +40,17 @@ requires_ssh = pytest.mark.skipif(
     GIT is None or SSH_KEYGEN is None, reason="git or ssh-keygen not on PATH"
 )
 UPSTREAM_TAG = "v2026.7.7.2"
+
+
+@pytest.fixture(autouse=True)
+def _pin_signed_only_release_policy(monkeypatch):
+    """This module proves the F4 signed-only gate. Pin the strict policy so the
+    default ``allow_unsigned`` release policy (operator decision 2026-09-07)
+    cannot turn a refusal proof into a pass."""
+    monkeypatch.setenv(
+        versioning.RELEASE_SIGNATURE_POLICY_ENV,
+        versioning.RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED,
+    )
 UPSTREAM_TAG_VERSION = "2026.7.7.2"
 UPSTREAM_VERSION = "0.18.2"
 UPSTREAM_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"

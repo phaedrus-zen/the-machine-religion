@@ -252,6 +252,11 @@ def _voice_first_token_timeout() -> float:
     return max(1.0, val)
 
 
+def _new_voice_turn_id() -> str:
+    """Mint the server-owned correlation id for one voice turn."""
+    return "ms4-turn-" + uuid.uuid4().hex[:16]
+
+
 SELECTED_FACE_ADMISSION_PROFILE = "ms4-face-voice-production-uncached-700-v1"
 _SELECTED_FACE_ADMISSION_DEFAULT_TTFT_MS = 15_000
 _SELECTED_FACE_ADMISSION_WATCHDOG_MARGIN_MS = 1000
@@ -4312,6 +4317,7 @@ def voice_ptt_turn_stream(
     client_alive: threading.Event | None = None,
     cancel_event: threading.Event | None = None,
     client_id: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     """Streaming variant of :func:`voice_ptt_turn`.
 
@@ -4337,6 +4343,7 @@ def voice_ptt_turn_stream(
     tts_fn = synthesize_fn or (lambda **kw: synthesize(**kw))
     chat_call = chat_fn or runner.chat
     turn_cancel = cancel_event or threading.Event()
+    turn_correlation_id = turn_id or _new_voice_turn_id()
     lifecycle: dict[str, int] = {
         "terminal_cancel_signals": 0,
         "first_chunk_timer_join_timeouts": 0,
@@ -4489,6 +4496,7 @@ def voice_ptt_turn_stream(
             "asr_ms": asr_ms,
             "model": asr_result.get("model"),
             "speaker": None,
+            "turn_id": turn_correlation_id,
         })
     else:
         speaker = _identify_speaker_bounded(runner.hivemind_url, audio, _voice_speaker_id_budget())
@@ -4498,6 +4506,7 @@ def voice_ptt_turn_stream(
             "asr_ms": asr_ms,
             "model": asr_result.get("model"),
             "speaker": speaker,
+            "turn_id": turn_correlation_id,
         })
     if not transcript:
         raise VoiceRequestError("transcription returned empty text; no chat turn dispatched")
@@ -4514,6 +4523,7 @@ def voice_ptt_turn_stream(
             _start_speaker_id()
             _finish_speaker_id()
             _egg_result["raw_transcript"] = raw_transcript
+            _egg_result["turn_id"] = turn_correlation_id
             return _egg_result
 
     # Context-aware "buying time" reflex: classify the utterance with a
@@ -4564,6 +4574,8 @@ def voice_ptt_turn_stream(
                 ws_engine_factory=ws_engine_factory,
                 client_alive=client_alive,
                 cancel_event=turn_cancel,
+                client_id=client_id,
+                turn_id=turn_correlation_id,
                 lifecycle=lifecycle,
             )
             ws_result["raw_transcript"] = raw_transcript
@@ -4635,7 +4647,6 @@ def voice_ptt_turn_stream(
     # are surfaced on the emitted audio_chunk payload AND the per-chunk metric so a
     # chunk metric and the browser turn telemetry for the same reply join 1:1.
     # server.py relays them byte-faithfully (proven by the frozen relay test).
-    turn_correlation_id = "ms4-turn-" + uuid.uuid4().hex[:16]
     chat_metrics: dict[str, Any] = {}
     # Marker-confirmation contract for this turn (inactive for ordinary turns).
     marker_gate = _MarkerConfirmationGate(transcript)
@@ -5614,6 +5625,8 @@ def voice_ptt_turn_stream(
             _chat_kw["voice_mode"] = True
         if client_id:
             _chat_kw["client_id"] = client_id
+        if _accepts_keyword(chat_call, "turn_id"):
+            _chat_kw["turn_id"] = turn_correlation_id
         # First-token watchdog: a stalled Face model (e.g. a heavy cloud
         # model selected for voice) raises FaceLobeStalled instead of
         # hanging the SSE stream forever; the server turns it into an
@@ -5857,6 +5870,7 @@ def voice_ptt_turn_stream(
             "max_held_for_inorder_ms": max((c["held_for_inorder_ms"] for c in chunk_timings), default=0),
         }
     return {
+        "turn_id": turn_correlation_id,
         "transcript": transcript,
         "raw_transcript": raw_transcript,
         "reply_text": reply_text,
@@ -5864,6 +5878,7 @@ def voice_ptt_turn_stream(
         "foreground_model": chat_response.get("face_lobe_model") if isinstance(chat_response, dict) else None,
         "router": chat_response.get("router") if isinstance(chat_response, dict) else None,
         "dispatched_job": chat_response.get("dispatched_job") if isinstance(chat_response, dict) else None,
+        "revision_id": chat_response.get("revision_id") if isinstance(chat_response, dict) else None,
         "grounding_source": chat_response.get("grounding_source") if isinstance(chat_response, dict) else None,
         "transcription_model": asr_result.get("model"),
         "tts_model": tts_model or DEFAULT_TTS_MODEL,
@@ -5918,6 +5933,8 @@ def _run_ws_super_engine(
     ws_engine_factory: Callable[..., Any] | None = None,
     client_alive: threading.Event | None = None,
     cancel_event: threading.Event | None = None,
+    client_id: str | None = None,
+    turn_id: str | None = None,
     lifecycle: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """The ``engine="ws_super"`` branch of voice_ptt_turn_stream.
@@ -5934,6 +5951,7 @@ def _run_ws_super_engine(
     emit("status", {"phase": "thinking", "engine": "ws_super"})
     turn_cancel = cancel_event or threading.Event()
     lifecycle = lifecycle if lifecycle is not None else {}
+    turn_id = turn_id or _new_voice_turn_id()
     lifecycle.setdefault("ws_sender_threads_started", 0)
     lifecycle.setdefault("ws_sender_threads_joined", 0)
     lifecycle.setdefault("ws_sender_thread_join_timeouts", 0)
@@ -5951,6 +5969,10 @@ def _run_ws_super_engine(
 
     def _emit_ws_engine(event: str, payload: dict[str, Any]) -> bool:
         if event == "audio_chunk":
+            payload = dict(payload)
+            chunk_index = payload.get("index", ws_generated_audio[0])
+            payload.setdefault("turn_id", turn_id)
+            payload.setdefault("chunk_id", f"{turn_id}-c{chunk_index}")
             with ws_audio_lock:
                 ws_generated_audio[0] += 1
                 ws_gateway_enqueued_audio[0] += 1
@@ -6295,6 +6317,8 @@ def _run_ws_super_engine(
             _chat_kw["voice_mode"] = True
         if client_id:
             _chat_kw["client_id"] = client_id
+        if _accepts_keyword(chat_call, "turn_id"):
+            _chat_kw["turn_id"] = turn_id
         # First-token watchdog (same as the REST path): a stalled Face
         # model raises FaceLobeStalled rather than hanging the WS turn.
         chat_response = _run_facechat_guarded(
@@ -6526,6 +6550,10 @@ def _run_ws_super_engine(
         if event == "audio_error":
             fallback_metrics["audio_errors"] += 1
         if event == "audio_chunk":
+            payload = dict(payload)
+            chunk_index = payload.get("index", fallback_metrics["audio_generated"])
+            payload.setdefault("turn_id", turn_id)
+            payload.setdefault("chunk_id", f"{turn_id}-fallback-c{chunk_index}")
             fallback_metrics["audio_generated"] += 1
             fallback_metrics["audio_gateway_enqueued"] += 1
         emitted = emit(event, payload)
@@ -6595,12 +6623,14 @@ def _run_ws_super_engine(
     finish_speaker_id()
     total_ms = int((time.monotonic() - t_total) * 1000)
     return {
+        "turn_id": turn_id,
         "transcript": transcript,
         "reply_text": reply_text,
         "session_id": chat_response.get("session_id") if isinstance(chat_response, dict) else None,
         "foreground_model": chat_response.get("face_lobe_model") if isinstance(chat_response, dict) else None,
         "router": chat_response.get("router") if isinstance(chat_response, dict) else None,
         "dispatched_job": chat_response.get("dispatched_job") if isinstance(chat_response, dict) else None,
+        "revision_id": chat_response.get("revision_id") if isinstance(chat_response, dict) else None,
         "grounding_source": chat_response.get("grounding_source") if isinstance(chat_response, dict) else None,
         "transcription_model": asr_result.get("model"),
         "tts_model": tts_model or DEFAULT_TTS_MODEL,

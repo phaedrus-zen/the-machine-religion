@@ -51,6 +51,8 @@ const evidenceDir = process.env.MS4_BROWSER_EVIDENCE_DIR
 const variant = process.env.MS4_BROWSER_VARIANT === 'undecodable' ? 'undecodable' : 'canonical';
 const undecodableFlag = variant === 'undecodable' ? 'true' : 'false';
 const variantId = `oracle-browser-${variant}`;
+const durableReplayTurnId = 'ms4-turn-bbbbbbbbbbbbbbbb';
+const durableReplayRevisionId = 7;
 // R6: the wrapper generates the runId so it can pre-create the identity-bound
 // staging/publish paths and own the final commit. Raw-node runs generate one.
 const runId = process.env.MS4_BROWSER_RUN_ID || randomUUID();
@@ -108,6 +110,8 @@ async function listen(server) {
 async function waitForTarget(debugPort, pageUrl, stderrLines, chrome) {
   const timeoutMs = 15_000;
   const start = Date.now();
+  let stableTargetId = null;
+  let stableSince = 0;
   while (Date.now() - start < timeoutMs) {
     if (chrome && (chrome.__spawnFailed || chrome.exitCode !== null || chrome.signalCode !== null)) {
       throw new Error(`Chrome failed to start [spawnFailed=${chrome.__spawnFailed || ''} exitCode=${chrome.exitCode} signal=${chrome.signalCode}] stderr=${stderrLines.join('')}`);
@@ -115,7 +119,17 @@ async function waitForTarget(debugPort, pageUrl, stderrLines, chrome) {
     try {
       const targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
       const target = targets.find(item => item.type === 'page' && item.url.startsWith(pageUrl));
-      if (target) return target;
+      if (target) {
+        if (target.id === stableTargetId) {
+          if (Date.now() - stableSince >= 250) return target;
+        } else {
+          stableTargetId = target.id;
+          stableSince = Date.now();
+        }
+      } else {
+        stableTargetId = null;
+        stableSince = 0;
+      }
     } catch (_error) {
       // Chrome is still starting.
     }
@@ -362,16 +376,8 @@ for (const [route, name, contentType] of pwaAssetSpecs) {
 // runtime generated it (served-HTML binding alone did not close this gap).
 const harnessPath = fileURLToPath(import.meta.url);
 const harnessSha256 = await sha256File(harnessPath);
-const proofAudioPath = join(repoRoot, 'machine_spirit_4', 'canned_audio', 'alloy', 'ack_listening.wav');
-const proofAudioBuffer = await readFile(proofAudioPath);
-const proofAudioBase64 = proofAudioBuffer.toString('base64');
-const proofAudioSha256 = createHash('sha256').update(proofAudioBuffer).digest('hex').toUpperCase();
-const nodeExecPath = process.execPath;
-const nodeExecSha256 = await sha256File(nodeExecPath);
 
-// A syntactically valid all-zero PCM16 WAV: decodes cleanly, plays as silence,
-// and must NEVER cross the non-silent onset threshold (finding 3).
-function silentWavBase64(sampleRate, ms) {
+function pcm16WavBuffer(sampleRate, ms, amplitude = 0) {
   const numSamples = Math.round((sampleRate * ms) / 1000);
   const dataLen = numSamples * 2;
   const buf = Buffer.alloc(44 + dataLen);
@@ -379,7 +385,26 @@ function silentWavBase64(sampleRate, ms) {
   buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22);
   buf.writeUInt32LE(sampleRate, 24); buf.writeUInt32LE(sampleRate * 2, 28); buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
   buf.write('data', 36); buf.writeUInt32LE(dataLen, 40);
-  return buf.toString('base64');
+  for (let index = 0; index < numSamples; index += 1) {
+    const sample = Math.round(Math.sin((2 * Math.PI * 440 * index) / sampleRate) * amplitude * 32767);
+    buf.writeInt16LE(sample, 44 + index * 2);
+  }
+  return buf;
+}
+
+// Test-owned, deterministic audible fixture. It removes the source-tree binary
+// dependency while retaining real browser decode and onset behavior.
+const proofAudioBuffer = pcm16WavBuffer(24000, 1000, 0.25);
+const proofAudioBase64 = proofAudioBuffer.toString('base64');
+const proofAudioSha256 = createHash('sha256').update(proofAudioBuffer).digest('hex').toUpperCase();
+const proofAudioLongBase64 = pcm16WavBuffer(24000, 1200, 0.25).toString('base64');
+const nodeExecPath = process.execPath;
+const nodeExecSha256 = await sha256File(nodeExecPath);
+
+// A syntactically valid all-zero PCM16 WAV: decodes cleanly, plays as silence,
+// and must NEVER cross the non-silent onset threshold (finding 3).
+function silentWavBase64(sampleRate, ms) {
+  return pcm16WavBuffer(sampleRate, ms).toString('base64');
 }
 const silentAudioBase64 = silentWavBase64(24000, 140);
 const silentAudioSha256 = createHash('sha256').update(Buffer.from(silentAudioBase64, 'base64')).digest('hex').toUpperCase();
@@ -434,11 +459,13 @@ let productRepair = null;
 let restBatch = null;
 let restObservability = null;
 let snapshotOwnership = null;
+let identityMismatch = null;
 let schedulerTiming = null;
 let dspDelegation = null;
 let staleCues = null;
 let longInputSession = null;
 let facePrewarm = null;
+let durableReplayTurn = null;
 
 try {
   // ---- All acquired resources live inside this ONE cleanup boundary. --------
@@ -500,6 +527,39 @@ try {
         service: 'ms4-gateway',
         status: 'ready',
         runtime: 'ms4-fusion',
+      }));
+      return;
+    }
+    if (path === '/__persist_replay_turn' && request.method === 'POST') {
+      const body = [];
+      request.on('data', chunk => body.push(chunk));
+      request.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(body).toString('utf8'));
+          if (!data || data.turn_id !== durableReplayTurnId
+              || data.revision_id !== durableReplayRevisionId) {
+            throw new Error('replay identity mismatch');
+          }
+          durableReplayTurn = {
+            event_type: 'voice_turn_complete',
+            timestamp: '2026-09-06T20:00:00Z',
+            data,
+          };
+          response.writeHead(204, { 'Cache-Control': 'no-store' });
+          response.end();
+        } catch (error) {
+          response.writeHead(400, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({error: String(error && error.message || error)}));
+        }
+      });
+      return;
+    }
+    if (path === '/voice/recent-turns') {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      response.end(JSON.stringify({
+        source: 'audit-reload-fixture',
+        complete: true,
+        turns: durableReplayTurn ? [durableReplayTurn] : [],
       }));
       return;
     }
@@ -593,7 +653,7 @@ try {
     '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${profileDir}`,
     '--window-size=1440,1000',
-    pageUrl,
+    'about:blank',
   ];
   const stderrLines = [];
   chrome = spawn(resolvedChromePath, chromeArgs, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
@@ -604,13 +664,17 @@ try {
   // rather than waiting out the DevTools deadline.
   chrome.once('error', (err) => { chrome.__spawnFailed = String((err && err.message) || err); });
 
-  const target = await waitForTarget(debugPort, pageUrl, stderrLines, chrome);
+  // Attach to one stable blank target before navigation. Attaching while
+  // Chrome replaces its startup target races CDP with a transient page and can
+  // fail with "Inspected target navigated or closed" before any proof runs.
+  const target = await waitForTarget(debugPort, 'about:blank', stderrLines, chrome);
   try { chromeIdentity = await fetchJson(`http://127.0.0.1:${debugPort}/json/version`); } catch (_error) { chromeIdentity = null; }
   cdp = new CdpClient(target.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.call('Page.enable');
   await cdp.call('Runtime.enable');
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await cdp.call('Page.navigate', {url: pageUrl});
   const readyDeadline = Date.now() + 10_000;
   let pageReady = false;
   while (Date.now() < readyDeadline && !pageReady) {
@@ -2232,7 +2296,7 @@ try {
     const signalStyle = getComputedStyle(signalNodes[0]);
     const breathStyle = getComputedStyle(breathNodes[0]);
     return {
-      before, proofAudioKind: 'TMR canned speech WAV', proofAudioDuration: audioBuffer.duration,
+      before, proofAudioKind: 'generated test tone WAV', proofAudioDuration: audioBuffer.duration,
       reactive: oracleMirror.dataset.audioReactive, playbackActive: oraclePlaybackSignal.active,
       level: Number.parseFloat(oracleMirror.style.getPropertyValue('--audio-level') || '0'),
       voice: Number.parseFloat(oracleMirror.style.getPropertyValue('--audio-voice') || '0'),
@@ -3611,29 +3675,77 @@ try {
     const ctx = getPlaybackCtx();
     await ctx.resume();
     const origDecode = ctx.decodeAudioData.bind(ctx);
+    const replayMessageStart = messages.children.length;
+    await refreshVoiceTurns();
+    const durableRowsBefore = settingsVoiceTurns.textContent;
+    const serverTurnIdA = 'ms4-turn-aaaaaaaaaaaaaaaa';
+    const serverTurnIdB = ${JSON.stringify(durableReplayTurnId)};
     let decodeStartedA = false, gatedOnce = false, releaseGate = null;
     const gate = new Promise(res => { releaseGate = res; });
     ctx.decodeAudioData = function (buf) { if (!gatedOnce) { gatedOnce = true; decodeStartedA = true; return gate.then(() => origDecode(buf)); } return origDecode(buf); };
-    const aFrames = encoder.encode('event: transcript\\ndata: {"text":"snapshot A","asr_ms":1}\\n\\n' + 'event: text_delta\\ndata: {"text":"A_REPLY"}\\n\\n' + 'event: audio_chunk\\ndata: {"index":0,"audio_base64":"${proofAudioBase64}","audio_mime":"audio/wav"}\\n\\n');
+    const aFrames = encoder.encode('event: transcript\\ndata: {"text":"snapshot A","asr_ms":1,"turn_id":"' + serverTurnIdA + '"}\\n\\n' + 'event: text_delta\\ndata: {"text":"A_REPLY","turn_id":"' + serverTurnIdA + '"}\\n\\n' + 'event: audio_chunk\\ndata: {"index":0,"turn_id":"' + serverTurnIdA + '","chunk_id":"snapshot-a-c0","engine":"ws_super","audio_base64":"${proofAudioBase64}","audio_mime":"audio/wav"}\\n\\n');
     let aRead = 0, aPending = null;
     const aReader = { read() { if (aRead++ === 0) return Promise.resolve({ value: aFrames, done: false }); return new Promise(res => { aPending = res; }); }, cancel() { if (aPending) aPending({ value: undefined, done: true }); return Promise.resolve(); } };
-    const bFrames = encoder.encode('event: transcript\\ndata: {"text":"snapshot B","asr_ms":1}\\n\\n' + 'event: text_delta\\ndata: {"text":"B_REPLY"}\\n\\n' + 'event: done\\ndata: {"session_id":"snap-B","reply_text":"B_REPLY","metrics":{"audio_chunks":0,"audio_client_written":0,"audio_errors":0,"total_ms":5}}\\n\\n');
+    const bFrames = encoder.encode(
+      'event: transcript\\ndata: {"text":"snapshot B","asr_ms":1,"turn_id":"' + serverTurnIdB + '"}\\n\\n' +
+      'event: text_delta\\ndata: {"text":"B_REPLY","turn_id":"' + serverTurnIdB + '"}\\n\\n' +
+      'event: audio_chunk\\ndata: {"index":1,"turn_id":"' + serverTurnIdB + '","chunk_id":"snapshot-b-c1","engine":"ws_super","audio_base64":"${proofAudioLongBase64}","audio_mime":"audio/wav"}\\n\\n' +
+      'event: audio_chunk\\ndata: {"index":0,"turn_id":"' + serverTurnIdB + '","chunk_id":"snapshot-b-c0","engine":"ws_super","audio_base64":"${proofAudioBase64}","audio_mime":"audio/wav"}\\n\\n' +
+      'event: done\\ndata: {"session_id":"snap-B","turn_id":"' + serverTurnIdB + '","revision_id":${durableReplayRevisionId},"reply_text":"B_REPLY","metrics":{"audio_chunks":2,"audio_client_written":2,"audio_errors":0,"total_ms":5}}\\n\\n'
+    );
     const bReader = () => { let sent = false; return { read() { if (!sent) { sent = true; return Promise.resolve({ value: bFrames, done: false }); } return Promise.resolve({ value: undefined, done: true }); }, cancel() { return Promise.resolve(); } }; };
     let useB = false;
     window.fetch = (url, options = {}) => { if (String(url).startsWith('/voice/turn/stream')) { if (useB) return Promise.resolve({ ok: true, statusText: 'OK', body: { getReader: bReader } }); return Promise.resolve({ ok: true, statusText: 'OK', body: { getReader: () => aReader } }); } return originalFetch(url, options); };
-    const runA = submitWavBlobAsVoiceTurn(new Blob([new Uint8Array(44)], { type: 'audio/wav' }), { durationSec: 0.1, sourceLabel: 'snapshot-A' });
+    let turnA = null;
+    const runA = submitWavBlobAsVoiceTurn(new Blob([new Uint8Array(44)], { type: 'audio/wav' }), {
+      durationSec: 0.1,
+      sourceLabel: 'snapshot-A',
+      onTurnStateCreated: state => { turnA = state; },
+    });
     const turnIdA = currentVoiceTurnId;
     await waitFor(() => decodeStartedA, 'snapshot:decodeA', 3000);
     // Turn B starts (barges A) and completes with a higher turn id.
     useB = true;
-    await submitWavBlobAsVoiceTurn(new Blob([new Uint8Array(44)], { type: 'audio/wav' }), { durationSec: 0.1, sourceLabel: 'snapshot-B' });
+    let turnB = null;
+    await submitWavBlobAsVoiceTurn(new Blob([new Uint8Array(44)], { type: 'audio/wav' }), {
+      durationSec: 0.1,
+      sourceLabel: 'snapshot-B',
+      onTurnStateCreated: state => { turnB = state; },
+    });
     const turnIdB = currentVoiceTurnId;
+    const turnBPhysicalSchedule = activeAudioSources
+      .filter(entry => entry.turnState === turnB)
+      .map(entry => ({
+        startAt: entry.startAt,
+        durationMs: Math.round((entry.endAt - entry.startAt) * 1000),
+      }));
+    await waitFor(() => turnB && turnB.terminalKind === 'done', 'snapshot:B playback drain', 6000);
     const afterB = window.__ms4OracleVoiceAcceptanceState();
+    const persisted = await originalFetch('/__persist_replay_turn', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        turn_id: turnB.telemetry.serverTurnId,
+        revision_id: turnB.serverRevisionId,
+        transcript: 'snapshot B',
+        reply_text_preview: 'B_REPLY',
+        reply_text_chars: 7,
+        audio_chunks: turnB.telemetry.scheduledChunks,
+        audio_errors: turnB.telemetry.audioErrors,
+      }),
+    });
+    if (!persisted.ok) throw new Error('snapshot B fixture persistence failed');
     // Now release A's held decode; its stale cleanup must NOT overwrite B.
     releaseGate();
     await Promise.race([ runA, delay(3000).then(() => { throw new Error('snapshot A did not settle'); }) ]);
     await delay(40);
     const afterAReleased = window.__ms4OracleVoiceAcceptanceState();
+    await refreshVoiceTurns();
+    const durableRowsText = settingsVoiceTurns.textContent;
+    const visibleReplayConversation = Array.from(messages.children)
+      .slice(replayMessageStart)
+      .map(node => node.textContent)
+      .join('\\n');
     ctx.decodeAudioData = origDecode;
     window.fetch = originalFetch;
     setOracleStageState('idle', 'Ready.', '');
@@ -3641,11 +3753,126 @@ try {
       turnIdA, turnIdB,
       lastTurnIdAfterB: afterB.lastVoiceTurn && afterB.lastVoiceTurn.turnId,
       lastTurnIdAfterARelease: afterAReleased.lastVoiceTurn && afterAReleased.lastVoiceTurn.turnId,
+      serverTurnIdAfterB: afterB.lastVoiceTurn && afterB.lastVoiceTurn.telemetry.serverTurnId,
+      serverTurnIdAfterARelease: afterAReleased.lastVoiceTurn && afterAReleased.lastVoiceTurn.telemetry.serverTurnId,
+      expectedServerTurnIdB: serverTurnIdB,
+      turnAAborted: Boolean(turnA && turnA.aborted),
+      turnAControllerAborted: Boolean(turnA && turnA.controller.signal.aborted),
+      turnAScheduledChunks: turnA && turnA.telemetry.scheduledChunks,
+      turnBTerminalKind: turnB && turnB.terminalKind,
+      turnBRevisionId: turnB && turnB.serverRevisionId,
+      turnBChunkServerIds: turnB && turnB.telemetry.chunkServerIds,
+      turnBPhysicalSchedule,
+      turnBScheduledChunks: turnB && turnB.telemetry.scheduledChunks,
+      activeGeneratedSourcesAfterB: afterB.activeGeneratedSources,
+      postReleaseStagePresence: oracleStage.dataset.presence,
+      postReleaseVoiceStatus: voiceStatusLine.textContent,
+      visibleReplayConversation,
+      durableRowsBefore,
+      durableRowsText,
     };
   })()`, { timeoutMs: CDP_BEHAVIOR_TIMEOUT_MS });
   assert.ok(snapshotOwnership.turnIdB > snapshotOwnership.turnIdA);
   assert.equal(snapshotOwnership.lastTurnIdAfterB, snapshotOwnership.turnIdB, 'B is the newest snapshot after it completes');
   assert.equal(snapshotOwnership.lastTurnIdAfterARelease, snapshotOwnership.turnIdB, 'a stale turn A release must not overwrite the newer B snapshot');
+  assert.equal(snapshotOwnership.serverTurnIdAfterB, snapshotOwnership.expectedServerTurnIdB, 'B binds its server turn id at transcript');
+  assert.equal(snapshotOwnership.serverTurnIdAfterARelease, snapshotOwnership.expectedServerTurnIdB, 'stale A cannot replace B server identity');
+  assert.equal(snapshotOwnership.turnAAborted, true, 'turn B must barge and cancel turn A');
+  assert.equal(snapshotOwnership.turnAControllerAborted, true, 'turn A request controller must be aborted');
+  assert.equal(snapshotOwnership.turnAScheduledChunks, 0, 'late turn A decode must never schedule audio');
+  assert.equal(snapshotOwnership.turnBTerminalKind, 'done', 'turn B must finish only after audible playback drains');
+  assert.equal(snapshotOwnership.turnBRevisionId, durableReplayRevisionId, 'turn B must retain the server revision from its done envelope');
+  assert.deepEqual([...snapshotOwnership.turnBChunkServerIds].sort(), ['snapshot-b-c0', 'snapshot-b-c1'], 'turn B must retain both producer chunk identities');
+  assert.deepEqual(snapshotOwnership.turnBPhysicalSchedule.map(item => item.durationMs), [1000, 1200], 'out-of-order arrival must schedule physical audio in index order');
+  assert.ok(snapshotOwnership.turnBPhysicalSchedule[1].startAt >= snapshotOwnership.turnBPhysicalSchedule[0].startAt + 0.999, 'chunk 1 must start after chunk 0 playback');
+  assert.equal(snapshotOwnership.turnBScheduledChunks, 2);
+  assert.equal(snapshotOwnership.activeGeneratedSourcesAfterB, 0, 'turn B sources must be fully drained');
+  assert.notEqual(snapshotOwnership.postReleaseStagePresence, 'blocked', 'late A decode must not block replacement UI');
+  assert.doesNotMatch(snapshotOwnership.postReleaseVoiceStatus, /could not be decoded|chunk failed|blocked/i, 'late A decode must not write a failure status');
+  assert.doesNotMatch(snapshotOwnership.visibleReplayConversation, /A_REPLY/, 'stale turn A reply must not remain visible');
+  assert.match(snapshotOwnership.visibleReplayConversation, /B_REPLY/, 'replacement turn B reply must remain visible');
+  assert.doesNotMatch(snapshotOwnership.durableRowsBefore, new RegExp(durableReplayTurnId), 'turn B must not appear before fixture persistence');
+  assert.match(snapshotOwnership.durableRowsText, new RegExp(durableReplayTurnId), 'audit reload must render turn B identity');
+  assert.match(snapshotOwnership.durableRowsText, new RegExp(`revision=${durableReplayRevisionId}`), 'audit reload must render turn B revision');
+
+  // A server identity switch inside one SSE stream invalidates every byte from
+  // that stream. Even audio already scheduled under the first identity must be
+  // stopped, and both the response reader and request signal must be canceled.
+  identityMismatch = await cdp.evaluate(`(async () => {
+    ${PAGE_HELPERS}
+    const originalFetch = window.fetch;
+    const encoder = new TextEncoder();
+    const firstTurnId = 'ms4-turn-1111111111111111';
+    const foreignTurnId = 'ms4-turn-2222222222222222';
+    let readerCancels = 0;
+    let signalAborts = 0;
+    let pendingRead = null;
+    let requestSignal = null;
+    const frames = encoder.encode(
+      'event: transcript\\ndata: {"text":"identity owner A","asr_ms":1,"turn_id":"' + firstTurnId + '"}\\n\\n' +
+      'event: audio_chunk\\ndata: {"index":0,"turn_id":"' + firstTurnId + '","chunk_id":"owner-a-c0","engine":"ws_super","audio_base64":"${proofAudioBase64}","audio_mime":"audio/wav"}\\n\\n' +
+      'event: text_delta\\ndata: {"text":"UNTRUSTED_FOREIGN_TEXT","turn_id":"' + foreignTurnId + '"}\\n\\n'
+    );
+    let sent = false;
+    const reader = {
+      read() {
+        if (!sent) { sent = true; return Promise.resolve({value: frames, done: false}); }
+        return new Promise(resolve => { pendingRead = resolve; });
+      },
+      cancel() {
+        readerCancels += 1;
+        if (pendingRead) pendingRead({value: undefined, done: true});
+        return Promise.resolve();
+      },
+    };
+    window.fetch = (url, options = {}) => {
+      if (!String(url).startsWith('/voice/turn/stream')) {
+        return originalFetch(url, options);
+      }
+      requestSignal = options.signal || null;
+      if (requestSignal) requestSignal.addEventListener('abort', () => { signalAborts += 1; }, {once: true});
+      return Promise.resolve({ok: true, statusText: 'OK', body: {getReader: () => reader}});
+    };
+    let submittedTurnId = null;
+    await submitWavBlobAsVoiceTurn(
+      new Blob([new Uint8Array(44)], {type: 'audio/wav'}),
+      {
+        durationSec: 0.1,
+        sourceLabel: 'identity-mismatch',
+        onTurnStateCreated: turnState => { submittedTurnId = turnState.turnId; },
+      },
+    );
+    await delay(40);
+    const state = window.__ms4OracleVoiceAcceptanceState();
+    const result = {
+      submittedTurnId,
+      afterTurnId: currentVoiceTurnId,
+      readerCancels,
+      signalAborts,
+      requestSignalAborted: Boolean(requestSignal && requestSignal.aborted),
+      activeGeneratedSources: state.activeGeneratedSources,
+      prebufferDepth: state.prebufferDepth,
+      terminalKind: state.lastVoiceTurn && state.lastVoiceTurn.terminalKind,
+      boundTurnId: state.lastVoiceTurn && state.lastVoiceTurn.telemetry.serverTurnId,
+      scheduledChunks: state.lastVoiceTurn && state.lastVoiceTurn.telemetry.scheduledChunks,
+      stagePresence: oracleStage.dataset.presence,
+      foreignTextVisible: messages.textContent.includes('UNTRUSTED_FOREIGN_TEXT'),
+    };
+    window.fetch = originalFetch;
+    setOracleStageState('idle', 'Ready.', '');
+    return result;
+  })()`, {timeoutMs: CDP_BEHAVIOR_TIMEOUT_MS});
+  assert.equal(identityMismatch.afterTurnId, identityMismatch.submittedTurnId + 1, 'identity mismatch must invalidate the submitted turn ownership epoch');
+  assert.equal(identityMismatch.readerCancels, 1, 'identity mismatch must cancel the response reader exactly once');
+  assert.equal(identityMismatch.signalAborts, 1, 'identity mismatch must abort the request exactly once');
+  assert.equal(identityMismatch.requestSignalAborted, true);
+  assert.equal(identityMismatch.activeGeneratedSources, 0, 'identity mismatch must stop already scheduled generated audio');
+  assert.equal(identityMismatch.prebufferDepth, 0, 'identity mismatch must discard held audio');
+  assert.equal(identityMismatch.terminalKind, 'error_fail_closed');
+  assert.equal(identityMismatch.boundTurnId, 'ms4-turn-1111111111111111');
+  assert.ok(identityMismatch.scheduledChunks >= 1, 'setup must schedule owner-A audio before the mismatch');
+  assert.equal(identityMismatch.stagePresence, 'blocked');
+  assert.equal(identityMismatch.foreignTextVisible, false, 'foreign-identity text must never reach the visible conversation');
 
   // ---- Bounded multi-minute input integration (served production code). ----
   // First drive the real VAD onset/offset path through an ordinary 1.5 second
@@ -7100,7 +7327,7 @@ try {
       MS4_BROWSER_REPO_ROOT: process.env.MS4_BROWSER_REPO_ROOT || null,
     },
   };
-  const result = { ok: true, identity, visual, experiencePolish, dspDelegation, staleCues, facePrewarm, streamDeadline, bargeAck, ownershipRace, abort, audibleVerdict, retained, voiceReadinessState, snapshotOwnership, longInputSession, vad, fullDuplexRace, deferredAutoArm, productRepair, restBatch, restObservability, schedulerTiming };
+  const result = { ok: true, identity, visual, experiencePolish, dspDelegation, staleCues, facePrewarm, streamDeadline, bargeAck, ownershipRace, abort, audibleVerdict, retained, voiceReadinessState, snapshotOwnership, identityMismatch, longInputSession, vad, fullDuplexRace, deferredAutoArm, productRepair, restBatch, restObservability, schedulerTiming };
   const resultJson = `${JSON.stringify(result, null, 2)}\n`;
   resultJsonForSeal = resultJson;
 

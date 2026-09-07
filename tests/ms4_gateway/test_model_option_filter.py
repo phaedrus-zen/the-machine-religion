@@ -198,7 +198,7 @@ def test_face_and_depth_dropdowns_consume_the_same_filtered_list() -> None:
     html = HTML_PATH.read_text(encoding="utf-8")
     assert "const models = (data.models || []).filter(isChatCapableModel);" in html
     assert (
-        "_fillModelDropdown(modelSelect, 'Auto-pick Face Lobe model (small/fast)', "
+        "_fillModelDropdown(modelSelect, 'Auto-pick Face Lobe model (GPU-aware)', "
         "models, faceSel, true);"
     ) in html
     assert (

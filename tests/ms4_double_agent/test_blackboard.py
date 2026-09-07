@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 
@@ -132,6 +133,86 @@ def test_result_round_trip(board):
     assert restored is not None
     assert restored["status"] == "success"
     assert restored["summary"] == "found bridge issue"
+
+
+def test_voice_turn_identity_survives_revision_job_and_result_reload(board):
+    turn_id = "ms4-turn-0123456789abcdef"
+    revision = board.bump_revision(
+        "conv-voice-reload",
+        user_message_excerpt="run the depth check",
+        turn_id=turn_id,
+    )
+    assert revision.to_dict()["turn_id"] == turn_id
+
+    envelope = _make_envelope(conv="conv-voice-reload", revision=revision.revision_id)
+    envelope.turn_id = turn_id
+    board.insert_job(envelope)
+    board.insert_result(
+        JobResult(
+            job_id=envelope.job_id,
+            status="success",
+            summary="depth check complete",
+            conversation_revision_id=revision.revision_id,
+            turn_id=turn_id,
+        )
+    )
+
+    reloaded = Blackboard(board.path)
+    restored_envelope = reloaded.get_job(envelope.job_id)
+    restored_result = reloaded.get_result(envelope.job_id)
+    assert restored_envelope is not None
+    assert restored_envelope.turn_id == turn_id
+    assert restored_result is not None
+    assert restored_result["turn_id"] == turn_id
+    with reloaded._connect() as conn:
+        restored_revision = conn.execute(
+            "SELECT turn_id FROM conversation_revisions "
+            "WHERE conversation_id = ? AND revision_id = ?",
+            (revision.conversation_id, revision.revision_id),
+        ).fetchone()
+    assert restored_revision is not None
+    assert restored_revision["turn_id"] == turn_id
+
+
+def test_existing_revision_table_adds_turn_identity_column(tmp_path):
+    db_path = tmp_path / "legacy-double-agent.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE conversation_revisions ("
+            "conversation_id TEXT NOT NULL, revision_id INTEGER NOT NULL, "
+            "created_at TEXT NOT NULL, user_message_excerpt TEXT NOT NULL, "
+            "PRIMARY KEY (conversation_id, revision_id))"
+        )
+        conn.execute(
+            "INSERT INTO conversation_revisions "
+            "(conversation_id, revision_id, created_at, user_message_excerpt) "
+            "VALUES (?,?,?,?)",
+            (
+                "conv-legacy-voice",
+                1,
+                "2026-09-06T00:00:00+00:00",
+                "legacy revision",
+            ),
+        )
+
+    board = Blackboard(db_path)
+    revision = board.bump_revision(
+        "conv-legacy-voice",
+        user_message_excerpt="preserve this identity",
+        turn_id="ms4-turn-fedcba9876543210",
+    )
+    assert revision.revision_id == 2
+    assert revision.turn_id == "ms4-turn-fedcba9876543210"
+    with board._connect() as conn:
+        rows = conn.execute(
+            "SELECT revision_id, turn_id FROM conversation_revisions "
+            "WHERE conversation_id = ? ORDER BY revision_id",
+            ("conv-legacy-voice",),
+        ).fetchall()
+    assert [(row["revision_id"], row["turn_id"]) for row in rows] == [
+        (1, None),
+        (2, "ms4-turn-fedcba9876543210"),
+    ]
 
 
 def test_bump_revision_and_mark_stale(board):

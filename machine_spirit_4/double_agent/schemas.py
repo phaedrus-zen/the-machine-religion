@@ -285,6 +285,7 @@ class JobEnvelope:
     finished_at: str | None = None
     request_user: str | None = None
     prior_context: list[dict[str, str]] = field(default_factory=list)
+    turn_id: str | None = None
 
     def validate(self) -> None:
         if not safety.is_safe_job_id(self.job_id):
@@ -301,6 +302,8 @@ class JobEnvelope:
             raise SchemaError(f"unsafe latency_class: {self.latency_class!r}")
         if not safety.is_safe_state(self.state):
             raise SchemaError(f"unsafe state: {self.state!r}")
+        if self.turn_id is not None and not safety.is_safe_job_id(self.turn_id):
+            raise SchemaError(f"unsafe turn_id: {self.turn_id!r}")
         self.authority.validate_phase1()
         # Sanitize free text in place (idempotent).
         self.user_visible_goal = safety.coerce_user_visible_goal(self.user_visible_goal)
@@ -310,7 +313,7 @@ class JobEnvelope:
             raise SchemaError("user_visible_goal must be non-empty")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": SCHEMA_JOB,
             "job_id": self.job_id,
             "parent_conversation_id": self.parent_conversation_id,
@@ -332,6 +335,9 @@ class JobEnvelope:
             "request_user": self.request_user,
             "prior_context": sanitize_prior_context(self.prior_context),
         }
+        if self.turn_id is not None:
+            result["turn_id"] = self.turn_id
+        return result
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "JobEnvelope":
@@ -357,6 +363,7 @@ class JobEnvelope:
             finished_at=raw.get("finished_at"),
             request_user=(str(raw.get("request_user")) if raw.get("request_user") else None),
             prior_context=sanitize_prior_context(raw.get("prior_context")),
+            turn_id=(str(raw.get("turn_id")) if raw.get("turn_id") else None),
         )
         env.validate()
         return env
@@ -455,6 +462,7 @@ class JobResult:
     confidence: str = "low"
     finished_at: str = field(default_factory=_now_iso)
     conversation_revision_id: int = 1
+    turn_id: str | None = None
 
     def validate(self) -> None:
         if not safety.is_safe_job_id(self.job_id):
@@ -463,12 +471,14 @@ class JobResult:
             raise SchemaError(f"unsafe result status: {self.status!r}")
         if not safety.is_safe_confidence(self.confidence):
             raise SchemaError(f"unsafe confidence: {self.confidence!r}")
+        if self.turn_id is not None and not safety.is_safe_job_id(self.turn_id):
+            raise SchemaError(f"unsafe turn_id: {self.turn_id!r}")
         self.summary = safety.coerce_safe_text(self.summary, max_chars=1024)
         # text is full Hermes final response — allowed length, but still scrub control chars
         self.text = safety.coerce_safe_text(self.text, max_chars=200_000)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": SCHEMA_RESULT,
             "job_id": self.job_id,
             "status": self.status,
@@ -481,6 +491,9 @@ class JobResult:
             "finished_at": self.finished_at,
             "conversation_revision_id": int(self.conversation_revision_id),
         }
+        if self.turn_id is not None:
+            result["turn_id"] = self.turn_id
+        return result
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "JobResult":
@@ -497,6 +510,7 @@ class JobResult:
             confidence=str(raw.get("confidence") or "low"),
             finished_at=str(raw.get("finished_at") or _now_iso()),
             conversation_revision_id=int(raw.get("conversation_revision_id") or 1),
+            turn_id=(str(raw.get("turn_id")) if raw.get("turn_id") else None),
         )
         result.validate()
         return result
@@ -508,19 +522,41 @@ class ConversationRevision:
     revision_id: int
     user_message_excerpt: str
     created_at: str = field(default_factory=_now_iso)
+    turn_id: str | None = None
 
     def validate(self) -> None:
         if not safety.is_safe_conversation_id(self.conversation_id):
             raise SchemaError(f"unsafe conversation_id: {self.conversation_id!r}")
         if not isinstance(self.revision_id, int) or self.revision_id < 1:
             raise SchemaError("revision_id must be a positive integer")
+        if self.turn_id is not None and not safety.is_safe_job_id(self.turn_id):
+            raise SchemaError(f"unsafe turn_id: {self.turn_id!r}")
         self.user_message_excerpt = safety.coerce_user_message_excerpt(self.user_message_excerpt)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": SCHEMA_REVISION,
             "conversation_id": self.conversation_id,
             "revision_id": int(self.revision_id),
             "user_message_excerpt": self.user_message_excerpt,
             "created_at": self.created_at,
         }
+        if self.turn_id is not None:
+            result["turn_id"] = self.turn_id
+        return result
+
+
+def result_matches_job_identity(
+    job: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> bool:
+    """Return whether a persisted result belongs to this exact job turn."""
+    return bool(
+        isinstance(job, dict)
+        and isinstance(result, dict)
+        and result.get("schema") == SCHEMA_RESULT
+        and result.get("job_id") == job.get("job_id")
+        and result.get("conversation_revision_id")
+        == job.get("conversation_revision_id")
+        and result.get("turn_id") == job.get("turn_id")
+    )

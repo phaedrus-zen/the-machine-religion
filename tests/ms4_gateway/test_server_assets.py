@@ -431,6 +431,7 @@ def test_voice_stream_write_failure_nacks_producer_and_joins_worker(monkeypatch)
 
 def test_voice_stream_accepts_one_strict_transcript_ready_envelope(monkeypatch):
     transcript = "alpha sentinel repeated phrase repeated phrase omega sentinel"
+    turn_id = "ms4-turn-fedcba9876543210"
     envelope = {
         "schema": "Ms4VoiceTranscriptTurn.v1",
         "transcript": transcript,
@@ -440,6 +441,7 @@ def test_voice_stream_accepts_one_strict_transcript_ready_envelope(monkeypatch):
     stream_calls: list[dict] = []
     transcribe_calls: list[dict] = []
     events: list[tuple[str, dict]] = []
+    audit_events: list[tuple[str, dict]] = []
     network_asr_calls = 0
 
     def forbidden_network_asr(**_kwargs):
@@ -458,16 +460,24 @@ def test_voice_stream_accepts_one_strict_transcript_ready_envelope(monkeypatch):
         transcribe_calls.append(result)
         assert kwargs["emit"](
             "transcript",
-            {"text": result["text"], "raw_text": result["text"], "asr_ms": 0, "model": result["model"]},
+            {
+                "text": result["text"],
+                "raw_text": result["text"],
+                "asr_ms": 0,
+                "model": result["model"],
+                "turn_id": kwargs["turn_id"],
+            },
         )
         return {
+            "turn_id": kwargs["turn_id"],
             "transcript": result["text"],
             "raw_transcript": result["text"],
             "reply_text": "",
             "session_id": "strict-json-session",
             "foreground_model": None,
             "router": None,
-            "dispatched_job": None,
+            "dispatched_job": {"job_id": "da-identity-proof"},
+            "revision_id": 4,
             "grounding_source": None,
             "transcription_model": result["model"],
             "tts_model": "tts-1",
@@ -479,7 +489,15 @@ def test_voice_stream_accepts_one_strict_transcript_ready_envelope(monkeypatch):
         return True
 
     monkeypatch.setattr(srv_module, "transcribe", forbidden_network_asr)
+    monkeypatch.setattr(srv_module, "_new_voice_turn_id", lambda: turn_id)
     monkeypatch.setattr(srv_module, "voice_ptt_turn_stream", fake_stream)
+    monkeypatch.setattr(
+        srv_module,
+        "append_event",
+        lambda event, payload, **_kwargs: audit_events.append(
+            (event, dict(payload))
+        ),
+    )
     monkeypatch.setattr(srv_module, "_sse_start", lambda _handler: None)
     monkeypatch.setattr(srv_module, "_sse_event", fake_sse)
 
@@ -491,11 +509,25 @@ def test_voice_stream_accepts_one_strict_transcript_ready_envelope(monkeypatch):
     assert call["audio"] == b""
     assert call["filename"] == "transcript.json"
     assert call["transcribe_model"] == "bounded-session"
+    assert call["turn_id"] == turn_id
     assert callable(call["transcribe_fn"])
     assert transcribe_calls == [{"text": transcript, "model": "bounded-session"}]
     assert network_asr_calls == 0
     assert [event for event, _payload in events].count("transcript") == 1
     assert [event for event, _payload in events].count("done") == 1
+    assert all(
+        payload["turn_id"] == turn_id
+        for event, payload in events
+        if event in {"status", "transcript", "done"}
+    )
+    complete = next(
+        payload
+        for event, payload in audit_events
+        if event == "voice_turn_complete"
+    )
+    assert complete["turn_id"] == turn_id
+    assert complete["revision_id"] == 4
+    assert complete["dispatched_job"]["job_id"] == "da-identity-proof"
 
 
 def test_voice_stream_rejects_ambiguous_or_oversize_transcript_envelopes(monkeypatch):

@@ -85,6 +85,7 @@ from .schemas import (
     ResourceRequest,
     SchemaError,
     StatusPolicy,
+    result_matches_job_identity,
 )
 from .worker import DoubleAgentWorker, WorkerCanceled, build_real_chat_runner
 
@@ -137,4 +138,5 @@ __all__ = [
     "make_llm_continuation_classifier",
     "phrase_is_continuation",
     "router_route",
+    "result_matches_job_identity",
 ]

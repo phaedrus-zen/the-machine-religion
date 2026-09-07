@@ -2916,10 +2916,26 @@ def test_voice_stream_engine_ws_super_routes_through_ws_engine(monkeypatch):
     def fake_transcribe(**_):
         return {"text": "Tell me three things.", "model": "whisper-1"}
 
-    def fake_chat(message, *, session_id=None, model=None, stream_callback=None, **_):
+    chat_turn_ids: list[str | None] = []
+
+    def fake_chat(
+        message,
+        *,
+        session_id=None,
+        model=None,
+        stream_callback=None,
+        turn_id=None,
+        **_,
+    ):
+        chat_turn_ids.append(turn_id)
         for word in "First sentence. Second sentence. Third one.".split():
             stream_callback(word + " ")
-        return {"text": "First sentence. Second sentence. Third one.", "session_id": "s"}
+        return {
+            "text": "First sentence. Second sentence. Third one.",
+            "session_id": "s",
+            "turn_id": turn_id,
+            "revision_id": 7,
+        }
 
     class _FakeWsEngine:
         def __init__(self, *, hivemind_url, voice, emit, t_start, **_):
@@ -2998,12 +3014,19 @@ def test_voice_stream_engine_ws_super_routes_through_ws_engine(monkeypatch):
     audio_chunks = [p for e, p in events if e == "audio_chunk"]
     assert scheduled
     assert len(audio_chunks) >= 1, "expected at least one audio_chunk from the fake ws engine"
+    transcript = next(payload for event, payload in events if event == "transcript")
+    turn_id = transcript["turn_id"]
+    assert chat_turn_ids == [turn_id]
+    assert result["turn_id"] == turn_id
+    assert result["revision_id"] == 7
     assert event_types.index("chunk_scheduled") < event_types.index("audio_chunk")
     # Same payload shape as the REST engine — the UI consumes both unchanged.
     for p in audio_chunks:
         assert {"index", "text", "audio_base64", "audio_mime", "tts_ms", "held_for_inorder_ms", "engine"} <= set(p.keys())
         assert p["engine"] == "ws_super"
         assert p["held_for_inorder_ms"] == 0  # WS path is naturally ordered
+        assert p["turn_id"] == turn_id
+        assert p["chunk_id"].startswith(f"{turn_id}-c")
     # Final metrics block declares the engine and zero parallel-related fields.
     m = result["metrics"]
     assert m["engine"] == "ws_super"
@@ -3307,6 +3330,15 @@ def test_ws_zero_audio_fallback_keeps_format_and_exact_metrics(monkeypatch, pin_
     metrics = result["metrics"]
     audio = [payload for name, payload in events if name == "audio_chunk"]
     assert len(audio) >= 2
+    turn_id = result["turn_id"]
+    transcript = next(payload for name, payload in events if name == "transcript")
+    assert transcript["turn_id"] == turn_id
+    assert all(payload["turn_id"] == turn_id for payload in audio)
+    assert len({payload["chunk_id"] for payload in audio}) == len(audio)
+    assert all(
+        payload["chunk_id"].startswith(f"{turn_id}-fallback-c")
+        for payload in audio
+    )
     assert formats and set(formats) == {"mp3"}
     assert metrics["rest_fallback_used"] is True
     assert metrics["audio_chunks"] == len(audio)
@@ -6201,10 +6233,26 @@ def test_rest_producer_mints_turn_and_unique_chunk_ids_end_to_end(monkeypatch):
     def fake_transcribe(**_):
         return {"text": "Give me three producer facts.", "model": "whisper-1"}
 
-    def fake_chat(message, *, session_id=None, model=None, stream_callback=None, **_):
+    chat_turn_ids: list[str | None] = []
+
+    def fake_chat(
+        message,
+        *,
+        session_id=None,
+        model=None,
+        stream_callback=None,
+        turn_id=None,
+        **_,
+    ):
+        chat_turn_ids.append(turn_id)
         for word in reply.split(" "):
             stream_callback(word + " ")
-        return {"text": reply, "session_id": "sess-prod"}
+        return {
+            "text": reply,
+            "session_id": "sess-prod",
+            "turn_id": turn_id,
+            "revision_id": 9,
+        }
 
     call = {"n": 0}
 
@@ -6236,6 +6284,7 @@ def test_rest_producer_mints_turn_and_unique_chunk_ids_end_to_end(monkeypatch):
     )
 
     audio_payloads = [p for e, p in emitted if e == "audio_chunk"]
+    transcript_payload = next(p for e, p in emitted if e == "transcript")
     # Setup precondition (guaranteed by the multi-sentence reply): >=2 real producer
     # chunks so uniqueness is meaningful. This is producer OUTPUT, not an id contract.
     assert len(audio_payloads) >= 2, (
@@ -6256,6 +6305,11 @@ def test_rest_producer_mints_turn_and_unique_chunk_ids_end_to_end(monkeypatch):
     assert len(emitted_turn_ids) == 1, (
         f"producer turn_id must be stable across the turn; got {emitted_turn_ids}"
     )
+    turn_id = next(iter(emitted_turn_ids))
+    assert transcript_payload["turn_id"] == turn_id
+    assert chat_turn_ids == [turn_id]
+    assert result["turn_id"] == turn_id
+    assert result["revision_id"] == 9
 
     # (2) One nonempty PRODUCER chunk_id per emitted chunk, UNIQUE across the turn.
     emitted_chunk_ids = [_chunk_server_id(p, "chunk_id") for p in audio_payloads]

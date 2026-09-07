@@ -56,8 +56,11 @@ def test_mcp_registry_exposes_desktop_tools():
     assert "ms4.desktop.action@v1" in registry
 
 
-def test_desktop_action_tool_runs_ethics_before_action(monkeypatch):
+def test_desktop_action_tool_runs_ethics_before_action_without_auditing_values(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("MS4_DESKTOP_CONTROL", "1")
+    sentinel = "DO_NOT_PERSIST_DESKTOP_ARGUMENT"
     runtime = FakeRuntime()
     response = handle_jsonrpc(
         {
@@ -66,7 +69,12 @@ def test_desktop_action_tool_runs_ethics_before_action(monkeypatch):
             "method": "tools/call",
             "params": {
                 "name": "ms4.desktop.action@v1",
-                "arguments": {"action": "wait", "seconds": 0},
+                "arguments": {
+                    "action": "wait",
+                    "seconds": 0,
+                    "confirm": True,
+                    "password": sentinel,
+                },
             },
         },
         runtime,
@@ -79,6 +87,14 @@ def test_desktop_action_tool_runs_ethics_before_action(monkeypatch):
     assert runtime.ethics_payloads[0]["risk_class"] == "low"
     assert runtime.ethics_payloads[0]["requires_safety_clearance"] is False
     assert "Ms4DesktopActionResult.v1" in response["result"]["content"][0]["text"]
+    audit_text = (tmp_path / "ms4_audit.jsonl").read_text(encoding="utf-8")
+    desktop_event = next(
+        event
+        for event in map(json.loads, audit_text.splitlines())
+        if event["event_type"] == "desktop_action"
+    )
+    assert desktop_event["parameter_names"] == ["seconds"]
+    assert sentinel not in audit_text
 
 
 def test_desktop_type_action_is_ethics_evaluated_without_physical_safety_clearance(monkeypatch):
@@ -92,7 +108,11 @@ def test_desktop_type_action_is_ethics_evaluated_without_physical_safety_clearan
             "method": "tools/call",
             "params": {
                 "name": "ms4.desktop.action@v1",
-                "arguments": {"action": "type", "text": "MS4 desktop smoke"},
+                "arguments": {
+                    "action": "type",
+                    "text": "MS4 desktop smoke",
+                    "confirm": True,
+                },
             },
         },
         runtime,

@@ -49,6 +49,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import ntpath
 import os
 import re
@@ -64,6 +65,10 @@ from pathlib import Path, PurePath
 from typing import BinaryIO, Callable
 
 from . import provenance, state, versioning
+
+_LOG = logging.getLogger(__name__)
+_HEX_COMMIT_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+_PRERELEASE_TARGET_RE = re.compile(r"^\s*v?\d+(?:\.\d+){0,2}-")
 
 
 MS4_ROOT = Path(__file__).resolve().parents[1]
@@ -246,6 +251,28 @@ def _local_update_snapshot() -> state.UpdateJobSnapshot | None:
         ):
             return snapshot
     return None
+
+
+def recover_interrupted_update() -> state.UpdateJobSnapshot | None:
+    """Fail an ownerless durable running job after a cold process start.
+
+    A live updater proves ownership with both the process-local job id and the
+    cross-process lock.  If neither exists, the persisted ``running`` snapshot
+    came from an interrupted process and must not keep the UI disabled forever.
+    """
+    snapshot = state.last_update(refresh=True)
+    if snapshot is None or snapshot.status != "running":
+        return snapshot
+    if _local_update_snapshot() is not None:
+        return snapshot
+    try:
+        job_lock = _WholeJobLock.acquire(_update_lock_path())
+    except HermesUpdateLockedError:
+        return snapshot
+    try:
+        return state.fail_interrupted_job()
+    finally:
+        job_lock.release()
 
 
 _GIT_TAG_RE = re.compile(r"^v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
@@ -2422,7 +2449,24 @@ def _verify_release_provenance(
     they already inject pip/validate -- so the F2/F3/F6/F8 behavior they assert
     is unchanged. The real gate (accept + every refusal direction) is proven
     against real SSH signatures in ``tests/ms4_hermes_admin/test_provenance_r1.py``.
+
+    Under ``HERMES_RELEASE_SIGNATURE_POLICY=allow_unsigned`` (the default) the
+    cryptographic signer check is the ONLY step skipped; see
+    :func:`_verify_unsigned_release_bindings` for what still runs.
     """
+    if (
+        versioning.release_signature_policy()
+        == versioning.RELEASE_SIGNATURE_POLICY_ALLOW_UNSIGNED
+    ):
+        _verify_unsigned_release_bindings(
+            mode=mode,
+            target=target,
+            tag=tag,
+            directory=directory,
+            expected_commit=expected_commit,
+            current_version=current_version,
+        )
+        return
     state.set_phase("verifying_provenance")
     try:
         provenance.verify_update_provenance(
@@ -2439,6 +2483,138 @@ def _verify_release_provenance(
         raise HermesUpgradeError(f"F4 provenance verification failed: {exc}") from exc
 
 
+def _verify_unsigned_release_bindings(
+    *,
+    mode: str,
+    target: str,
+    tag: str | None,
+    directory: Path | None,
+    expected_commit: str | None,
+    current_version: str | None,
+) -> None:
+    """``allow_unsigned`` counterpart of the F4 gate; runs in the same slot.
+
+    Everything that does not depend on a tag signature still runs: stable
+    (non-prerelease) target, the anti-downgrade floor, the origin / platform /
+    arch allowlists whenever the operator configured them, no replace refs,
+    and the fetched tag resolving to the exact commit the checkout is about to
+    activate (plus the upstream tag-object bindings when the annotated tag
+    carries them). Only the cryptographic signer verification is skipped, and
+    that is logged at WARNING and stamped into the job audit trail. Wheel
+    version equality and rollback are enforced by the caller as before.
+    """
+    label = tag or f"hermes-agent=={target}"
+    warning = f"signature policy allow_unsigned: installing unsigned tag {label}"
+    state.set_phase("verifying_provenance", note=warning)
+    _LOG.warning(warning)
+    if mode not in {"editable", "pypi"}:
+        raise HermesUpgradeError(f"unknown install mode for provenance: {mode!r}")
+    if _PRERELEASE_TARGET_RE.match(target):
+        raise HermesUpgradeError(
+            f"release version {target!r} is a prerelease; updates require stable versions"
+        )
+    target_parsed = versioning.parse_semver(target)
+    if target_parsed is None:
+        raise HermesUpgradeError(f"release version {target!r} is not parseable")
+    try:
+        policy = provenance.ProvenancePolicy.from_environ(
+            dict(os.environ),
+            source_kind="git" if mode == "editable" else "pypi",
+            current_version=current_version,
+        )
+    except provenance.ProvenanceError as exc:
+        raise HermesUpgradeError(f"release policy is malformed: {exc}") from exc
+    if policy.min_version is not None:
+        floor = versioning.parse_semver(policy.min_version)
+        if floor is None or target_parsed < floor:
+            raise HermesUpgradeError(
+                f"release version {target} is below the floor {policy.min_version} "
+                "(downgrade/replay refused)"
+            )
+    host_platform = provenance.normalize_platform()
+    host_arch = provenance.normalize_arch()
+    if policy.allowed_platforms and host_platform not in policy.allowed_platforms:
+        raise HermesUpgradeError(f"platform {host_platform!r} is not permitted by policy")
+    if policy.allowed_arches and host_arch not in policy.allowed_arches:
+        raise HermesUpgradeError(f"architecture {host_arch!r} is not permitted by policy")
+    if mode == "pypi":
+        state.append_progress(
+            "unsigned wheel: attestation skipped by policy; pip resolves the exact "
+            "pinned version and post-install validation binds it"
+        )
+        return
+    if not tag:
+        raise HermesUpgradeError("editable update requires a resolved release tag")
+    if directory is None:
+        raise HermesUpgradeError("editable update requires a checkout directory")
+    if expected_commit is None or not _HEX_COMMIT_RE.fullmatch(expected_commit):
+        raise HermesUpgradeError("editable update requires a valid 40/64-hex expected commit")
+    verifier = provenance.GitSignedTagVerifier(
+        allowed_signers_file=None,
+        directory=str(directory),
+    )
+    try:
+        origin = verifier.read_origin()
+        if (
+            policy.allowed_origins
+            and provenance.normalize_origin(origin) not in policy.allowed_origins
+        ):
+            raise provenance.ProvenanceError(
+                f"release origin {origin!r} is not in the configured origin allowlist"
+            )
+        verifier.assert_no_replace_refs()
+    except provenance.ProvenanceError as exc:
+        raise HermesUpgradeError(f"unsigned release binding failed: {exc}") from exc
+    resolved = verifier.runner(
+        [
+            "git", "-C", str(directory),
+            "rev-parse", "--verify", "--end-of-options",
+            f"refs/tags/{tag}^{{commit}}",
+        ]
+    )
+    resolved_commit = (resolved.stdout or "").strip()
+    if resolved.returncode != 0 or not _HEX_COMMIT_RE.fullmatch(resolved_commit):
+        raise HermesUpgradeError(f"could not resolve tag {tag!r} to a commit id")
+    if resolved_commit.lower() != expected_commit.lower():
+        raise HermesUpgradeError(
+            f"tag {tag!r} resolves to {resolved_commit}, not the fetched commit "
+            f"{expected_commit}"
+        )
+    try:
+        tag_object = verifier.resolve_tag_object(tag)
+    except provenance.ProvenanceError:
+        state.append_progress(
+            f"unsigned tag {tag} is lightweight; bound by commit {resolved_commit} only"
+        )
+        return
+    raw = verifier.runner(["git", "-C", str(directory), "cat-file", "tag", tag_object])
+    if raw.returncode != 0:
+        raise HermesUpgradeError(f"could not read tag object {tag_object!r}")
+    manifest = provenance.parse_upstream_tag_object(raw.stdout or "")
+    if manifest is None:
+        note = (
+            f"unsigned tag {tag} does not carry upstream release metadata; "
+            f"bound by commit {resolved_commit} only"
+        )
+        state.append_progress(note)
+        _LOG.warning(note)
+        return
+    for actual, expected, what in (
+        (manifest.name, "hermes-agent", "release name"),
+        (manifest.version, target, "release version"),
+        (manifest.tag, tag, "release tag"),
+        (manifest.commit.lower(), expected_commit.lower(), "tag object commit"),
+    ):
+        if actual != expected:
+            raise HermesUpgradeError(
+                f"unsigned tag {tag!r} {what} mismatch: tag says {actual!r}, "
+                f"release says {expected!r}"
+            )
+    state.append_progress(
+        f"unsigned tag {tag} bound to commit {resolved_commit} and version {target}"
+    )
+
+
 def _verify_release_origin_preflight(
     *,
     directory: Path,
@@ -2448,6 +2624,35 @@ def _verify_release_origin_preflight(
     """Fail before fetch when policy, replace refs, or checkout origin are unsafe."""
     if record_phase:
         state.set_phase("verifying_origin")
+    if (
+        versioning.release_signature_policy()
+        == versioning.RELEASE_SIGNATURE_POLICY_ALLOW_UNSIGNED
+    ):
+        # Signature-independent subset: replace refs, readable origin, and the
+        # origin allowlist when configured. The allowed_signers / trusted
+        # ssh-keygen requirements only serve signature verification.
+        try:
+            policy = provenance.ProvenancePolicy.from_environ(
+                dict(os.environ),
+                source_kind="git",
+                current_version=current_version,
+            )
+            verifier = provenance.GitSignedTagVerifier(
+                allowed_signers_file=None,
+                directory=str(directory),
+            )
+            verifier.assert_no_replace_refs()
+            origin = verifier.read_origin()
+            if (
+                policy.allowed_origins
+                and provenance.normalize_origin(origin) not in policy.allowed_origins
+            ):
+                raise provenance.ProvenanceError(
+                    f"release origin {origin!r} is not in the configured origin allowlist"
+                )
+        except provenance.ProvenanceError as exc:
+            raise HermesUpgradeError(f"F4 origin preflight failed: {exc}") from exc
+        return origin
     try:
         return provenance.verify_editable_preflight(
             directory=str(directory),
@@ -2456,6 +2661,27 @@ def _verify_release_origin_preflight(
         )
     except provenance.ProvenanceError as exc:
         raise HermesUpgradeError(f"F4 origin preflight failed: {exc}") from exc
+
+
+def _resolve_update_target(
+    current_version: str | None,
+    *,
+    force_refresh: bool = False,
+) -> versioning.CachedLatest | None:
+    """Release the primary Update control installs, per the signature policy."""
+    return versioning.latest_offerable_version(
+        current_version if isinstance(current_version, str) else None,
+        force_refresh=force_refresh,
+    )
+
+
+def _no_newer_release_error() -> HermesUpgradeError:
+    if (
+        versioning.release_signature_policy()
+        == versioning.RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED
+    ):
+        return HermesUpgradeError("No newer signed Hermes release is available")
+    return HermesUpgradeError("No newer Hermes release is available")
 
 
 def _require_canonical_production_origin(origin: str) -> None:
@@ -2543,12 +2769,15 @@ def _run_update_job_locked(
                 fetch_origin = vetted_origin
 
         state.set_phase("fetching_release")
-        latest = versioning.latest_version(force_refresh=True)
-        # Refresh the recent releases too so resolve_git_tag can pair the
-        # operator-picked wheel version to its actual git tag.
-        versioning.recent_releases(force_refresh=True)
+        if target_version is None:
+            latest = _resolve_update_target(mode.get("version"), force_refresh=True)
+        else:
+            latest = versioning.latest_version(force_refresh=True)
+            # Refresh the recent releases too so resolve_git_tag can pair the
+            # operator-picked wheel version to its actual git tag.
+            versioning.recent_releases(force_refresh=True)
         if not latest and not target_version:
-            raise HermesUpgradeError("Could not determine latest Hermes release and no target_version supplied")
+            raise _no_newer_release_error()
         target = target_version or (latest.version if latest else "")
         if (
             not target
@@ -2929,11 +3158,15 @@ def trigger_update(
             )
             _require_canonical_production_origin(vetted_origin)
         from_version = mode.get("version")
-        latest = versioning.latest_version()
-        to_version = target_version or (latest.version if latest else None)
+        resolved_target = target_version
+        if resolved_target is None:
+            latest = _resolve_update_target(from_version)
+            if latest is None:
+                raise _no_newer_release_error()
+            resolved_target = latest.version
         snap = state.start_job(
             from_version=from_version,
-            to_version=to_version,
+            to_version=resolved_target,
             install_mode=mode.get("mode"),
             request_user=request_user,
         )
@@ -2949,7 +3182,7 @@ def trigger_update(
     def worker() -> None:
         try:
             run_update_job(
-                target_version=target_version,
+                target_version=resolved_target,
                 plugin_src=plugin_src,
                 venv_python=venv_python,
                 vetted_origin=vetted_origin,

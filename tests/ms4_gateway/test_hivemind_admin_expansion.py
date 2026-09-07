@@ -133,6 +133,18 @@ _HEALTHY_CHAT_LIFECYCLE = {
 }
 
 
+def _patch_healthy_foreground_model(monkeypatch) -> None:
+    monkeypatch.setattr(
+        oracle_admin,
+        "choose_foreground_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="nemotron-3-nano:4b",
+            source="loaded",
+            detail="test catalog admission",
+        ),
+    )
+
+
 # ===========================================================================
 # Wrappers + admin modules
 # ===========================================================================
@@ -220,6 +232,7 @@ def test_oracle_admin_readiness_degraded_is_not_labeled_safe(monkeypatch):
     ],
 )
 def test_oracle_admin_readiness_keeps_chat_ready_when_voice_input_unavailable(monkeypatch, voice_entry):
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",
@@ -261,6 +274,7 @@ def test_oracle_admin_readiness_keeps_chat_ready_when_voice_input_unavailable(mo
 
 
 def test_oracle_admin_readiness_accepts_running_asr(monkeypatch):
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",

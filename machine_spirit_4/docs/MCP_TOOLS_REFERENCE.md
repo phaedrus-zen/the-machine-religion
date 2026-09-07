@@ -71,13 +71,13 @@ Returns `{}`.
 | `ms4.hivemind.inventory@v1` | read-only | Return deterministic live HiveMind node/GPU inventory via read-only HiveMind MCP tools. |
 | `ms4.nibbles.dry_run@v1` | dry-run only | Validate Nibbles scare/physical action intents without hardware. |
 | `ms4.hermes.tools.list@v1` | read-only | List Hermes tools exposed through the full MS4 body. |
-| `ms4.hermes.tool.call@v1` | runtime action | Dispatch a Hermes tool through MS4. Effectful tools are mediated by `ms4_consciousness` and MS3 ethics. |
+| `ms4.hermes.tool.call@v1` | runtime action | Dispatch a Hermes tool through MS4 after MCP `confirm:true`; downstream admission and ethics checks remain in force. |
 | `ms4.runtime.deps.status@v1` | read-only | Report contained MS4 runtime dependency and capability status: Python executable, venv, Hermes/plugin imports, browser/desktop packages, MS3 binary, and Playwright cache. |
 | `ms4.hermes.version@v1` | read-only | Current vs latest Hermes Agent version via public GitHub releases (cached ~1 h); reports install mode, install directory, last-update snapshot. |
 | `ms4.hermes.releases@v1` | read-only | Recent Hermes releases for the pin-a-version dropdown (`per_page=20`, cached ~1 h). |
-| `ms4.hermes.update@v1` | runtime action | Trigger an idempotent in-place Hermes upgrade to the latest release or a pinned `target_version`. Spawns a background job; poll `ms4.hermes.update.status@v1`. |
+| `ms4.hermes.update@v1` | runtime action | After MCP `confirm:true`, trigger an idempotent in-place Hermes upgrade to the latest release or a pinned `target_version`. Spawns a background job; poll `ms4.hermes.update.status@v1`. |
 | `ms4.hermes.update.status@v1` | read-only | Current/last Hermes upgrade job phase and progress trail. |
-| `ms4.double_agent.submit@v1` | runtime action | Submit a Double Agent job (foreground/background lobe coordination). Enforces `AuthorityEnvelope.can_mutate_world=false` and safe-id guards in phase 1. |
+| `ms4.double_agent.submit@v1` | runtime action | Currently denied at MCP dispatch until `can_mutate_world=false` fences every worker tool call and worker admission is bounded. |
 | `ms4.double_agent.status@v1` | read-only | Current snapshot for one Double Agent job (state, `last_safe_user_status`, `is_stale`). |
 | `ms4.double_agent.list@v1` | read-only | List Double Agent jobs, optionally filtered by `conversation_id` and `states`. |
 | `ms4.double_agent.events@v1` | read-only | Recent allowlisted lifecycle events for a job. Raw model tokens are never returned. |
@@ -85,12 +85,13 @@ Returns `{}`.
 | `ms4.double_agent.mark_stale@v1` | runtime action | Mark a Double Agent job stale (e.g. when the user changes direction); also signals the worker to stop. |
 | `ms4.desktop.status@v1` | read-only | Report Windows desktop-control readiness, screen size, active window context, and control flag state. |
 | `ms4.desktop.capture@v1` | read-only | Capture desktop screenshot metadata and optionally a base64 image. |
-| `ms4.desktop.action@v1` | runtime action | Perform local desktop UI actions such as wait, move, click, scroll, type, hotkey, and focus window. Requires `MS4_DESKTOP_CONTROL=1`, MS3 ethics mediation, hard safety blocks, and audit logging. |
+| `ms4.desktop.action@v1` | runtime action | Perform local desktop UI actions such as wait, move, click, scroll, type, hotkey, and focus window. Requires MCP `confirm:true`, `MS4_DESKTOP_CONTROL=1`, MS3 ethics mediation, hard safety blocks, and audit logging. |
 
 ## Safety Notes
 
-- v1 tools are read-only or dry-run only except `ms4.chat.send@v1`, `ms4.hermes.tool.call@v1`, `ms4.desktop.action@v1`, `ms4.hermes.update@v1`, `ms4.double_agent.submit@v1`, `ms4.double_agent.cancel@v1`, and `ms4.double_agent.mark_stale@v1`.
+- The complete native runtime-action inventory is `safety.effectful_tools_in_v1` in the manifest; the validator requires exact parity with the independent registry classification.
 - `ms4.hermes.tool.call@v1` exposes full Hermes tool dispatch. It is intentionally available in full-MS4 mode and should be treated as a runtime action surface.
+- Every native runtime action publishes its gate, bounds, idempotency, cancellation, audit, and result-state policy in `_meta["ms4/runtimeActionPolicy"]`. A missing or invalid native policy makes `tools/list` and `tools/call` fail closed.
 - `ms4.desktop.action@v1` exposes full local desktop action dispatch. It is intentionally available in full-MS4 mode only when `MS4_DESKTOP_CONTROL=1`.
 - `ms4.hermes.update@v1` runs `pip install` (and optionally `git fetch`/`git checkout`) inside the contained MS4 venv. `target_version` is checked with `is_safe_target_version` before any shell interpolation; the installer refuses anything containing shell metacharacters or longer than 32 chars. A second update call while one is already running returns the in-flight snapshot rather than spawning a parallel install.
 - `ms4.chat.send@v1` can trigger Hermes tools, but effectful tool calls must pass `ms4_consciousness` and MS3 ethics gates.
@@ -139,7 +140,7 @@ Check desktop status:
 Perform a harmless desktop wait action after setting `MS4_DESKTOP_CONTROL=1`:
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ms4.desktop.action@v1","arguments":{"action":"wait","seconds":0}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ms4.desktop.action@v1","arguments":{"action":"wait","seconds":0,"confirm":true}}}
 ```
 
 Send fused chat:
@@ -157,13 +158,13 @@ Check current vs latest Hermes:
 Trigger an upgrade to the latest release (no version pin):
 
 ```json
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"ms4.hermes.update@v1","arguments":{"request_user":"operator"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"ms4.hermes.update@v1","arguments":{"request_user":"operator","confirm":true}}}
 ```
 
 Pin a specific release:
 
 ```json
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"ms4.hermes.update@v1","arguments":{"target_version":"0.14.0"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"ms4.hermes.update@v1","arguments":{"target_version":"0.14.0","confirm":true}}}
 ```
 
 Poll the in-flight phase:
@@ -172,7 +173,7 @@ Poll the in-flight phase:
 {"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"ms4.hermes.update.status@v1","arguments":{}}}
 ```
 
-Submit a Double Agent job (foreground stays responsive while the background lobe works):
+Inspect the held Double Agent submission contract (this call currently returns `denied` and spawns no worker):
 
 ```json
 {"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"ms4.double_agent.submit@v1","arguments":{"parent_conversation_id":"ms4-session-abc","conversation_revision_id":1,"background_lobe_type":"deep_coder","user_visible_goal":"Audit the async worker for deadlocks.","internal_goal":"Audit the async worker for lock-across-await and report the file:line."}}}

@@ -159,6 +159,7 @@ def test_version_info_does_not_advertise_unsigned_newer_release(monkeypatch):
     signature bytes on the official annotated tag object is required before
     ``update_available`` becomes true; F4 still verifies the signer later.
     """
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
     versioning._clear_caches_for_test()
     monkeypatch.setattr(
         versioning,
@@ -218,6 +219,7 @@ def test_version_info_does_not_advertise_unsigned_newer_release(monkeypatch):
 def test_version_info_advertises_newer_release_only_when_tag_has_signature_bytes(
     monkeypatch,
 ):
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
     versioning._clear_caches_for_test()
     monkeypatch.setattr(
         versioning,
@@ -276,6 +278,324 @@ def test_version_info_advertises_newer_release_only_when_tag_has_signature_bytes
     assert info["latest_signature_state"] == "signed"
     assert info["update_available"] is True
     assert info["update_blocked_reason"] is None
+
+
+def test_version_info_offers_newest_newer_signed_fallback(monkeypatch):
+    """An unsigned publication must not hide an earlier actionable release."""
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
+    versioning._clear_caches_for_test()
+    monkeypatch.setattr(
+        versioning,
+        "install_mode",
+        lambda: {
+            "mode": "editable",
+            "version": "0.19.0",
+            "directory": None,
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        "machine_spirit_4.hermes_admin.state.last_update",
+        lambda refresh=True: None,
+    )
+    releases = [
+        {
+            "tag_name": "v2026.8.31",
+            "name": "Hermes Agent v0.21.0 (v2026.8.31)",
+            "published_at": "2026-08-31T00:00:00Z",
+            "prerelease": False,
+            "html_url": "https://example/0.21.0",
+        },
+        {
+            "tag_name": "v2026.8.3",
+            "name": "Hermes Agent v0.20.0 (v2026.8.3)",
+            "published_at": "2026-08-03T00:00:00Z",
+            "prerelease": False,
+            "html_url": "https://example/0.20.0",
+        },
+    ]
+
+    http_calls = []
+
+    def fake_get(url, timeout=8):
+        http_calls.append(url)
+        if url == versioning.LATEST_RELEASE_URL:
+            return releases[0]
+        if url == versioning.RECENT_RELEASES_URL:
+            return releases
+        return None
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    monkeypatch.setattr(
+        versioning,
+        "official_tag_signature_state",
+        lambda tag, force_refresh=False: (
+            "signed" if tag == "v2026.8.3" else "unsigned"
+        ),
+    )
+
+    info = versioning.version_info(force_refresh_latest=True)
+
+    assert info["published_latest"] == "0.21.0"
+    assert info["published_latest_signature_state"] == "unsigned"
+    assert info["latest"] == "0.20.0"
+    assert info["latest_tag"] == "v2026.8.3"
+    assert info["latest_signature_state"] == "signed"
+    assert info["selected_signed_fallback"] is True
+    assert info["update_available"] is True
+    assert info["operator_state"] == "update_available"
+    assert info["update_blocked_reason"] is None
+    assert http_calls.count(versioning.RECENT_RELEASES_URL) == 1
+
+    again = versioning.version_info()
+    assert again["latest_tag"] == "v2026.8.3"
+    assert http_calls.count(versioning.RECENT_RELEASES_URL) == 1
+
+    # The worker refreshes release metadata after the GET/POST handoff. A
+    # transient refresh failure must not lose the already-vetted calendar tag.
+    monkeypatch.setattr(versioning, "_http_get_json", lambda *_args, **_kwargs: None)
+    assert versioning.recent_releases(force_refresh=True) == []
+    assert versioning.resolve_git_tag("0.20.0") == "v2026.8.3"
+
+
+def test_version_info_truthfully_blocks_when_no_newer_signed_release(monkeypatch):
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
+    versioning._clear_caches_for_test()
+    monkeypatch.setattr(
+        versioning,
+        "install_mode",
+        lambda: {
+            "mode": "editable",
+            "version": "0.20.0",
+            "directory": None,
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        "machine_spirit_4.hermes_admin.state.last_update",
+        lambda refresh=True: None,
+    )
+    published = {
+        "tag_name": "v2026.8.31",
+        "name": "Hermes Agent v0.21.0 (v2026.8.31)",
+        "published_at": "2026-08-31T00:00:00Z",
+        "prerelease": False,
+        "html_url": "https://example/0.21.0",
+    }
+    previous = {
+        "tag_name": "v2026.8.3",
+        "name": "Hermes Agent v0.20.0 (v2026.8.3)",
+        "published_at": "2026-08-03T00:00:00Z",
+        "prerelease": False,
+        "html_url": "https://example/0.20.0",
+    }
+    http_calls = []
+
+    def fake_get(url, timeout=8):
+        http_calls.append(url)
+        return (
+            published
+            if url == versioning.LATEST_RELEASE_URL
+            else [published, previous]
+            if url == versioning.RECENT_RELEASES_URL
+            else None
+        )
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    monkeypatch.setattr(
+        versioning,
+        "official_tag_signature_state",
+        lambda tag, force_refresh=False: (
+            "signed" if tag == "v2026.8.3" else "unsigned"
+        ),
+    )
+
+    info = versioning.version_info(force_refresh_latest=True)
+
+    assert info["latest"] == "0.21.0"
+    assert info["selected_signed_fallback"] is False
+    assert info["update_available"] is False
+    assert info["operator_state"] == "blocked"
+    assert info["update_blocked_reason"] == "official_tag_unsigned"
+    assert http_calls.count(versioning.RECENT_RELEASES_URL) == 1
+    assert versioning.version_info()["operator_state"] == "blocked"
+    assert http_calls.count(versioning.RECENT_RELEASES_URL) == 1
+
+
+def test_release_signature_policy_defaults_to_allow_unsigned_and_fails_closed_on_junk(
+    monkeypatch,
+):
+    env = versioning.RELEASE_SIGNATURE_POLICY_ENV
+    assert env == "HERMES_RELEASE_SIGNATURE_POLICY"
+    monkeypatch.delenv(env, raising=False)
+    assert versioning.release_signature_policy() == "allow_unsigned"
+    assert versioning.release_signature_policy({}) == "allow_unsigned"
+    assert versioning.release_signature_policy({env: ""}) == "allow_unsigned"
+    assert versioning.release_signature_policy({env: " Require_Signed "}) == "require_signed"
+    assert versioning.release_signature_policy({env: "allow_unsigned"}) == "allow_unsigned"
+    # Exactly two values. Anything else is a config error that fails CLOSED.
+    assert versioning.release_signature_policy({env: "allow-unsigned"}) == "require_signed"
+    assert versioning.release_signature_policy({env: "yes"}) == "require_signed"
+    monkeypatch.setenv(env, "allow_unsigned")
+    assert versioning.release_signature_policy() == "allow_unsigned"
+
+
+def _live_shape_2026_09_07(monkeypatch):
+    """Installed 0.20.0 (v2026.8.3 signed); newest 0.21.0 (v2026.8.31 unsigned)."""
+    versioning._clear_caches_for_test()
+    monkeypatch.setattr(
+        versioning,
+        "install_mode",
+        lambda: {
+            "mode": "editable",
+            "version": "0.20.0",
+            "directory": None,
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        "machine_spirit_4.hermes_admin.state.last_update",
+        lambda refresh=True: None,
+    )
+    published = {
+        "tag_name": "v2026.8.31",
+        "name": "Hermes Agent v0.21.0 (v2026.8.31)",
+        "published_at": "2026-08-31T19:29:49Z",
+        "prerelease": False,
+        "html_url": "https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.31",
+    }
+    previous = {
+        "tag_name": "v2026.8.3",
+        "name": "Hermes Agent v0.20.0 (v2026.8.3)",
+        "published_at": "2026-08-03T00:00:00Z",
+        "prerelease": False,
+        "html_url": "https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.3",
+    }
+    http_calls: list[str] = []
+
+    def fake_get(url, timeout=8):
+        http_calls.append(url)
+        if url == versioning.LATEST_RELEASE_URL:
+            return published
+        if url == versioning.RECENT_RELEASES_URL:
+            return [published, previous]
+        return None
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    monkeypatch.setattr(
+        versioning,
+        "official_tag_signature_state",
+        lambda tag, force_refresh=False: (
+            "signed" if tag == "v2026.8.3" else "unsigned"
+        ),
+    )
+    return http_calls
+
+
+def test_version_info_allow_unsigned_selects_newest_unsigned_release(monkeypatch):
+    """Operator decision 2026-09-07: allow_unsigned offers v2026.8.31 as-is."""
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "allow_unsigned")
+    http_calls = _live_shape_2026_09_07(monkeypatch)
+
+    info = versioning.version_info(force_refresh_latest=True)
+
+    assert info["release_signature_policy"] == "allow_unsigned"
+    assert info["current"] == "0.20.0"
+    assert info["latest"] == "0.21.0"
+    assert info["latest_tag"] == "v2026.8.31"
+    assert info["latest_signature_state"] == "unsigned"
+    assert info["published_latest"] == "0.21.0"
+    assert info["published_latest_signature_state"] == "unsigned"
+    assert info["update_available"] is True
+    assert info["update_blocked_reason"] is None
+    assert info["operator_state"] == "update_available"
+    assert info["installed_relation"] == "older"
+    assert info["selected_signed_fallback"] is False
+    # No signed-fallback scan is needed (or performed) under allow_unsigned.
+    assert versioning.RECENT_RELEASES_URL not in http_calls
+    # The installer can pair the wheel version to the real calendar tag.
+    assert versioning.resolve_git_tag("0.21.0") == "v2026.8.31"
+    # Same inputs under the strict policy stay blocked, byte-for-byte.
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
+    strict = versioning.version_info(force_refresh_latest=True)
+    assert strict["release_signature_policy"] == "require_signed"
+    assert strict["update_available"] is False
+    assert strict["operator_state"] == "blocked"
+    assert strict["update_blocked_reason"] == "official_tag_unsigned"
+
+
+def test_latest_offerable_version_follows_policy(monkeypatch):
+    _live_shape_2026_09_07(monkeypatch)
+    published = versioning.latest_version(force_refresh=True)
+    assert published is not None and published.version == "0.21.0"
+
+    unsigned = versioning.latest_offerable_version(
+        "0.20.0", policy="allow_unsigned", published=published,
+        published_signature_state="unsigned",
+    )
+    assert unsigned is not None and unsigned.tag_name == "v2026.8.31"
+    assert versioning.latest_offerable_version(
+        "0.21.0", policy="allow_unsigned", published=published,
+        published_signature_state="unsigned",
+    ) is None
+    # require_signed: unsigned newest is not offerable; nothing newer is signed.
+    assert versioning.latest_offerable_version(
+        "0.20.0", policy="require_signed", published=published,
+        published_signature_state="unsigned",
+    ) is None
+
+
+def test_signed_fallback_tag_identity_wins_duplicate_wheel_version(monkeypatch):
+    versioning._clear_caches_for_test()
+    published = versioning.CachedLatest(
+        version="0.21.0",
+        published_at="2026-08-31T00:00:00Z",
+        tag_name="v2026.8.31",
+        html_url="https://example/0.21.0",
+        fetched_at_unix=0.0,
+    )
+    releases = [
+        {
+            "tag_name": "v2026.8.31",
+            "name": "Hermes Agent v0.21.0",
+            "prerelease": False,
+        },
+        {
+            "tag_name": "v2026.8.2",
+            "name": "Hermes Agent v0.20.0",
+            "prerelease": False,
+        },
+        {
+            "tag_name": "v2026.8.3",
+            "name": "Hermes Agent v0.20.0",
+            "prerelease": False,
+        },
+    ]
+    monkeypatch.setattr(
+        versioning,
+        "_http_get_json",
+        lambda url, timeout=8: releases if url == versioning.RECENT_RELEASES_URL else None,
+    )
+    monkeypatch.setattr(
+        versioning,
+        "official_tag_signature_state",
+        lambda tag, force_refresh=False: (
+            "signed" if tag == "v2026.8.3" else "unsigned"
+        ),
+    )
+
+    selected = versioning.latest_signed_version(
+        "0.19.0",
+        published=published,
+        published_signature_state="unsigned",
+        force_refresh=True,
+    )
+
+    assert selected is not None
+    assert selected.tag_name == "v2026.8.3"
+    assert versioning.resolve_git_tag("0.20.0") == "v2026.8.3"
+    versioning.recent_releases(force_refresh=True)
+    assert versioning.resolve_git_tag("0.20.0") == "v2026.8.3"
 
 
 def test_recent_releases_marks_unsigned_official_tags(monkeypatch):

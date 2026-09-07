@@ -1931,6 +1931,7 @@ class DoubleAgentWorker:
             status="failed",
             summary="canceled",
             conversation_revision_id=self.envelope.conversation_revision_id,
+            turn_id=self.envelope.turn_id,
         )
         try:
             self.blackboard.insert_result(result)
@@ -2146,6 +2147,7 @@ class DoubleAgentWorker:
                     next_steps=[],
                     confidence="low",
                     conversation_revision_id=self.envelope.conversation_revision_id,
+                    turn_id=self.envelope.turn_id,
                 )
                 self.blackboard.insert_result(result)
                 self._emit(
@@ -2175,6 +2177,7 @@ class DoubleAgentWorker:
                 next_steps=[],
                 confidence=_depth_result_confidence(goal, text, evidence),
                 conversation_revision_id=self.envelope.conversation_revision_id,
+                turn_id=self.envelope.turn_id,
             )
             self.blackboard.insert_result(result)
             # Emit the terminal lifecycle event BEFORE updating state so
@@ -2224,6 +2227,7 @@ class DoubleAgentWorker:
                 status="failed",
                 summary=f"{type(exc).__name__}: {exc}",
                 conversation_revision_id=self.envelope.conversation_revision_id,
+                turn_id=self.envelope.turn_id,
             )
             try:
                 self.blackboard.insert_result(result)

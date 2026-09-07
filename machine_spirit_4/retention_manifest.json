@@ -1,0 +1,712 @@
+{
+  "schema": "HiveMindRetentionManifest.v1",
+  "schedule_seconds": 300,
+  "minimum_free_bytes": 5368709120,
+  "budget_authority": "tmr_p1_002_code_owned_safety_defaults",
+  "budget_rationale": "Initial caps are conservative safety limits derived from the reported 11.94 GiB psyche, 518 MiB stdout, and 50 MiB stderr observations; private-store overflow remains operator-only and limits may be tightened through review.",
+  "disk_pressure_behavior": "prune_only_manifest-authorized_operational_overflow; skip_sqlite_compaction; block_missing_service_launch; running_writer_admission_contract_pending",
+  "telemetry_path": "machine_spirit_4/runtime/retention_telemetry.json",
+  "receipt_path": "machine_spirit_4/logs/retention_receipts.jsonl",
+  "authorization_provider": "OPERATOR_INTEGRATION_REQUIRED",
+  "runtime_path_override_contract": "Known environment overrides are reported by name as unmanaged and force degraded status; CLI and constructor path overrides remain integration work.",
+  "hold_contract": "A sibling <filename>.hold marker admitted before the atomic rename claim prevents automatic pruning and authorized deletion; the rename is the operation linearization point and later markers cannot retroactively hold an already-claimed generation.",
+  "non_filesystem_stores": [
+    {
+      "id": "ms4_browser_pcm_ring",
+      "data_class": "private_psyche",
+      "writer": "machine_spirit_4/web/voice_input_session.js PcmRing",
+      "bound": "30000 milliseconds in memory; never persisted by this writer"
+    }
+  ],
+  "external_unmanaged_paths": [
+    {
+      "writer": "tmr-psyche psyche MCP --psyche-store/--markdown-dir",
+      "status": "operator_path_binding_required_before_enablement"
+    },
+    {
+      "writer": "tmr-psyche ClusterBridge forge_data_dir",
+      "status": "operator_path_binding_required_before_enablement"
+    },
+    {
+      "writer": "tmr-psyche collector.ms3_exporter arbitrary output path",
+      "status": "legacy_operator_cli_bypasses_retention_receipts"
+    },
+    {
+      "writer": "machine_spirit_4/scripts/validate_ms4_chat_voice.py temporary WAV",
+      "status": "fixed_temp_artifact_cleanup_not_scheduled"
+    }
+  ],
+  "stores": [
+    {
+      "id": "ms3_psyche_private_state",
+      "data_class": "private_psyche",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "machine_spirit_3/psyche_store/**/*"
+      ],
+      "active_paths": [
+        "machine_spirit_3/psyche_store/**/*"
+      ],
+      "writer": "MS3 JsonStorage, consciousness event sink, and psyche MCP",
+      "growth_driver": "memories, decisions, resonance, snapshots, conversations, and daily event journals",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 17179869184,
+        "max_files": 1000000,
+        "rotation": "none",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_audit_log",
+      "data_class": "operational",
+      "sensitivity": "private_payload",
+      "enforcement": "quiescent_rotation_and_closed_generation_pruning",
+      "paths": [
+        "machine_spirit_4/logs/ms4_audit.jsonl*"
+      ],
+      "active_paths": [
+        "machine_spirit_4/logs/ms4_audit.jsonl"
+      ],
+      "writer": "machine_spirit_4.gateway.audit.append_event",
+      "growth_driver": "chat, tool, administration, and voice audit events",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 30,
+        "max_bytes": 268435456,
+        "max_files": 8,
+        "rotation": "rename_recreate",
+        "rotate_at_bytes": 67108864,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_voice_turn_ring",
+      "data_class": "operational",
+      "sensitivity": "private_payload",
+      "enforcement": "writer_bounded_with_alert_only_age_budget",
+      "paths": [
+        "machine_spirit_4/logs/ms4_voice_turns.jsonl"
+      ],
+      "active_paths": [
+        "machine_spirit_4/logs/ms4_voice_turns.jsonl"
+      ],
+      "writer": "machine_spirit_4.gateway.audit._append_voice_turn_ring",
+      "growth_driver": "voice turn completion and failure receipts",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 30,
+        "max_bytes": 1048576,
+        "max_files": 1,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "writer_bounded",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_runtime_sqlite",
+      "data_class": "operational",
+      "sensitivity": "private_payload",
+      "enforcement": "quiescent_compaction_with_alert_only_live_row_quota",
+      "paths": [
+        "machine_spirit_4/runtime/double_agent.sqlite3",
+        "machine_spirit_4/runtime/double_agent.sqlite3-wal",
+        "machine_spirit_4/runtime/double_agent.sqlite3-shm"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/double_agent.sqlite3",
+        "machine_spirit_4/runtime/double_agent.sqlite3-wal",
+        "machine_spirit_4/runtime/double_agent.sqlite3-shm"
+      ],
+      "writer": "machine_spirit_4.double_agent.blackboard",
+      "growth_driver": "jobs, events, results, conversation revisions, and SQLite WAL pages",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 4294967296,
+        "max_files": 3,
+        "rotation": "sqlite_vacuum",
+        "rotate_at_bytes": null,
+        "compaction": "sqlite_vacuum",
+        "compact_at_bytes": 536870912,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "hermes_updater_state",
+      "data_class": "operational",
+      "sensitivity": "sensitive_metadata",
+      "enforcement": "writer_atomic_replace_with_alert_only_byte_budget",
+      "paths": [
+        "machine_spirit_4/runtime/hermes_update_state.json"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/hermes_update_state.json"
+      ],
+      "writer": "machine_spirit_4.hermes_admin.state",
+      "growth_driver": "current updater job progress entries and terminal state",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 30,
+        "max_bytes": 4194304,
+        "max_files": 1,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "atomic_replace",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_stdout_stderr",
+      "data_class": "operational",
+      "sensitivity": "private_payload_possible",
+      "enforcement": "quiescent_rotation_and_closed_generation_pruning",
+      "paths": [
+        "machine_spirit_4/logs/ms3_stdout.log*",
+        "machine_spirit_4/logs/ms3_stderr.log*",
+        "machine_spirit_4/logs/ms4_gateway_stdout.log*",
+        "machine_spirit_4/logs/ms4_gateway_stderr.log*",
+        "machine_spirit_4/logs/ms4_mcp_stdout.log*",
+        "machine_spirit_4/logs/ms4_mcp_stderr.log*"
+      ],
+      "active_paths": [
+        "machine_spirit_4/logs/ms3_stdout.log",
+        "machine_spirit_4/logs/ms3_stderr.log",
+        "machine_spirit_4/logs/ms4_gateway_stdout.log",
+        "machine_spirit_4/logs/ms4_gateway_stderr.log",
+        "machine_spirit_4/logs/ms4_mcp_stdout.log",
+        "machine_spirit_4/logs/ms4_mcp_stderr.log"
+      ],
+      "writer": "machine_spirit_4.scripts.runtime_common.launch_process",
+      "growth_driver": "service stdout and stderr redirected to append-only files",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 14,
+        "max_bytes": 1073741824,
+        "max_files": 30,
+        "rotation": "rename_recreate",
+        "rotate_at_bytes": 67108864,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_supervisor_logs",
+      "data_class": "operational",
+      "sensitivity": "sensitive_metadata",
+      "enforcement": "automatic_closed_file_pruning",
+      "paths": [
+        "machine_spirit_4/logs/supervisor/ms4_supervise_*.log"
+      ],
+      "active_paths": [],
+      "writer": "machine_spirit_4.scripts.supervise_ms4.write_log",
+      "growth_driver": "five-minute watchdog and launcher output",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 31,
+        "max_bytes": 134217728,
+        "max_files": 31,
+        "rotation": "prune_files",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "protect_newest_files": 1,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_containment_violations",
+      "data_class": "operational",
+      "sensitivity": "sensitive_metadata",
+      "enforcement": "quiescent_rotation_and_closed_generation_pruning",
+      "paths": [
+        "machine_spirit_4/logs/containment_violations.log*"
+      ],
+      "active_paths": [
+        "machine_spirit_4/logs/containment_violations.log"
+      ],
+      "writer": "machine_spirit_4.contained.require_contained_runtime",
+      "growth_driver": "one record per rejected uncontained service launch",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 90,
+        "max_bytes": 67108864,
+        "max_files": 8,
+        "rotation": "rename_recreate",
+        "rotate_at_bytes": 16777216,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_canned_audio_cache",
+      "data_class": "derived",
+      "sensitivity": "private_derived_audio",
+      "enforcement": "alert_only_pending_cache_pair_and_live_serving_contract",
+      "paths": [
+        "machine_spirit_4/canned_audio/**/*"
+      ],
+      "active_paths": [],
+      "writer": "machine_spirit_4.gateway.canned_reflexes",
+      "growth_driver": "generated WAV and metadata pairs for each configured voice and reflex",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 1073741824,
+        "max_files": 2048,
+        "rotation": "prune_files",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "tmr_psyche_live_collection",
+      "data_class": "private_psyche",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "tmr-psyche/data/live/*.jsonl"
+      ],
+      "active_paths": [],
+      "writer": "tmr-psyche.collector.api_proxy.ConversationLogger",
+      "growth_driver": "full conversation turns and preference records",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 68719476736,
+        "max_files": 3660,
+        "rotation": "none",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "tmr_forge_conversation_capture",
+      "data_class": "private_psyche",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "forge_data/conversations/psyche_*.jsonl"
+      ],
+      "active_paths": [],
+      "writer": "tmr-psyche.collector.cluster_integration.ClusterBridge",
+      "growth_driver": "configured Forge-enriched conversation capture",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 68719476736,
+        "max_files": 3660,
+        "rotation": "none",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "tmr_psyche_training_runs",
+      "data_class": "derived",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_pending_finished_run_inventory",
+      "paths": [
+        "tmr-psyche/training_runs/**/*",
+        "training_runs/**/*"
+      ],
+      "active_paths": [],
+      "writer": "tmr-psyche.collector.continuous_trainer",
+      "growth_driver": "timestamped copies of training data, statistics, and model outputs",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 90,
+        "max_bytes": 68719476736,
+        "max_files": 100000,
+        "rotation": "prune_files",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_voice_candidate_review",
+      "data_class": "operational",
+      "sensitivity": "private_biometric_metadata",
+      "enforcement": "writer_bounded_with_alert_only_age_and_byte_budgets",
+      "paths": [
+        "machine_spirit_4/runtime/voice_candidate_review_items.json"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/voice_candidate_review_items.json"
+      ],
+      "writer": "machine_spirit_4.gateway.voice_candidate_reconcile.VoiceCandidateReviewStore",
+      "growth_driver": "bounded pending voice-identity proposal metadata",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": 90,
+        "max_bytes": 16777216,
+        "max_files": 1,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "writer_bounded",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_quartermaster_cache",
+      "data_class": "derived",
+      "sensitivity": "derived_metadata",
+      "enforcement": "automatic_closed_file_pruning",
+      "paths": [
+        "machine_spirit_4/runtime/quartermaster_index/*.json"
+      ],
+      "active_paths": [],
+      "writer": "machine_spirit_4.gateway.quartermaster.index",
+      "growth_driver": "one derived index per catalog version and embedding backend",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 30,
+        "max_bytes": 536870912,
+        "max_files": 32,
+        "rotation": "prune_files",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "protect_newest_files": 1,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_prompt_suite_logs",
+      "data_class": "operational",
+      "sensitivity": "private_payload",
+      "enforcement": "automatic_closed_file_pruning_with_evidence_holds",
+      "paths": [
+        "machine_spirit_4/logs/prompt_suites/ms4_prompt_suite_*"
+      ],
+      "active_paths": [],
+      "writer": "machine_spirit_4.scripts.run_ms4_unattended_prompt_suite",
+      "growth_driver": "one JSONL and Markdown evidence pair per unattended prompt run",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": 90,
+        "max_bytes": 2147483648,
+        "max_files": 100,
+        "rotation": "prune_files",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "protect_newest_files": 2,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "hermes_updater_runtime",
+      "data_class": "operational",
+      "sensitivity": "sensitive_metadata_and_managed_source",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "machine_spirit_4/runtime/hermes_update.lock",
+        "machine_spirit_4/runtime/hermes_active_checkout.json",
+        "machine_spirit_4/runtime/hermes-managed/**/*"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/hermes_update.lock",
+        "machine_spirit_4/runtime/hermes_active_checkout.json",
+        "machine_spirit_4/runtime/hermes-managed/**/*"
+      ],
+      "writer": "machine_spirit_4.hermes_admin.installer",
+      "growth_driver": "updater lock and checkout marker plus managed Git checkout objects",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 34359738368,
+        "max_files": 1000000,
+        "rotation": "none",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_runtime_registry_state",
+      "data_class": "operational",
+      "sensitivity": "sensitive_metadata",
+      "enforcement": "writer_atomic_replace_with_alert_only_byte_budget",
+      "paths": [
+        "machine_spirit_4/runtime/mcp_imports.json",
+        "machine_spirit_4/runtime/runtime_manifest.json",
+        "machine_spirit_4/logs/supervisor/ms4_ui_opened.marker"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/mcp_imports.json",
+        "machine_spirit_4/runtime/runtime_manifest.json",
+        "machine_spirit_4/logs/supervisor/ms4_ui_opened.marker"
+      ],
+      "writer": "MS4 MCP registry, runtime setup, and supervisor UI marker writers",
+      "growth_driver": "bounded replacement state whose collections may grow with imported tools",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 16777216,
+        "max_files": 3,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "atomic_replace",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "tmr_psyche_consolidated_private",
+      "data_class": "private_psyche",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "tmr-psyche/psyche/MEMORY.md",
+        "tmr-psyche/psyche/RESONANCE.md",
+        "tmr-psyche/psyche/PERSONALITY.md"
+      ],
+      "active_paths": [
+        "tmr-psyche/psyche/MEMORY.md",
+        "tmr-psyche/psyche/RESONANCE.md",
+        "tmr-psyche/psyche/PERSONALITY.md"
+      ],
+      "writer": "tmr-psyche.collector.consolidator.PsycheConsolidator",
+      "growth_driver": "private memory, resonance, and adaptation summaries derived from the psyche store",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 4294967296,
+        "max_files": 3,
+        "rotation": "none",
+        "rotate_at_bytes": null,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "tmr_psyche_generated_datasets",
+      "data_class": "private_psyche",
+      "sensitivity": "private_payload",
+      "enforcement": "alert_only_operator_action_required",
+      "paths": [
+        "tmr-psyche/data/sft_train.jsonl",
+        "tmr-psyche/data/dpo_train.jsonl",
+        "tmr-psyche/data/stats.json"
+      ],
+      "active_paths": [
+        "tmr-psyche/data/sft_train.jsonl",
+        "tmr-psyche/data/dpo_train.jsonl",
+        "tmr-psyche/data/stats.json"
+      ],
+      "writer": "tmr-psyche.generate and formatting pipeline",
+      "growth_driver": "regenerated training datasets derived from private conversations and seeds",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "operator_policy_required"
+      },
+      "policy": {
+        "max_age_days": null,
+        "max_bytes": 68719476736,
+        "max_files": 3,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "atomic_replace",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_retention_telemetry",
+      "data_class": "operational",
+      "sensitivity": "capacity_metadata",
+      "enforcement": "writer_atomic_replace",
+      "paths": [
+        "machine_spirit_4/runtime/retention_telemetry.json"
+      ],
+      "active_paths": [
+        "machine_spirit_4/runtime/retention_telemetry.json"
+      ],
+      "writer": "machine_spirit_4.retention bounded atomic telemetry snapshot",
+      "growth_driver": "one current byte count and prior-derived forecast per manifest store",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "human_approval_required",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 30,
+        "max_bytes": 1048576,
+        "max_files": 1,
+        "rotation": "writer_atomic_replace",
+        "rotate_at_bytes": null,
+        "compaction": "atomic_replace",
+        "compact_at_bytes": null,
+        "auto_prune": false,
+        "hold_suffix": ".hold"
+      }
+    },
+    {
+      "id": "ms4_retention_receipts",
+      "data_class": "operational",
+      "sensitivity": "authorization_metadata",
+      "enforcement": "quiescent_rotation_and_closed_generation_pruning",
+      "paths": [
+        "machine_spirit_4/logs/retention_receipts.jsonl*"
+      ],
+      "active_paths": [
+        "machine_spirit_4/logs/retention_receipts.jsonl"
+      ],
+      "writer": "machine_spirit_4.retention authorized export/delete receipt sink",
+      "growth_driver": "one metadata-only record per accepted or refused operator action",
+      "access": {
+        "read": "local_process_owner",
+        "export": "human_approval_required",
+        "delete": "retention_policy_or_human_approval",
+        "at_rest": "inherited_filesystem_acl"
+      },
+      "policy": {
+        "max_age_days": 365,
+        "max_bytes": 67108864,
+        "max_files": 16,
+        "rotation": "rename_recreate",
+        "rotate_at_bytes": 4194304,
+        "compaction": "none",
+        "compact_at_bytes": null,
+        "auto_prune": true,
+        "hold_suffix": ".hold"
+      }
+    }
+  ]
+}

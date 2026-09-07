@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shlex
 
 import yaml
 
@@ -56,18 +57,36 @@ def test_workflow_fails_closed_and_runs_owned_test_surfaces():
     assert "Require provenance executables" in workflow_text
     assert "Verify native matrix cell" in workflow_text
     assert "--ignore E731" in workflow_text
-    for test_file in (
-        "test_installer.py",
-        "test_installer_r1.py",
-        "test_isolation_regression_r2.py",
-        "test_provenance_r1.py",
-        "test_state.py",
-        "test_versioning.py",
-        "test_versioning_r1.py",
-        "test_workflow_contract.py",
-    ):
-        assert f"tests/ms4_hermes_admin/{test_file}" in workflow_text
-    assert "test_git_bash_preflight_candidate_r3.py" in workflow_text
+    for event in ("push", "pull_request"):
+        paths = workflow["on"][event]["paths"]
+        assert "machine_spirit_4/gateway/server.py" in paths
+        assert "machine_spirit_4/web/index.html" in paths
+        assert "tests/ms4_gateway/*hermes*" in paths
+    for job_name in ("hosted-contract", "jetson-thor-hardware-gate"):
+        job = workflow["jobs"][job_name]
+        step = next(
+            item
+            for item in job["steps"]
+            if item["name"] == "Full isolated Hermes updater product gate"
+        )
+        argv = shlex.split(step["run"])
+        assert "tests/ms4_hermes_admin" in argv
+        assert not any(token.startswith("tests/ms4_hermes_admin/") for token in argv)
+        basetemp_index = argv.index("--basetemp")
+        assert argv[basetemp_index + 1] == "${{ runner.temp }}/ms4-hermes-admin"
+        gateway_step = next(
+            item
+            for item in job["steps"]
+            if item["name"] == "Hermes button and gateway route gate"
+        )
+        gateway_argv = shlex.split(gateway_step["run"])
+        assert "tests/ms4_gateway" in gateway_argv
+        assert gateway_argv[gateway_argv.index("-k") + 1] == "hermes"
+        gateway_basetemp = gateway_argv.index("--basetemp")
+        assert (
+            gateway_argv[gateway_basetemp + 1]
+            == "${{ runner.temp }}/ms4-hermes-gateway"
+        )
     assert "--strict-config" in workflow_text
     assert "--strict-markers" in workflow_text
     assert hosted["strategy"]["fail-fast"] == "false"

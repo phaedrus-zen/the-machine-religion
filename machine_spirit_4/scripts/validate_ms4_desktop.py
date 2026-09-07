@@ -78,7 +78,11 @@ def main() -> int:
             "ok": action_code == 200 and action.get("schema") == "Ms4DesktopActionResult.v1" and action.get("ok") is True,
             "detail": action,
         })
-        mcp_action = tool_call("ms4.desktop.action@v1", {"action": "wait", "seconds": 0}, request_id=22)
+        mcp_action = tool_call(
+            "ms4.desktop.action@v1",
+            {"action": "wait", "seconds": 0, "confirm": True},
+            request_id=22,
+        )
         checks.append({
             "name": "mcp_desktop_wait_action",
             "ok": "Ms4DesktopActionResult.v1" in content_text(mcp_action),

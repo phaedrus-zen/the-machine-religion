@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,7 +34,13 @@ DEFAULT_INTERVAL_SECS = 3600
 DEFAULT_TIMEOUT_SECS = 3
 DEFAULT_JOIN_TIMEOUT_SECS = 2.0
 MAX_PROPOSALS = 64
+# Local safety defaults: retain no more than two maximum proposal batches for
+# one week. The general retention manifest can call the hook below when it owns
+# an operator-approved successor policy.
+MAX_UNKNOWN_CANDIDATES = MAX_PROPOSALS * 2
 MAX_STORE_ITEMS = 512
+MAX_SUPPRESSED_CANDIDATES = MAX_STORE_ITEMS
+UNKNOWN_CANDIDATE_MAX_AGE_SECS = 7 * 24 * 60 * 60
 MAX_RESPONSE_BYTES = 262144
 CANDIDATE_ID_MAX = 128
 TARGET_ID_MAX = 128
@@ -44,6 +50,10 @@ CANDIDATES_PATH = "/v1/audio/voice-identities/candidates"
 RECONCILE_PATH = "/v1/audio/voice-identities/candidates/reconcile"
 CANDIDATES_QUERY = "return_embeddings=false&include_ignored=false"
 ALLOWED_ACTIONS = frozenset({"merge", "new_profile", "ignore"})
+PENDING_STATUS = "pending_operator_review"
+PROMOTED_STATUS = "promoted"
+PROPOSAL_FIELDS = ("action", "target_kind", "target_id", "score", "reason")
+SUPPRESSED_FIELD = "suppressed_item_ids"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 ITEM_FIELDS = (
     "item_id",
@@ -249,7 +259,7 @@ def project_proposal(raw: Any, *, now: str) -> dict[str, Any] | None:
         "first_seen": now,
         "last_seen": now,
         "observation_count": 1,
-        "status": "pending_operator_review",
+        "status": PENDING_STATUS,
     }
 
 
@@ -284,7 +294,7 @@ def _project_stored_item(raw: Any) -> dict[str, Any] | None:
     item_id = raw.get("item_id")
     if isinstance(item_id, str) and item_id.strip():
         item["item_id"] = item_id.strip()
-    item["status"] = "pending_operator_review"
+    item["status"] = PROMOTED_STATUS if raw.get("status") == PROMOTED_STATUS else PENDING_STATUS
     return {field: item[field] for field in ITEM_FIELDS}
 
 
@@ -296,6 +306,98 @@ def _hivemind_auth_headers() -> dict[str, str]:
 
 def _default_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def apply_voice_candidate_retention(
+    items: list[dict[str, Any]],
+    *,
+    now: str,
+    max_unknown_items: int = MAX_UNKNOWN_CANDIDATES,
+    max_unknown_age_secs: int = UNKNOWN_CANDIDATE_MAX_AGE_SECS,
+    max_store_items: int = MAX_STORE_ITEMS,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return retained items and deterministically ordered pending IDs removed.
+
+    This self-contained hook is the integration seam for the general retention
+    manifest. Only pending unknowns are eligible; promoted audit records are
+    protected.
+    """
+    now_at = _parse_utc_timestamp(now)
+    if now_at is None:
+        raise ValueError("retention now must be an offset-aware ISO timestamp")
+    if min(max_unknown_items, max_unknown_age_secs, max_store_items) < 0:
+        raise ValueError("retention bounds must be non-negative")
+
+    indexed_pending = [
+        (index, item)
+        for index, item in enumerate(items)
+        if item.get("status") == PENDING_STATUS
+    ]
+    protected_count = len(items) - len(indexed_pending)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+
+    def first_seen_at(item: dict[str, Any]) -> datetime:
+        parsed = _parse_utc_timestamp(item.get("first_seen"))
+        return parsed if parsed is not None and parsed <= now_at else oldest
+
+    def retention_key(entry: tuple[int, dict[str, Any]]) -> tuple[datetime, str, str, int]:
+        index, item = entry
+        return (
+            first_seen_at(item),
+            str(item.get("candidate_id") or ""),
+            str(item.get("item_id") or ""),
+            index,
+        )
+
+    ordered = sorted(indexed_pending, key=retention_key)
+    cutoff = now_at - timedelta(seconds=max_unknown_age_secs)
+    expired = {
+        index
+        for index, item in ordered
+        if first_seen_at(item) < cutoff
+    }
+    current = [entry for entry in ordered if entry[0] not in expired]
+    allowed = min(max_unknown_items, max(0, max_store_items - protected_count))
+    overflow = max(0, len(current) - allowed)
+    removed_indexes = expired | {index for index, _item in current[:overflow]}
+    removed = [
+        str(item.get("candidate_id") or "")
+        for index, item in ordered
+        if index in removed_indexes
+    ]
+    retained = [item for index, item in enumerate(items) if index not in removed_indexes]
+    return retained, removed
+
+
+def _encode_store(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+
+
+def _merge_suppressed(existing: list[str], removed: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item_id in [*existing, *removed]:
+        if (
+            isinstance(item_id, str)
+            and item_id
+            and len(item_id) <= CANDIDATE_ID_MAX
+            and item_id not in seen
+        ):
+            merged.append(item_id)
+            seen.add(item_id)
+    return merged[-MAX_SUPPRESSED_CANDIDATES:]
 
 
 def _default_audit(payload: dict[str, Any]) -> None:
@@ -362,10 +464,11 @@ class VoiceCandidateReviewStore:
     def __init__(self, path: Path, *, replace: ReplaceFn | None = None) -> None:
         self.path = Path(path)
         self._replace = replace or os.replace
+        self._lock = threading.Lock()
 
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"schema": STORE_SCHEMA, "items": []}
+            return {"schema": STORE_SCHEMA, "items": [], SUPPRESSED_FIELD: []}
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or raw.get("schema") != STORE_SCHEMA:
             raise ValueError("unsupported review store schema")
@@ -377,9 +480,20 @@ class VoiceCandidateReviewStore:
             projected = _project_stored_item(item)
             if projected is not None:
                 cleaned.append(projected)
-        return {"schema": STORE_SCHEMA, "items": cleaned}
+        suppressed = raw.get(SUPPRESSED_FIELD, [])
+        if not isinstance(suppressed, list):
+            raise ValueError("review store suppressed candidate IDs must be a list")
+        return {
+            "schema": STORE_SCHEMA,
+            "items": cleaned,
+            SUPPRESSED_FIELD: _merge_suppressed(suppressed, []),
+        }
 
     def upsert_projected(self, items: list[dict[str, Any]], *, now: str) -> dict[str, Any]:
+        with self._lock:
+            return self._upsert_projected(items, now=now)
+
+    def _upsert_projected(self, items: list[dict[str, Any]], *, now: str) -> dict[str, Any]:
         try:
             current = self.load()
         except Exception:
@@ -389,18 +503,22 @@ class VoiceCandidateReviewStore:
             candidate_id = existing.get("candidate_id")
             if isinstance(candidate_id, str) and candidate_id:
                 by_id[candidate_id] = existing
-        incoming_ids = {item["candidate_id"] for item in items}
-        new_ids = incoming_ids.difference(by_id)
-        if len(by_id) + len(new_ids) > MAX_STORE_ITEMS:
-            return {"ok": False, "outcome": "store_capacity", "recorded_count": 0}
-        recorded = 0
+        suppressed = set(current[SUPPRESSED_FIELD])
+        recorded_ids: set[str] = set()
+        new_ids: set[str] = set()
         for item in items:
             candidate_id = item["candidate_id"]
+            if derive_item_id(candidate_id) in suppressed:
+                continue
             projected = {field: item[field] for field in ITEM_FIELDS}
             projected["last_seen"] = now
-            projected["status"] = "pending_operator_review"
+            projected["status"] = PENDING_STATUS
             previous = by_id.get(candidate_id)
             if previous is not None:
+                if previous.get("status") == PROMOTED_STATUS:
+                    continue
+                if all(previous.get(field) == projected.get(field) for field in PROPOSAL_FIELDS):
+                    continue
                 projected["first_seen"] = previous.get("first_seen") or projected.get("first_seen")
                 previous_count = previous.get("observation_count")
                 count = previous_count if isinstance(previous_count, int) and not isinstance(previous_count, bool) else 1
@@ -411,20 +529,120 @@ class VoiceCandidateReviewStore:
                 projected["first_seen"] = now
                 projected["observation_count"] = 1
                 projected["item_id"] = derive_item_id(candidate_id)
+                new_ids.add(candidate_id)
             by_id[candidate_id] = projected
-            recorded += 1
-        payload = sanitize({"schema": STORE_SCHEMA, "items": list(by_id.values())})
+            recorded_ids.add(candidate_id)
+        retained, removed = apply_voice_candidate_retention(list(by_id.values()), now=now)
+        if len(retained) > MAX_STORE_ITEMS:
+            return {
+                "ok": False,
+                "outcome": "store_capacity",
+                "recorded_count": 0,
+                "pruned_count": 0,
+            }
+        retained_ids = {item["candidate_id"] for item in retained}
+        retained_item_ids = {derive_item_id(candidate_id) for candidate_id in retained_ids}
+        suppressed_ids = [
+            item_id
+            for item_id in _merge_suppressed(
+                current[SUPPRESSED_FIELD],
+                [derive_item_id(candidate_id) for candidate_id in removed],
+            )
+            if item_id not in retained_item_ids
+        ]
+        recorded_count = len(recorded_ids & retained_ids)
+        dropped_admission = bool(new_ids.difference(retained_ids))
+        payload = sanitize(
+            {"schema": STORE_SCHEMA, "items": retained, SUPPRESSED_FIELD: suppressed_ids}
+        )
+        if retained == current["items"] and suppressed_ids == current[SUPPRESSED_FIELD]:
+            if not self.path.exists():
+                return {
+                    "ok": True,
+                    "outcome": "store_unchanged",
+                    "recorded_count": 0,
+                    "pruned_count": 0,
+                }
+            try:
+                canonical = self.path.read_bytes() == _encode_store(payload)
+            except OSError:
+                return {
+                    "ok": False,
+                    "outcome": "store_unavailable",
+                    "recorded_count": 0,
+                    "pruned_count": 0,
+                }
+            if canonical:
+                return {
+                    "ok": True,
+                    "outcome": "store_unchanged",
+                    "recorded_count": 0,
+                    "pruned_count": 0,
+                }
         try:
             self._atomic_write(payload)
         except Exception:
-            return {"ok": False, "outcome": "store_unavailable", "recorded_count": 0}
-        return {"ok": True, "outcome": "proposals_recorded", "recorded_count": recorded}
+            return {
+                "ok": False,
+                "outcome": "store_unavailable",
+                "recorded_count": 0,
+                "pruned_count": 0,
+            }
+        return {
+            "ok": True,
+            "outcome": (
+                "store_capacity"
+                if dropped_admission
+                else "proposals_recorded"
+                if recorded_count
+                else "retention_pruned"
+                if removed
+                else "store_reconciled"
+            ),
+            "recorded_count": recorded_count,
+            "pruned_count": len(removed),
+        }
+
+    def mark_promoted(self, candidate_ids: list[str], *, now: str) -> dict[str, Any]:
+        """Drain explicitly admitted IDs from the unknown pool without network effects."""
+        with self._lock:
+            return self._mark_promoted(candidate_ids, now=now)
+
+    def _mark_promoted(self, candidate_ids: list[str], *, now: str) -> dict[str, Any]:
+        wanted = {value.strip() for value in candidate_ids if isinstance(value, str) and value.strip()}
+        try:
+            current = self.load()
+        except Exception:
+            return {"ok": False, "outcome": "store_unavailable", "promoted_count": 0}
+        promoted = 0
+        for item in current["items"]:
+            if item["candidate_id"] in wanted and item.get("status") == PENDING_STATUS:
+                item["status"] = PROMOTED_STATUS
+                item["last_seen"] = now
+                promoted += 1
+        if not promoted:
+            return {"ok": True, "outcome": "store_unchanged", "promoted_count": 0}
+        wanted_item_ids = {derive_item_id(candidate_id) for candidate_id in wanted}
+        try:
+            current[SUPPRESSED_FIELD] = [
+                item_id
+                for item_id in current[SUPPRESSED_FIELD]
+                if item_id not in wanted_item_ids
+            ]
+            self._atomic_write(sanitize(current))
+        except Exception:
+            return {"ok": False, "outcome": "store_unavailable", "promoted_count": 0}
+        return {
+            "ok": True,
+            "outcome": "promotions_recorded",
+            "promoted_count": promoted,
+        }
 
     def _atomic_write(self, payload: dict[str, Any]) -> None:
         directory = self.path.parent
         directory.mkdir(parents=True, exist_ok=True)
         tmp = directory / f".{self.path.name}.{uuid.uuid4().hex}.tmp"
-        data = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+        data = _encode_store(payload)
         try:
             with tmp.open("wb") as handle:
                 handle.write(data)
@@ -505,6 +723,10 @@ class VoiceCandidateReconciler:
         except Exception:
             log.debug("voice candidate reconciler stop/join failed", exc_info=True)
 
+    def drain_promoted_candidates(self, candidate_ids: list[str]) -> dict[str, Any]:
+        """Move explicitly admitted IDs out of the unknown pool on this store instance."""
+        return self._store.mark_promoted(candidate_ids, now=self._now())
+
     def run_once(self) -> dict[str, Any]:
         started = self._monotonic()
         try:
@@ -520,6 +742,7 @@ class VoiceCandidateReconciler:
             "outcome": result.get("outcome"),
             "proposal_count": int(result.get("proposal_count") or 0),
             "recorded_count": int(result.get("recorded_count") or 0),
+            "pruned_count": int(result.get("pruned_count") or 0),
             "elapsed_ms": int(max(0.0, (self._monotonic() - started) * 1000)),
         }
         reason = result.get("reason")
@@ -593,8 +816,6 @@ class VoiceCandidateReconciler:
         if not _valid_reconciliation(recon):
             return {"outcome": "contract_violation", **empty}
         proposals = recon["proposals"]
-        if not proposals:
-            return {"outcome": "no_proposals", **empty}
         now = self._now()
         projected: list[dict[str, Any]] = []
         for raw in proposals:
@@ -608,11 +829,24 @@ class VoiceCandidateReconciler:
                 "outcome": write.get("outcome") or "store_unavailable",
                 "proposal_count": len(projected),
                 "recorded_count": 0,
+                "pruned_count": 0,
+            }
+        if not projected:
+            return {
+                "outcome": (
+                    write.get("outcome")
+                    if write.get("outcome") in {"retention_pruned", "store_reconciled"}
+                    else "no_proposals"
+                ),
+                "proposal_count": 0,
+                "recorded_count": 0,
+                "pruned_count": int(write.get("pruned_count") or 0),
             }
         return {
-            "outcome": "proposals_recorded",
+            "outcome": write.get("outcome") or "store_unchanged",
             "proposal_count": len(projected),
             "recorded_count": int(write.get("recorded_count") or 0),
+            "pruned_count": int(write.get("pruned_count") or 0),
         }
 
 

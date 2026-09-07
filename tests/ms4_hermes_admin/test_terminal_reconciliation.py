@@ -213,8 +213,11 @@ def test_version_info_older_unsigned_latest_blocks_primary_keeps_failed_audit(
     """Live shape: installed 0.20.0, latest 0.20.5 unsigned, prior failed job.
 
     Blocked unsigned is the operator headline. Durable failed history is
-    audit only. No HTTP, no reconcile-to-success, no job start.
+    audit only. Signed-fallback discovery finds no candidate; no reconcile to
+    success and no job starts.
     """
+    monkeypatch.setenv(versioning.RELEASE_SIGNATURE_POLICY_ENV, "require_signed")
+    versioning._clear_caches_for_test()
     path, seeded = _failed_job(tmp_path)
     _patch_install_and_latest(monkeypatch, current="0.20.0", latest="0.20.5")
     monkeypatch.setattr(
@@ -224,11 +227,13 @@ def test_version_info_older_unsigned_latest_blocks_primary_keeps_failed_audit(
     )
     monkeypatch.setattr(versioning, "git_describe", lambda *_args, **_kwargs: None)
     http_calls: list[str] = []
-    monkeypatch.setattr(
-        versioning,
-        "_http_get_json",
-        _forbid_http_get_json(http_calls, label="older+unsigned blocked"),
-    )
+
+    def no_signed_releases(url, timeout=8):
+        http_calls.append(url)
+        assert url == versioning.RECENT_RELEASES_URL
+        return []
+
+    monkeypatch.setattr(versioning, "_http_get_json", no_signed_releases)
     monkeypatch.setattr(installer, "trigger_update", lambda *a, **k: pytest.fail("trigger_update"))
     monkeypatch.setattr(
         state,
@@ -239,7 +244,7 @@ def test_version_info_older_unsigned_latest_blocks_primary_keeps_failed_audit(
     info = versioning.version_info(force_refresh_latest=False)
     last = info["last_update"]
 
-    assert http_calls == []
+    assert http_calls == [versioning.RECENT_RELEASES_URL]
     assert info["current"] == "0.20.0"
     assert info["latest"] == "0.20.5"
     assert info["installed_relation"] == "older"

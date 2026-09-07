@@ -2315,18 +2315,20 @@ def test_served_bytes_diverge_from_path_break_binding(tmp_path: Path) -> None:
     node, chrome = _require_browser()
     fake_root = tmp_path / "fake_repo"
     (fake_root / "machine_spirit_4" / "web").mkdir(parents=True)
-    (fake_root / "machine_spirit_4" / "canned_audio" / "alloy").mkdir(parents=True)
     mutated = INDEX_HTML.read_bytes() + b"\n<!-- ABA divergence -->\n"
     (fake_root / "machine_spirit_4" / "web" / "index.html").write_bytes(mutated)
-    for static_name in ("ms4_voice_dsp.js", "voice_input_session.js"):
+    for static_name in (
+        "ms4_voice_dsp.js",
+        "voice_input_session.js",
+        "oracle_remote_pwa.js",
+        "service-worker.js",
+        "manifest.webmanifest",
+        "oracle-icon.svg",
+    ):
         shutil.copyfile(
             ROOT / "machine_spirit_4" / "web" / static_name,
             fake_root / "machine_spirit_4" / "web" / static_name,
         )
-    shutil.copyfile(
-        ROOT / "machine_spirit_4" / "canned_audio" / "alloy" / "ack_listening.wav",
-        fake_root / "machine_spirit_4" / "canned_audio" / "alloy" / "ack_listening.wav",
-    )
     completed = _run_browser_transaction("canonical", evidence_dir=tmp_path, node=node, chrome=chrome, repo_root=fake_root)
     # The harness ran and reported the ACTUAL served bytes...
     assert completed.stdout_text.strip(), (
@@ -2802,18 +2804,23 @@ def test_unproven_tree_death_does_not_commit(tmp_path: Path) -> None:
     assert completed.cleanup_error and "tree death NOT proven" in completed.cleanup_error
 
 
-def test_external_cancellation_propagates_with_no_accepted_evidence(tmp_path: Path) -> None:
+def test_external_cancellation_propagates_with_no_accepted_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R7 P1-4 (B): a KeyboardInterrupt in the process primitive PROPAGATES (is not
     swallowed into a normal result) and leaves NO accepted evidence, no owned
     profile/staging residue, and no surviving browser tree."""
     node, chrome = _require_browser()
+    run_id = uuid.uuid4()
+    monkeypatch.setattr(uuid, "uuid4", lambda: run_id)
     with pytest.raises(KeyboardInterrupt):
         _run_browser_transaction(
             "canonical", evidence_dir=tmp_path, node=node, chrome=chrome,
             extra_env={"MS4_TEST_FORCE_CANCEL": "1"})
     assert not _has_run_dir(tmp_path, "canonical")
     assert not list(Path(tmp_path).glob(".staging-canonical__*"))
-    assert _surviving_browser_pids("ms4-oracle-browser-") == []
+    assert _surviving_browser_pids(f"{PROFILE_PREFIX}{run_id}") == []
 
 
 def test_graph_mutation_before_rename_fails_closed(tmp_path: Path) -> None:

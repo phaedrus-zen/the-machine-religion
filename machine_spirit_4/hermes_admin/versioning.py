@@ -15,6 +15,7 @@ upgrades go through the operator's normal package manager (pip).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -40,6 +41,48 @@ USER_AGENT = "MS4-HermesAdmin/1.0"
 HTTP_TIMEOUT = 8
 LATEST_TTL_SECS = 3600  # GitHub rate limits; Hermes releases ship every ~1-2 weeks.
 RECENT_TTL_SECS = 3600
+
+# Release signature policy (operator decision 2026-09-07). Upstream stopped
+# signing release tags after v2026.8.3, so a signed-only gate would pin the
+# fleet to 0.20.0 forever. The policy is an explicit switch with exactly two
+# values, read from the environment (the same mechanism every other updater
+# knob -- MS4_HERMES_DIR, MS4_HERMES_MIN_FREE_BYTES, MS4_HERMES_PROVENANCE_* --
+# already uses; there is no separate settings store the updater consults):
+#
+#   allow_unsigned (default): the newest published stable release is the
+#       update target regardless of tag signature. The installer still runs
+#       every check that does not depend on a signature and logs at WARNING.
+#   require_signed: the pre-existing F4 behaviour, byte-for-byte.
+#
+# Anything else is a configuration error and fails CLOSED to require_signed
+# (logged), so a typo can never widen trust.
+RELEASE_SIGNATURE_POLICY_ENV = "HERMES_RELEASE_SIGNATURE_POLICY"
+RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED = "require_signed"
+RELEASE_SIGNATURE_POLICY_ALLOW_UNSIGNED = "allow_unsigned"
+RELEASE_SIGNATURE_POLICIES = frozenset(
+    {RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED, RELEASE_SIGNATURE_POLICY_ALLOW_UNSIGNED}
+)
+DEFAULT_RELEASE_SIGNATURE_POLICY = RELEASE_SIGNATURE_POLICY_ALLOW_UNSIGNED
+
+_LOG = logging.getLogger(__name__)
+
+
+def release_signature_policy(environ: Mapping[str, str] | None = None) -> str:
+    """Return the effective release signature policy (see the constants above)."""
+    source = os.environ if environ is None else environ
+    raw = (source.get(RELEASE_SIGNATURE_POLICY_ENV) or "").strip().lower()
+    if not raw:
+        return DEFAULT_RELEASE_SIGNATURE_POLICY
+    if raw in RELEASE_SIGNATURE_POLICIES:
+        return raw
+    _LOG.warning(
+        "%s=%r is not one of %s; failing closed to %s",
+        RELEASE_SIGNATURE_POLICY_ENV,
+        source.get(RELEASE_SIGNATURE_POLICY_ENV),
+        sorted(RELEASE_SIGNATURE_POLICIES),
+        RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED,
+    )
+    return RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED
 
 _SEMVER_RE = re.compile(
     r"^\s*v?(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:\.(?P<patch>\d+))?"
@@ -85,6 +128,9 @@ class RecentRelease:
 class _Cache:
     latest: CachedLatest | None = None
     recent: list[RecentRelease] = field(default_factory=list)
+    release_candidates: list[RecentRelease] = field(default_factory=list)
+    release_candidates_fetched_at: float = 0.0
+    release_tags: dict[str, str] = field(default_factory=dict)
     recent_fetched_at: float = 0.0
     tag_signatures: dict[str, tuple[str, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -174,7 +220,10 @@ def reconcile_durable_terminal_state(
     request_user: str | None = None,
 ) -> None:
     """Reconcile persisted last-update presentation on startup/version refresh."""
-    from .state import reconcile_stale_failure_for_current_or_newer, update_in_progress
+    from .state import (
+        reconcile_stale_failure_for_current_or_newer,
+        update_in_progress,
+    )
 
     if update_in_progress():
         return
@@ -570,13 +619,162 @@ def recent_releases(force_refresh: bool = False) -> list[RecentRelease]:
                 prerelease=bool(entry.get("prerelease")),
                 tag_name=tag_name,
                 html_url=str(entry.get("html_url") or ""),
-                signature_state=official_tag_signature_state(tag_name),
+                signature_state=official_tag_signature_state(
+                    tag_name,
+                    force_refresh=force_refresh,
+                ),
             )
         )
     with _CACHE.lock:
         _CACHE.recent = out
+        _CACHE.release_candidates = list(out)
+        _CACHE.release_candidates_fetched_at = now
+        signed_tags: dict[str, str] = {}
+        for release in out:
+            if release.signature_state == "signed":
+                signed_tags.setdefault(release.version, release.tag_name)
+        _CACHE.release_tags.update(signed_tags)
+        for release in out:
+            _CACHE.release_tags.setdefault(release.version, release.tag_name)
         _CACHE.recent_fetched_at = now
     return list(out)
+
+
+def latest_signed_version(
+    current_version: str | None,
+    *,
+    published: CachedLatest | None = None,
+    published_signature_state: str | None = None,
+    force_refresh: bool = False,
+) -> CachedLatest | None:
+    """Return the newest stable signed release newer than ``current_version``.
+
+    GitHub's newest published release is not necessarily signed.  The primary
+    Update control must therefore fall back to an earlier signed release that
+    is still newer than the installed version instead of disabling a valid
+    update.  Signature *presence* only makes a release offerable; the installer
+    still performs the full signer/provenance verification before mutation.
+    """
+    published = published or latest_version(force_refresh=force_refresh)
+    if published is not None and not update_available(current_version, published.version):
+        return None
+    if (
+        published is not None
+        and (
+            published_signature_state
+            or official_tag_signature_state(
+                published.tag_name,
+                force_refresh=force_refresh,
+            )
+        )
+        == "signed"
+    ):
+        return published
+
+    now = time.time()
+    with _CACHE.lock:
+        stale_candidates = list(_CACHE.release_candidates)
+        candidates_fresh = (
+            bool(stale_candidates)
+            and now - _CACHE.release_candidates_fetched_at < RECENT_TTL_SECS
+        )
+        cached_candidates = list(stale_candidates) if candidates_fresh else []
+    payload = (
+        _http_get_json(RECENT_RELEASES_URL)
+        if force_refresh or not cached_candidates
+        else None
+    )
+    candidates = cached_candidates
+    if isinstance(payload, list):
+        candidates = []
+        for entry in payload[:20]:
+            if not isinstance(entry, dict):
+                continue
+            tag = str(entry.get("tag_name") or "")
+            version = _wheel_version_from_release(entry) or (
+                tag.lstrip("v") if tag else ""
+            )
+            if not version or not is_safe_target_version(version):
+                continue
+            if tag and not is_safe_target_version(tag.lstrip("v")):
+                continue
+            candidates.append(
+                RecentRelease(
+                    version=version,
+                    published_at=str(entry.get("published_at") or ""),
+                    prerelease=bool(entry.get("prerelease")),
+                    tag_name=tag or f"v{version}",
+                    html_url=str(entry.get("html_url") or ""),
+                )
+            )
+        with _CACHE.lock:
+            _CACHE.release_candidates = list(candidates)
+            _CACHE.release_candidates_fetched_at = now
+    elif not candidates:
+        candidates = stale_candidates
+
+    candidates.sort(
+        key=lambda release: parse_semver(release.version) or (-1, -1, -1),
+        reverse=True,
+    )
+    for candidate in candidates:
+        if candidate.prerelease or not update_available(
+            current_version,
+            candidate.version,
+        ):
+            continue
+        signature_state = candidate.signature_state
+        if signature_state == "unknown":
+            signature_state = (
+                published_signature_state
+                if published is not None and candidate.tag_name == published.tag_name
+                else official_tag_signature_state(
+                    candidate.tag_name,
+                    force_refresh=force_refresh,
+                )
+            )
+        if signature_state == "signed":
+            with _CACHE.lock:
+                _CACHE.release_tags[candidate.version] = candidate.tag_name
+            return CachedLatest(
+                version=candidate.version,
+                published_at=candidate.published_at,
+                tag_name=candidate.tag_name,
+                html_url=candidate.html_url,
+                fetched_at_unix=time.time(),
+            )
+    return None
+
+
+def latest_offerable_version(
+    current_version: str | None,
+    *,
+    policy: str | None = None,
+    published: CachedLatest | None = None,
+    published_signature_state: str | None = None,
+    force_refresh: bool = False,
+) -> CachedLatest | None:
+    """The release the primary Update control may install, per signature policy.
+
+    ``require_signed`` delegates to :func:`latest_signed_version` unchanged.
+    ``allow_unsigned`` offers the newest published stable release (GitHub's
+    ``releases/latest`` excludes prereleases and drafts) whenever it is newer
+    than ``current_version``, regardless of its tag signature state.
+    """
+    policy = policy or release_signature_policy()
+    if policy == RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED:
+        return latest_signed_version(
+            current_version,
+            published=published,
+            published_signature_state=published_signature_state,
+            force_refresh=force_refresh,
+        )
+    published = published or latest_version(force_refresh=force_refresh)
+    if published is None or not update_available(current_version, published.version):
+        return None
+    with _CACHE.lock:
+        _CACHE.release_tags.setdefault(published.version, published.tag_name)
+    return published
 
 
 def resolve_git_tag(target_version: str) -> str | None:
@@ -591,10 +789,15 @@ def resolve_git_tag(target_version: str) -> str | None:
     if not target_version:
         return None
     cleaned = target_version.lstrip("v")
-    if cleaned in {r.version for r in _CACHE.recent}:
-        match = next(r for r in _CACHE.recent if r.version == cleaned)
+    with _CACHE.lock:
+        recent = list(_CACHE.recent)
+        known_tag = _CACHE.release_tags.get(cleaned)
+        latest = _CACHE.latest
+    if known_tag:
+        return known_tag
+    if cleaned in {r.version for r in recent}:
+        match = next(r for r in recent if r.version == cleaned)
         return match.tag_name or f"v{cleaned}"
-    latest = _CACHE.latest
     if latest and latest.version == cleaned:
         return latest.tag_name or f"v{cleaned}"
     return f"v{cleaned}"
@@ -623,9 +826,36 @@ def version_info(force_refresh_latest: bool = False) -> dict[str, Any]:
     """One-call snapshot for the gateway/MCP/UI: current, latest, mode, etc."""
     from .state import last_update, update_in_progress
 
+    policy = release_signature_policy()
     mode = install_mode()
     current = mode.get("version")
-    latest = latest_version(force_refresh=force_refresh_latest)
+    published = latest_version(force_refresh=force_refresh_latest)
+    published_str = published.version if published else None
+    published_tag = published.tag_name if published else None
+    published_signature_state = (
+        official_tag_signature_state(
+            published_tag,
+            force_refresh=force_refresh_latest,
+        )
+        if published_tag
+        else "unknown"
+    )
+    offered_release = latest_offerable_version(
+        current if isinstance(current, str) else None,
+        policy=policy,
+        published=published,
+        published_signature_state=published_signature_state,
+        force_refresh=force_refresh_latest,
+    )
+    # ``signed`` keeps its F4 meaning: a release selected BECAUSE its tag
+    # carries a signature. Under allow_unsigned the offer is policy-driven,
+    # so the payload reports the published tag's real signature state.
+    signed = (
+        offered_release
+        if policy == RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED
+        else None
+    )
+    latest = offered_release or published
     latest_str = latest.version if latest else None
     latest_tag = latest.tag_name if latest else None
     relation = installed_relation(
@@ -640,16 +870,15 @@ def version_info(force_refresh_latest: bool = False) -> dict[str, Any]:
     last = last_update()
     in_progress = update_in_progress()
 
-    signature_state = (
-        official_tag_signature_state(latest_tag) if latest_tag else "unknown"
-    )
-    newer_published = update_available(current, latest_str)
-    offered = newer_published and signature_state == "signed"
+    signature_state = "signed" if signed is not None else published_signature_state
+    newer_published = update_available(current, published_str)
+    offered = offered_release is not None
     blocked = None
-    if newer_published and signature_state == "unsigned":
-        blocked = "official_tag_unsigned"
-    elif newer_published and signature_state != "signed":
-        blocked = "official_tag_signature_unknown"
+    if policy == RELEASE_SIGNATURE_POLICY_REQUIRE_SIGNED:
+        if newer_published and signed is None and published_signature_state == "unsigned":
+            blocked = "official_tag_unsigned"
+        elif newer_published and signed is None and published_signature_state != "signed":
+            blocked = "official_tag_signature_unknown"
     operator = compute_operator_state(
         update_in_progress=in_progress,
         last_status=last.status if last else None,
@@ -663,6 +892,7 @@ def version_info(force_refresh_latest: bool = False) -> dict[str, Any]:
         "latest": latest_str,
         "latest_tag": latest_tag,
         "latest_signature_state": signature_state,
+        "release_signature_policy": policy,
         "update_available": offered,
         "update_blocked_reason": blocked,
         "update_in_progress": in_progress,
@@ -670,6 +900,15 @@ def version_info(force_refresh_latest: bool = False) -> dict[str, Any]:
         "operator_state": operator,
         "latest_published_at": latest.published_at if latest else None,
         "latest_release_url": latest.html_url if latest else None,
+        "published_latest": published_str,
+        "published_latest_tag": published_tag,
+        "published_latest_signature_state": published_signature_state,
+        "published_latest_published_at": published.published_at if published else None,
+        "selected_signed_fallback": bool(
+            signed is not None
+            and published is not None
+            and signed.version != published.version
+        ),
         "install_mode": mode.get("mode"),
         "install_directory": str(mode.get("directory")) if mode.get("directory") else None,
         "git_describe": git_describe(mode["directory"]) if mode.get("directory") else None,
@@ -683,5 +922,8 @@ def _clear_caches_for_test() -> None:
     with _CACHE.lock:
         _CACHE.latest = None
         _CACHE.recent = []
+        _CACHE.release_candidates = []
+        _CACHE.release_candidates_fetched_at = 0.0
+        _CACHE.release_tags = {}
         _CACHE.recent_fetched_at = 0.0
         _CACHE.tag_signatures = {}

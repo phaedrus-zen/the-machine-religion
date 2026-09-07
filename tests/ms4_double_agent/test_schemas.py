@@ -93,12 +93,14 @@ def test_envelope_clamps_long_user_visible_goal():
 
 
 def test_envelope_round_trip_json():
-    env = JobEnvelope(**_good_envelope_kwargs())
+    turn_id = "ms4-turn-0123456789abcdef"
+    env = JobEnvelope(**_good_envelope_kwargs(turn_id=turn_id))
     env.validate()
     restored = JobEnvelope.from_dict(env.to_dict())
     assert restored.job_id == env.job_id
     assert restored.user_visible_goal == env.user_visible_goal
     assert restored.authority.can_mutate_world is False
+    assert restored.turn_id == turn_id
 
 
 def test_envelope_prior_context_round_trip_filters_and_clamps():
@@ -268,6 +270,7 @@ def test_result_refuses_unsafe_job_id():
 
 
 def test_result_round_trip_json():
+    turn_id = "ms4-turn-0123456789abcdef"
     res = JobResult(
         job_id="da-1",
         status="success",
@@ -275,12 +278,14 @@ def test_result_round_trip_json():
         text="long body of model output",
         confidence="high",
         conversation_revision_id=5,
+        turn_id=turn_id,
     )
     res.validate()
     again = JobResult.from_dict(res.to_dict())
     assert again.status == "success"
     assert again.confidence == "high"
     assert again.conversation_revision_id == 5
+    assert again.turn_id == turn_id
 
 
 # ---------------------------------------------------------------------------

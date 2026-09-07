@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import types
 from pathlib import Path
 
 from machine_spirit_4.gateway import audit, oracle_admin
@@ -33,6 +34,18 @@ _HEALTHY_CHAT_LIFECYCLE = {
     "capabilities_available": ["chat", "embedding"],
     "capabilities_unavailable": [],
 }
+
+
+def _patch_healthy_foreground_model(monkeypatch) -> None:
+    monkeypatch.setattr(
+        oracle_admin,
+        "choose_foreground_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="nemotron-3-nano:4b",
+            source="loaded",
+            detail="test catalog admission",
+        ),
+    )
 
 
 def _write_jsonl(path: Path, events: list[dict]) -> None:
@@ -288,6 +301,7 @@ def test_isolated_voice_turn_persists_distinct_pipeline_stages(tmp_path, monkeyp
 
 
 def test_oracle_chat_readiness_stays_ready_when_only_asr_is_unprovisioned(monkeypatch):
+    _patch_healthy_foreground_model(monkeypatch)
     monkeypatch.setattr(
         oracle_admin,
         "status",
@@ -340,6 +354,72 @@ def test_ui_projects_event_type_and_last_good_recent_turns():
     # Front door must not treat voice_input_ready as audible output.
     assert "input ready; output blocked" in html
     assert "Never mark input-ready as output-delivered" in html or "output_delivered" in html or "latchedVoiceOutputFailure" in html
+
+
+def test_post_decode_ownership_guard_precedes_blocked_ui_write():
+    html = HTML.read_text(encoding="utf-8")
+    stream = html.split("async function submitWavBlobAsVoiceTurn", 1)[1]
+    parsed = stream.index("payload = dataText ? JSON.parse(dataText) : {}")
+    identity = stream.index("bindVoiceServerTurnId(turnState, payload.turn_id)")
+    audio_event = stream.index("eventName === 'audio_chunk'")
+    assert parsed < identity < audio_event
+    assert "failVoiceTurnIdentityMismatch(turnState, payload.turn_id)" in stream
+
+    audio_branch = html.split(
+        "} else if (eventName === 'audio_chunk') {",
+        1,
+    )[1].split("} else if (eventName === 'audio_error') {", 1)[0]
+
+    enqueue = audio_branch.index("await enqueueAudioChunk(")
+    ownership = audio_branch.index(
+        "if (streamController.signal.aborted || myTurnId !== currentVoiceTurnId)"
+    )
+    decode_failure = audio_branch.index("if (!decoded)")
+    blocked = audio_branch.index(
+        "setOracleStageState('blocked', 'Reply audio could not be decoded.'"
+    )
+
+    assert enqueue < ownership < decode_failure < blocked
+
+
+def test_voice_turn_identity_survives_recent_turn_reload_and_ui_projection(
+    tmp_path,
+    monkeypatch,
+):
+    audit_path = tmp_path / "ms4_audit.jsonl"
+    monkeypatch.setenv("MS4_AUDIT_LOG", str(audit_path))
+    turn_id = "ms4-turn-0123456789abcdef"
+    audit.append_event(
+        "voice_turn_complete",
+        {
+            "turn_id": turn_id,
+            "revision_id": 7,
+            "transcript": "first visible turn",
+            "reply_text_preview": "first visible reply",
+            "dispatched_job": {"job_id": "da-identity-proof"},
+        },
+        audit_path=audit_path,
+    )
+
+    reloaded = audit.read_recent_voice_turns(limit=5, audit_path=audit_path)
+    row = reloaded["turns"][0]
+    assert row["turn_id"] == turn_id
+    assert row["revision_id"] == 7
+    assert row["dispatched_job"]["job_id"] == "da-identity-proof"
+
+    rendered = _run_refresh_voice_turns_vm(reloaded)
+    assert f"turn={turn_id}" in rendered["text"]
+    assert "revision=7" in rendered["text"]
+    assert "first visible turn" in rendered["text"]
+    assert "first visible reply" in rendered["text"]
+
+    html = HTML.read_text(encoding="utf-8")
+    row_fn = html[
+        html.index("function renderVoiceTurnRow"):
+        html.index("async function refreshVoiceTurns")
+    ]
+    assert "data.turn_id" in row_fn
+    assert "data.revision_id" in row_fn
 
 
 def test_buried_voice_turn_beyond_byte_budget_is_not_empty_success(tmp_path, monkeypatch):

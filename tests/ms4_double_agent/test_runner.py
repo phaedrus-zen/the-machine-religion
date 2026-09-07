@@ -33,7 +33,7 @@ def board(tmp_path):
     return Blackboard(tmp_path / "double_agent.sqlite3")
 
 
-def _envelope(conv="conv-1", revision=1) -> JobEnvelope:
+def _envelope(conv="conv-1", revision=1, turn_id=None) -> JobEnvelope:
     env = JobEnvelope(
         job_id=safety.new_job_id(),
         parent_conversation_id=conv,
@@ -41,6 +41,7 @@ def _envelope(conv="conv-1", revision=1) -> JobEnvelope:
         background_lobe_type="deep_chat",
         user_visible_goal="Diagnose the issue.",
         internal_goal="Diagnose the issue.",
+        turn_id=turn_id,
     )
     env.validate()
     return env
@@ -101,15 +102,18 @@ def test_submit_and_completion(board):
     chat = FakeChat(final_text="The bridge command was sent and acknowledged.")
     runner = JobRunner(blackboard=board, chat_runner_factory=chat.factory)
     try:
-        env = _envelope()
+        turn_id = "ms4-turn-0123456789abcdef"
+        env = _envelope(turn_id=turn_id)
         snap = runner.submit(env)
         assert snap["state"] in {"queued", "running", "completed"}
+        assert snap["turn_id"] == turn_id
         final = _await_state(runner, env.job_id, {"completed"})
         assert final["state"] == "completed"
         result = board.get_result(env.job_id)
         assert result is not None
         assert result["status"] == "success"
         assert result["text"].startswith("The bridge command was sent")
+        assert result["turn_id"] == turn_id
     finally:
         runner.shutdown(wait=False)
 

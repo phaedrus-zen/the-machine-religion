@@ -227,7 +227,7 @@ def test_fusion_smoke_defaults_to_resident_face_model():
     validator = (MS4 / "scripts" / "validate_ms4_fusion.py").read_text(encoding="utf-8")
     mcp_validator = (MS4 / "scripts" / "validate_ms4_mcp.py").read_text(encoding="utf-8")
 
-    assert 'MS4_FUSION_TEST_MODEL", "llama3.1:8b"' in validator
+    assert 'MS4_FUSION_TEST_MODEL", "nemotron-3-nano:4b"' in validator
     assert 'MS4_FUSION_TEST_MODEL", "qwen3-coder-next:latest"' not in validator
     assert '"depth_model_id": TEST_MODEL' in validator
     assert "ms4_chat_deep_completion" in validator

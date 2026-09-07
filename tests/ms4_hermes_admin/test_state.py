@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from machine_spirit_4.hermes_admin import state
+from machine_spirit_4.hermes_admin import installer, state
 
 
 def test_full_job_lifecycle(tmp_path):
@@ -92,6 +92,49 @@ def test_hydrate_preserves_running_until_lock_owner_is_classified(tmp_path):
     assert final.phase == "error"
     assert "restarted while update was running" in (final.error or "")
     assert final.finished_at is not None
+
+
+def test_cold_start_recovery_fails_ownerless_running_job(tmp_path, monkeypatch):
+    path = tmp_path / "snap.json"
+    state._reset_for_tests(path)
+    state.start_job(
+        from_version="0.13.0",
+        to_version="0.14.0",
+        install_mode="editable",
+    )
+    monkeypatch.setattr(installer, "_LOCAL_UPDATE_JOB_ID", None)
+
+    recovered = installer.recover_interrupted_update()
+
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.phase == "error"
+    assert "restarted while update was running" in (recovered.error or "")
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_cold_start_recovery_preserves_running_job_with_external_lock(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "snap.json"
+    state._reset_for_tests(path)
+    running = state.start_job(
+        from_version="0.13.0",
+        to_version="0.14.0",
+        install_mode="editable",
+    )
+    monkeypatch.setattr(installer, "_LOCAL_UPDATE_JOB_ID", None)
+
+    def locked(_cls, _path):
+        raise installer.HermesUpdateLockedError("held by another process")
+
+    monkeypatch.setattr(installer._WholeJobLock, "acquire", classmethod(locked))
+
+    recovered = installer.recover_interrupted_update()
+
+    assert recovered == running
+    assert state.last_update().status == "running"
 
 
 def test_last_update_refreshes_changed_durable_snapshot(tmp_path):

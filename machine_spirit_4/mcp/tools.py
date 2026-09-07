@@ -21,6 +21,7 @@ from .schemas import ToolInputError, optional_string, require_object, require_st
 
 
 MCP_TEXT = "text"
+_RUNTIME_ACTION_ANNOTATION = "_ms4RuntimeAction"
 
 
 @dataclass(frozen=True)
@@ -31,12 +32,18 @@ class ToolDef:
     annotations: dict[str, Any]
     handler: Callable[[Any, dict[str, Any]], Any]
 
+    @property
+    def is_runtime_action(self) -> bool:
+        return self.annotations.get(_RUNTIME_ACTION_ANNOTATION) is True
+
     def as_mcp_tool(self) -> dict[str, Any]:
+        annotations = dict(self.annotations)
+        annotations.pop(_RUNTIME_ACTION_ANNOTATION, None)
         return {
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
-            "annotations": self.annotations,
+            "annotations": annotations,
         }
 
 
@@ -64,9 +71,10 @@ def chat_annotations(title: str) -> dict[str, Any]:
     return {
         "title": title,
         "readOnlyHint": False,
-        "destructiveHint": False,
         "idempotentHint": False,
-        "openWorldHint": False,
+        # Internal registry truth used to prevent a mutable manifest from
+        # reclassifying or bypassing runtime-action dispatch policy.
+        _RUNTIME_ACTION_ANNOTATION: True,
     }
 
 
@@ -566,7 +574,11 @@ def hivemind_inference_chat(runtime: Any, arguments: dict[str, Any]) -> Any:
     if not isinstance(messages, list) or not messages:
         raise ToolInputError("messages (list) required")
     model = require_string(arguments, "model")
-    opts = {k: v for k, v in arguments.items() if k not in ("messages", "model")}
+    opts = {
+        key: arguments[key]
+        for key in ("temperature", "max_tokens")
+        if key in arguments
+    }
     return _tools.inference_chat(runtime.hivemind_url, messages=messages, model=model, **opts)
 
 
@@ -1307,7 +1319,7 @@ def build_tool_registry() -> dict[str, ToolDef]:
         ),
         ToolDef(
             "ms4.hivemind.game_session.cancel@v1",
-            "Move a game_session job to CANCELLED. Idempotent. Dry-run only in Phase 1.",
+            "Request cancellation of one game_session job.",
             {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}},
             chat_annotations("MS4 HiveMind game_session cancel"),
             hivemind_game_session_cancel,

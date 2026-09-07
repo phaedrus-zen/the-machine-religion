@@ -11,6 +11,7 @@ SERVER = ROOT / "machine_spirit_4" / "gateway" / "server.py"
 
 def test_hermes_banner_uses_operator_state_and_keeps_failed_audit_hooks():
     html = HTML.read_text(encoding="utf-8")
+    assert 'id="hermesUpdateBtn" type="button" disabled' in html
     assert "function renderHermesBanner(info)" in html
     assert "operator_state" in html
     assert "installed_relation" in html
@@ -35,6 +36,9 @@ def test_hermes_banner_uses_operator_state_and_keeps_failed_audit_hooks():
     )
     assert "No signed Hermes update" in banner_fn
     assert "No signed update" in banner_fn
+    assert banner_fn.index("completedVersionChange") < banner_fn.index(
+        "info.operator_state === 'newer'"
+    )
 
 
 def test_hermes_banner_does_not_claim_update_when_newer_than_discovered_latest():
@@ -57,8 +61,31 @@ def test_hermes_blocked_banner_names_unsigned_and_unknown_signatures_truthfully(
     assert "whose signature status is unknown" in banner_fn
 
 
+def test_hermes_banner_offers_unsigned_newest_when_release_policy_allows():
+    """allow_unsigned: enabled Update button with explicit unsigned copy;
+    require_signed keeps today's disabled 'No signed update' state."""
+    html = HTML.read_text(encoding="utf-8")
+    banner_fn = html[html.index("function renderHermesBanner"): html.index("async function refreshHermesVersion")]
+    assert "info.release_signature_policy === 'allow_unsigned'" in html
+    assert "function hermesPolicyAllowsUnsigned(info)" in html
+    assert "hermesUnsignedOfferCopy(info)" in banner_fn
+    assert (
+        "is unsigned; policy allows (HERMES_RELEASE_SIGNATURE_POLICY=allow_unsigned)"
+        in html
+    )
+    assert "newest release ${tag}" in html
+    # Strict-policy presentation is untouched.
+    assert "No signed update" in banner_fn
+    assert "F4 refuses unsigned official tags" in banner_fn
+    assert "'Retry signed update'" in html
+    # Pin dialog follows the same policy instead of contradicting the button.
+    assert "unsigned - policy allows" in html
+    assert "unsigned - not offered" in html
+
+
 def test_gateway_version_route_still_serves_version_info():
     server = SERVER.read_text(encoding="utf-8")
     assert "hermes_admin.version_info()" in server
     assert "hermes_admin.initialize_state()" in server
+    assert "hermes_admin.recover_interrupted_update()" in server
     assert "reconcile_durable_terminal_state" in server

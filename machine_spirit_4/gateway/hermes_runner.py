@@ -262,6 +262,7 @@ from machine_spirit_4.double_agent import (
     default_runner,
     face_lobe_turn_start,
     is_reasoning_only_analytical,
+    result_matches_job_identity,
     router_route,
 )
 from machine_spirit_4.double_agent.continuation import phrase_is_continuation
@@ -1469,11 +1470,8 @@ def _persisted_exact_read_missing_source(
         return None
     if (
         not isinstance(result, dict)
-        or result.get("schema") != "DoubleAgentJobResult.v1"
-        or result.get("job_id") != job.get("job_id")
+        or not result_matches_job_identity(job, result)
         or result.get("status") != "success"
-        or result.get("conversation_revision_id")
-        != job.get("conversation_revision_id")
     ):
         return None
     evidence = result.get("evidence")
@@ -1832,6 +1830,10 @@ class Ms4HermesRunner:
         if state not in {"completed", "failed", "canceled"}:
             raise RuntimeError(f"Depth job is not terminal: {state or 'unknown'}")
         result = depth_runner.get_result(job_id)
+        result_identity_mismatch = (
+            isinstance(result, dict)
+            and not result_matches_job_identity(job, result)
+        )
         base: dict[str, Any] = {
             "schema": "Ms4DepthCompletionDelivery.v1",
             "job_id": job_id,
@@ -1840,19 +1842,24 @@ class Ms4HermesRunner:
             "history_bound": False,
             "already_bound": False,
             "history_truncated": False,
-            "result": result,
+            "result": None if result_identity_mismatch else result,
         }
+        if job.get("turn_id") is not None:
+            base["turn_id"] = job["turn_id"]
+        if result_identity_mismatch:
+            return {
+                **base,
+                "delivery_kind": "incomplete",
+                "reason": "result_identity_mismatch",
+            }
         if state != "completed":
             return {**base, "delivery_kind": "failure"}
         if not isinstance(result, dict):
             return {**base, "delivery_kind": "incomplete", "reason": "missing_result"}
         result_text = str(result.get("text") or "").strip()
         valid_result = (
-            result.get("schema") == "DoubleAgentJobResult.v1"
-            and result.get("job_id") == job_id
+            result_matches_job_identity(job, result)
             and result.get("status") == "success"
-            and result.get("conversation_revision_id")
-            == job.get("conversation_revision_id")
             and bool(result_text)
         )
         if not valid_result:
@@ -1876,6 +1883,7 @@ class Ms4HermesRunner:
             {
                 "job_id": job_id,
                 "conversation_id": conversation_id,
+                "turn_id": job.get("turn_id"),
                 "history_bound": binding["history_bound"],
                 "already_bound": binding["already_bound"],
                 "history_truncated": binding["history_truncated"],
@@ -2202,6 +2210,7 @@ class Ms4HermesRunner:
         stream_callback: Any | None = None,
         cancel_event: threading.Event | None = None,
         client_id: str | None = None,
+        turn_id: str | None = None,
         recommend_receipt: Any | None = None,
     ) -> dict[str, Any]:
         """Foreground (Face Lobe) chat turn.
@@ -2335,6 +2344,7 @@ class Ms4HermesRunner:
             face_lobe_outcome = face_lobe_turn_start(
                 conversation_id=session_id or f"ms4-{uuid.uuid4()}",
                 user_message=message_for_chat,
+                turn_id=turn_id,
             )
         except Exception as exc:
             face_lobe_outcome = {"error": str(exc)}
@@ -2362,6 +2372,23 @@ class Ms4HermesRunner:
                 message_for_chat,
                 quartermaster_outcome,
             )
+        inline_receipt_invalid = bool(
+            quartermaster_block is not None
+            and (
+                not isinstance(quartermaster_outcome, dict)
+                or quartermaster_outcome.get("inline_invoked") is not True
+            )
+        )
+        if inline_receipt_invalid:
+            log.warning("quartermaster inline block lacked invocation receipt; refusing")
+            quartermaster_block = None
+            authoritative_inline_text = None
+            authoritative_inline_guard_block = None
+            if isinstance(quartermaster_outcome, dict):
+                quartermaster_outcome["admission_refused"] = True
+                quartermaster_outcome["admission_reason"] = (
+                    "inline execution receipt missing"
+                )
         inline_invoked = bool(
             isinstance(quartermaster_outcome, dict)
             and quartermaster_outcome.get("inline_invoked") is True
@@ -2413,12 +2440,21 @@ class Ms4HermesRunner:
         if service_action_conflict_blocked:
             effective_deep = False
 
-        admission = _oracle_supported_admission(
-            dispatch_intent,
-            quartermaster_outcome,
-            inline_block=quartermaster_block,
-            hivemind_url=self.hivemind_url,
-            inline_invoked=inline_invoked,
+        admission = (
+            {
+                "decision": _ADMIT_REFUSE,
+                "reason": "inline execution receipt missing",
+                "canonical": None,
+                "toolsets": None,
+            }
+            if inline_receipt_invalid
+            else _oracle_supported_admission(
+                dispatch_intent,
+                quartermaster_outcome,
+                inline_block=quartermaster_block,
+                hivemind_url=self.hivemind_url,
+                inline_invoked=inline_invoked,
+            )
         )
         exact_read_canonical = (
             admission["canonical"]
@@ -2454,10 +2490,11 @@ class Ms4HermesRunner:
             exact_gated_candidate is not None
             and exact_gated_canonical is None
         )
-        # A refused or low-confidence Quartermaster mapping must not block an
-        # ordinary direct conversation. Explicit /deep stays fail-closed below.
+        # An ordinary pre-execution miss must not block direct conversation.
+        # An invalid post-execution receipt and explicit /deep fail closed.
         no_action_blocked = (
-            service_action_conflict_blocked
+            inline_receipt_invalid
+            or service_action_conflict_blocked
             or gated_proof_blocked
             or inline_terminal_failure
             or (
@@ -2545,6 +2582,7 @@ class Ms4HermesRunner:
                     user_visible_goal=(confirm_goal or route_decision.goal or message_for_chat)[:240],
                     internal_goal=depth_internal_goal,
                     prior_context=depth_prior_context,
+                    turn_id=turn_id,
                     resource_request=ResourceRequest(
                         model_override=depth_choice.model_id,
                         enabled_toolsets=depth_toolsets,
@@ -2866,6 +2904,7 @@ class Ms4HermesRunner:
             "ms3_sidecar_url": self.ms3_url,
             "hivemind_url": self.hivemind_url,
             "face_lobe": face_lobe_outcome,
+            "revision_id": face_lobe_outcome.get("revision", {}).get("revision_id") if isinstance(face_lobe_outcome.get("revision"), dict) else None,
             "face_lobe_model": face_lobe_model,
             "face_lobe_context_block": face_lobe_block,
             "router": route_decision.to_dict(),
@@ -2883,11 +2922,14 @@ class Ms4HermesRunner:
             "fabrication_guard": fabrication_guard,
             "face_lobe_output_guard": (face_result or {}).get("output_guard"),
         }
+        if turn_id:
+            response["turn_id"] = turn_id
         recommend_evidence = (face_result or {}).get("recommend")
         if isinstance(recommend_evidence, dict) and recommend_evidence:
             response["recommend"] = recommend_evidence
         append_event("chat_turn", {
             "session_id": chat_session_id,
+            "turn_id": turn_id,
             "model": effective_model,
             "requested_model": selected_model,
             "fallback_used": fallback_used,
@@ -3047,10 +3089,10 @@ class Ms4HermesRunner:
             "runtime": "hermes",
         }
         append_event("hermes_tool_call", {
-            "session_id": sid,
             "tool": tool_name,
             "toolset": response["toolset"],
-            "args": tool_args,
-            "result_excerpt": str(result)[:1000],
+            "argument_count": len(tool_args),
+            "result_present": result is not None,
+            "result_type": type(result).__name__,
         })
         return response

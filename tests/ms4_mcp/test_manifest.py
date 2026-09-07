@@ -1,9 +1,21 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+from machine_spirit_4.mcp.manifest_policy import ManifestPolicyError, validate_manifest
+from machine_spirit_4.mcp.tools import build_tool_registry
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MCP = ROOT / "machine_spirit_4" / "mcp"
+RUNTIME_ACTION_NAMES = tuple(
+    tool["name"]
+    for tool in json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))["tools"]
+    if tool.get("kind") == "runtime_action"
+)
 
 
 def test_manifest_lists_all_v1_tools_and_safety_posture():
@@ -72,34 +84,144 @@ def test_manifest_lists_all_v1_tools_and_safety_posture():
         assert effectful_psykyo in manifest["safety"]["effectful_tools_in_v1"]
 
 
-def test_every_runtime_action_declares_gate_policy():
-    """Gate metadata is the contract the Quartermaster / MCP layer enforce.
-
-    Every kind=runtime_action tool must carry a non-empty gated_by list of
-    non-empty strings: either a real gate ('confirm:true required',
-    'operator-level', 'safe-id guard', ...) or an explicit 'none: <rationale>'
-    declaration. A missing list is an undeclared policy, not 'no gate'.
-    """
+def test_every_runtime_action_declares_complete_validated_policy():
     manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
-    undeclared = []
-    malformed = []
-    for tool in manifest["tools"]:
-        if tool.get("kind") != "runtime_action":
-            continue
-        gated_by = tool.get("gated_by")
-        if not gated_by:
-            undeclared.append(tool["name"])
-            continue
-        if not isinstance(gated_by, list) or not all(
-            isinstance(gate, str) and gate.strip() for gate in gated_by
-        ):
-            malformed.append(tool["name"])
-    assert undeclared == [], f"runtime_action tools without gated_by: {undeclared}"
-    assert malformed == [], f"runtime_action tools with malformed gated_by: {malformed}"
+    registry = build_tool_registry()
+    by_name = validate_manifest(
+        manifest,
+        registry_names=registry,
+        registry_runtime_actions=(
+            name for name, tool in registry.items() if tool.is_runtime_action
+        ),
+    )
+    runtime_names = {
+        name for name, tool in by_name.items() if tool.get("kind") == "runtime_action"
+    }
+
+    assert len(runtime_names) == 31
+    assert runtime_names == set(manifest["safety"]["effectful_tools_in_v1"])
+    assert by_name["ms4.hermes.update@v1"]["idempotency"]["mode"] == "idempotent"
+    assert by_name["ms4.double_agent.cancel@v1"]["idempotency"]["mode"] == "idempotent"
+    assert by_name["ms4.hivemind.game_session.cancel@v1"]["idempotency"]["mode"] == "none"
 
 
-def test_confirm_gated_manifest_tools_enforce_confirm_in_registry():
-    """A 'confirm:true required' manifest gate must be enforced by the handler.
+@pytest.mark.parametrize("tool_name", RUNTIME_ACTION_NAMES)
+@pytest.mark.parametrize("field", ("gated_by", "idempotency", "cancellation", "audit"))
+def test_manifest_validator_rejects_each_missing_runtime_policy_field(tool_name, field):
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool["name"] == tool_name)
+    del action[field]
+
+    with pytest.raises(ManifestPolicyError, match=rf"{tool_name}: missing {field}"):
+        validate_manifest(manifest)
+
+
+def test_manifest_validator_rejects_unbounded_or_unjustified_none_gate():
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool.get("gated_by") == ["none"])
+    action["gate_rationale"] = ""
+    action.pop("bounds", None)
+
+    with pytest.raises(ManifestPolicyError) as exc_info:
+        validate_manifest(manifest)
+
+    message = str(exc_info.value)
+    assert "gate_rationale" in message
+    assert "bounds.max_arguments_bytes" in message
+
+
+def test_manifest_validator_rejects_unenforceable_prose_gate():
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool.get("kind") == "runtime_action")
+    action["gated_by"] = ["MS3 ethics future"]
+
+    with pytest.raises(ManifestPolicyError, match="gated_by"):
+        validate_manifest(manifest)
+
+
+def test_manifest_validator_rejects_gate_policy_drift():
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(
+        tool for tool in manifest["tools"] if tool["name"] == "ms4.double_agent.submit@v1"
+    )
+    action["gated_by"] = ["confirm"]
+
+    with pytest.raises(ManifestPolicyError, match="gated_by must be"):
+        validate_manifest(manifest)
+
+
+def test_manifest_validator_rejects_idempotency_policy_drift():
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(
+        tool for tool in manifest["tools"] if tool["name"] == "ms4.hermes.update@v1"
+    )
+    action["idempotency"]["mode"] = "none"
+
+    with pytest.raises(ManifestPolicyError, match="idempotency.mode must be idempotent"):
+        validate_manifest(manifest)
+
+
+def test_manifest_validator_rejects_unimplemented_cancellation_mode():
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool.get("kind") == "runtime_action")
+    action["cancellation"] = {
+        "mode": "tool",
+        "tool": "ms4.double_agent.cancel@v1",
+        "identifier": "job_id",
+        "rationale": "Not implemented by dispatch.",
+    }
+
+    with pytest.raises(ManifestPolicyError, match="cancellation.mode"):
+        validate_manifest(manifest)
+
+
+def test_offline_manifest_validator_script_passes_canonical_and_rejects_mutant(tmp_path):
+    script = ROOT / "machine_spirit_4" / "scripts" / "validate_ms4_mcp_manifest.py"
+    canonical = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert canonical.returncode == 0, canonical.stderr
+    assert json.loads(canonical.stdout)["runtime_actions"] == 31
+
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool.get("kind") == "runtime_action")
+    del action["audit"]
+    mutant = tmp_path / "manifest.json"
+    with mutant.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(manifest, handle)
+    rejected = subprocess.run(
+        [sys.executable, str(script), "--manifest", str(mutant)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 1
+    assert f"{action['name']}: missing audit" in rejected.stderr
+
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    action = next(tool for tool in manifest["tools"] if tool["name"] == "ms4.chat.send@v1")
+    action["kind"] = "read_only"
+    manifest["safety"]["effectful_tools_in_v1"].remove(action["name"])
+    with mutant.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(manifest, handle)
+    rejected = subprocess.run(
+        [sys.executable, str(script), "--manifest", str(mutant)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 1
+    assert f"native runtime actions missing policy: ['{action['name']}']" in rejected.stderr
+
+
+def test_confirm_gated_manifest_tools_keep_handler_defense_in_depth():
+    """Central dispatch gates these tools; their local guards remain a backstop.
 
     Scoped to the two tools that share the ToolInputError('Pass confirm:true')
     contract (jobs.cancel, logos.optimize); the gpu.passthrough.* handlers
@@ -119,7 +241,7 @@ def test_confirm_gated_manifest_tools_enforce_confirm_in_registry():
         ("ms4.hivemind.logos.optimize@v1", {"prompt_id": "x"}),
         ("ms4.hivemind.jobs.cancel@v1", {"job_id": "x"}),
     ):
-        assert "confirm:true required" in (by_name[name].get("gated_by") or []), name
+        assert "confirm" in (by_name[name].get("gated_by") or []), name
         handler = registry[name].handler
         try:
             handler(_Runtime(), dict(args))

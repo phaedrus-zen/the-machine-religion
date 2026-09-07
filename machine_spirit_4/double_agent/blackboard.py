@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS conversation_revisions (
     revision_id         INTEGER NOT NULL,
     created_at          TEXT NOT NULL,
     user_message_excerpt TEXT NOT NULL,
+    turn_id              TEXT,
     PRIMARY KEY (conversation_id, revision_id)
 );
 """
@@ -118,6 +119,14 @@ class Blackboard:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
                 conn.executescript(_SCHEMA_SQL)
+                revision_columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(conversation_revisions)")
+                }
+                if "turn_id" not in revision_columns:
+                    conn.execute(
+                        "ALTER TABLE conversation_revisions ADD COLUMN turn_id TEXT"
+                    )
                 conn.commit()
             self._initialized = True
 
@@ -404,6 +413,7 @@ class Blackboard:
         conversation_id: str,
         *,
         user_message_excerpt: str = "",
+        turn_id: str | None = None,
     ) -> ConversationRevision:
         if not safety.is_safe_conversation_id(conversation_id):
             raise SchemaError(f"unsafe conversation_id: {conversation_id!r}")
@@ -420,17 +430,19 @@ class Blackboard:
                     conversation_id=conversation_id,
                     revision_id=next_rev,
                     user_message_excerpt=user_message_excerpt,
+                    turn_id=turn_id,
                 )
                 revision.validate()
                 conn.execute(
                     "INSERT INTO conversation_revisions "
-                    "(conversation_id, revision_id, created_at, user_message_excerpt) "
-                    "VALUES (?,?,?,?)",
+                    "(conversation_id, revision_id, created_at, user_message_excerpt, turn_id) "
+                    "VALUES (?,?,?,?,?)",
                     (
                         revision.conversation_id,
                         revision.revision_id,
                         revision.created_at,
                         revision.user_message_excerpt,
+                        revision.turn_id,
                     ),
                 )
                 conn.execute("COMMIT")

@@ -35,14 +35,18 @@ been updated.
    allowlist (`MS4_HERMES_PROVENANCE_*`), or every update fails closed. The
    PyPI path currently fails closed by design (attestation verifier not yet
    shipped). No policy configured means no update — this is intentional.
-7. **Durable terminal reconcile:** on startup and every version refresh,
-   installed ≥ discovered latest is a current/newer no-op that supersedes a
-   stale failure banner without deleting audit. Installed < latest with a
-   signed newer tag stays actionable. Installed < latest with an unsigned
-   official latest is `blocked: official_tag_unsigned` as the primary
-   operator state (update disabled); any prior failed job remains audit
-   only. Unknown versions fail closed. Explicit downgrade targets are
-   refused. Do not treat a CSS hide of `last.status=failed` as the fix.
+7. **Durable terminal reconcile:** on startup, an ownerless persisted `running`
+   job is failed only after the updater lock is acquired. Startup and every
+   read-only version refresh then reconcile installed ≥ selected latest as a
+   current/newer no-op that supersedes a stale failure banner without deleting
+   audit. If the newest
+   publication is unsigned, the first-class control selects the newest earlier
+   signed stable release that is still newer than installed. With no newer
+   signed candidate, the state is `blocked: official_tag_unsigned` (or
+   `official_tag_signature_unknown`) and Update is disabled; any prior failed
+   job remains audit only. Unknown versions fail closed. Explicit downgrade
+   targets are refused. Do not treat a CSS hide of `last.status=failed` as the
+   fix.
 8. **Windows Git-Bash gate:** a current/newer or retry-current no-op is
    **zero-external**: classify from local `install_mode()` plus already-
    persisted/cached latest only (TTL-expired cache still counts). That path
@@ -273,11 +277,13 @@ The job snapshot is persisted (atomically, via temp file + `os.replace`) to:
 machine_spirit_4/runtime/hermes_update_state.json
 ```
 
-It lives under the MS4 runtime, **never** inside the Hermes checkout. On
-gateway/MCP startup, `initialize_state()` hydrates it; a snapshot still marked
-`running` (i.e. the gateway crashed mid-update) is flipped to `failed` /
-`error` with a note telling the operator to re-check the version and re-trigger
-if needed — it never claims an update is in flight forever.
+It lives under the MS4 runtime, **never** inside the Hermes checkout. On gateway
+startup, MS4 hydrates it and probes the cross-process updater lock. A snapshot
+still marked `running` is flipped to `failed` / `error` only when that lock is
+free; a job still owned by another process stays running. Version GETs remain
+read-only with respect to lock ownership. The failure tells the operator to
+re-check the version and re-trigger, so a crashed job does not survive a cold
+gateway start as a permanently disabled button.
 
 ---
 
@@ -381,9 +387,11 @@ the external MS4 restart, which remains the **F5 live-service gate**.
 
 ### Hardware / architecture gate (open)
 
-CI (`.github/workflows/ms4-hermes-admin.yml`) runs the unit + lifecycle suite
-on **real** GitHub-hosted Windows, Linux **x86_64**, and macOS **arm64**
-runners, driving the real `git` binary. That is real OS coverage, but:
+CI (`.github/workflows/ms4-hermes-admin.yml`) runs the complete
+`tests/ms4_hermes_admin` product gate from a basetemp under the runner's external
+temporary directory on **real** GitHub-hosted Windows, Linux **x86_64**, and
+macOS **arm64** runners, driving the real `git` binary. The suite aborts if that
+basetemp is inside any parent Git root. That is real OS coverage, but:
 
 - **Linux `aarch64` (Jetson/Thor/ARM64 servers)** is a **hardware execution
   gate** — it must run on a real aarch64 host (the workflow's

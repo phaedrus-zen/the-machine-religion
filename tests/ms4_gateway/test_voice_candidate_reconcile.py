@@ -8,6 +8,7 @@ biometric retention, or automatic action authority.
 from __future__ import annotations
 
 import http.client
+import hashlib
 import io
 import json
 import logging
@@ -23,10 +24,13 @@ from machine_spirit_4.gateway.voice_candidate_reconcile import (
     DEFAULT_TIMEOUT_SECS,
     FORBIDDEN_KEYS,
     MAX_STORE_ITEMS,
+    MAX_UNKNOWN_CANDIDATES,
     STORE_SCHEMA,
+    SUPPRESSED_FIELD,
     VoiceCandidateReconcileConfig,
     VoiceCandidateReconciler,
     VoiceCandidateReviewStore,
+    derive_item_id,
 )
 
 
@@ -152,6 +156,7 @@ def _make_reconciler(
     wait=None,
     thread_factory=None,
     auth_headers_fn=None,
+    now=None,
 ) -> tuple[VoiceCandidateReconciler, Path, list[dict[str, Any]], FakeTransport]:
     store_path = tmp_path / "voice_candidate_review_items.json"
     audits: list[dict[str, Any]] = []
@@ -170,7 +175,7 @@ def _make_reconciler(
         store=store,
         audit_sink=audits.append,
         wait=wait,
-        now=lambda: FIXED_NOW,
+        now=now or (lambda: FIXED_NOW),
         monotonic=lambda: 0.0,
         thread_factory=thread_factory,
         auth_headers_fn=auth_headers_fn or (lambda: {"Authorization": AUTH_HEADER}),
@@ -186,7 +191,14 @@ def _seed_store(path: Path, items: list[dict[str, Any]]) -> bytes:
     return data
 
 
-def _pending_item(candidate_id: str, *, index: int = 0) -> dict[str, Any]:
+def _pending_item(
+    candidate_id: str,
+    *,
+    index: int = 0,
+    first_seen: str = "2026-08-18T00:00:00+00:00",
+    last_seen: str = "2026-08-18T00:00:00+00:00",
+    status: str = "pending_operator_review",
+) -> dict[str, Any]:
     return {
         "item_id": f"vcr_seed_{index:03d}",
         "candidate_id": candidate_id,
@@ -195,10 +207,10 @@ def _pending_item(candidate_id: str, *, index: int = 0) -> dict[str, Any]:
         "target_id": None,
         "score": None,
         "reason": "seeded pending review",
-        "first_seen": "2026-08-18T00:00:00+00:00",
-        "last_seen": "2026-08-18T00:00:00+00:00",
+        "first_seen": first_seen,
+        "last_seen": last_seen,
         "observation_count": 1,
-        "status": "pending_operator_review",
+        "status": status,
     }
 
 
@@ -694,30 +706,211 @@ def test_successful_proposals_upsert_stable_pending_items(tmp_path: Path) -> Non
     assert_representation_clean(audits[0])
 
 
-def test_repeated_cycles_do_not_duplicate_items(tmp_path: Path) -> None:
-    def script() -> FakeTransport:
-        return FakeTransport(
+def test_identical_reconcile_is_hash_stable_through_three_hour_quiet_window(
+    tmp_path: Path,
+) -> None:
+    responses = []
+    for _ in range(4):
+        responses.extend(
             [
                 (200, _list_payload(retention_enabled=True)),
                 (200, _reconcile_payload([_proposal(score=0.91)])),
             ]
         )
+    times = iter(
+        (
+            "2026-08-18T18:04:00+00:00",
+            "2026-08-18T19:04:00+00:00",
+            "2026-08-18T20:04:00+00:00",
+            "2026-08-18T21:04:00+00:00",
+        )
+    )
+    reconciler, store_path, _, _ = _make_reconciler(
+        tmp_path,
+        transport=FakeTransport(responses),
+        now=lambda: next(times),
+    )
 
-    transport = script()
-    reconciler, store_path, _, _ = _make_reconciler(tmp_path, transport=transport)
     first = reconciler.run_once()
-    item_id = json.loads(store_path.read_text(encoding="utf-8"))["items"][0]["item_id"]
-
-    transport2 = script()
-    reconciler2, _, _, _ = _make_reconciler(tmp_path, transport=transport2)
-    second = reconciler2.run_once()
+    prior = store_path.read_bytes()
+    prior_hash = hashlib.sha256(prior).hexdigest()
+    repeats = [reconciler.run_once() for _ in range(3)]
     stored = json.loads(store_path.read_text(encoding="utf-8"))
-    assert first["outcome"] == second["outcome"] == "proposals_recorded"
+
+    assert first["outcome"] == "proposals_recorded"
+    assert [result["outcome"] for result in repeats] == ["store_unchanged"] * 3
+    assert [result["recorded_count"] for result in repeats] == [0, 0, 0]
     assert len(stored["items"]) == 1
-    assert stored["items"][0]["item_id"] == item_id
-    assert stored["items"][0]["observation_count"] == 2
-    assert stored["items"][0]["first_seen"] == FIXED_NOW
+    assert stored["items"][0]["observation_count"] == 1
+    assert stored["items"][0]["first_seen"] == "2026-08-18T18:04:00+00:00"
+    assert stored["items"][0]["last_seen"] == "2026-08-18T18:04:00+00:00"
     assert stored["items"][0]["status"] == "pending_operator_review"
+    assert store_path.read_bytes() == prior
+    assert hashlib.sha256(store_path.read_bytes()).hexdigest() == prior_hash
+
+
+def test_duplicate_candidate_in_one_response_is_recorded_once(tmp_path: Path) -> None:
+    transport = FakeTransport(
+        [
+            (200, _list_payload(retention_enabled=True)),
+            (200, _reconcile_payload([_proposal(), _proposal()])),
+        ]
+    )
+    reconciler, store_path, _, _ = _make_reconciler(tmp_path, transport=transport)
+
+    result = reconciler.run_once()
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert result["outcome"] == "proposals_recorded"
+    assert result["recorded_count"] == 1
+    assert len(stored["items"]) == 1
+    assert stored["items"][0]["observation_count"] == 1
+
+
+def test_expired_unknown_is_pruned_during_no_proposal_cycle(tmp_path: Path) -> None:
+    store_path = tmp_path / "voice_candidate_review_items.json"
+    _seed_store(
+        store_path,
+        [
+            _pending_item(
+                "cand-expired",
+                first_seen="2026-07-01T00:00:00+00:00",
+                last_seen="2026-07-01T00:00:00+00:00",
+            ),
+            _pending_item(
+                "cand-current",
+                first_seen="2026-08-17T00:00:00+00:00",
+                last_seen="2026-08-17T00:00:00+00:00",
+            ),
+            _pending_item(
+                "cand-invalid-time",
+                first_seen="0001-01-01T00:00:00+14:00",
+                last_seen="0001-01-01T00:00:00+14:00",
+            ),
+            _pending_item(
+                "cand-future-time",
+                first_seen="9999-01-01T00:00:00+00:00",
+                last_seen="9999-01-01T00:00:00+00:00",
+            ),
+        ],
+    )
+    transport = FakeTransport(
+        [
+            (200, _list_payload(retention_enabled=True)),
+            (200, _reconcile_payload([])),
+        ]
+    )
+    reconciler, _, _, _ = _make_reconciler(tmp_path, transport=transport)
+
+    result = reconciler.run_once()
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert result["outcome"] == "retention_pruned"
+    assert result["pruned_count"] == 3
+    assert [item["candidate_id"] for item in stored["items"]] == ["cand-current"]
+    assert set(stored[SUPPRESSED_FIELD]) == {
+        derive_item_id("cand-expired"),
+        derive_item_id("cand-invalid-time"),
+        derive_item_id("cand-future-time"),
+    }
+
+
+def test_expired_replay_is_suppressed_and_hash_stable(tmp_path: Path) -> None:
+    store_path = tmp_path / "voice_candidate_review_items.json"
+    _seed_store(
+        store_path,
+        [
+            _pending_item(
+                "cand-expired",
+                first_seen="2026-07-01T00:00:00+00:00",
+                last_seen="2026-07-01T00:00:00+00:00",
+            )
+        ],
+    )
+    responses = []
+    for _ in range(3):
+        responses.extend(
+            [
+                (200, _list_payload(retention_enabled=True)),
+                (200, _reconcile_payload([_proposal(candidate_id="cand-expired")])),
+            ]
+        )
+    reconciler, _, _, _ = _make_reconciler(
+        tmp_path,
+        transport=FakeTransport(responses),
+    )
+
+    first = reconciler.run_once()
+    prior = store_path.read_bytes()
+    repeats = [reconciler.run_once(), reconciler.run_once()]
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert first["outcome"] == "retention_pruned"
+    assert first["pruned_count"] == 1
+    assert [result["outcome"] for result in repeats] == ["store_unchanged"] * 2
+    assert stored["items"] == []
+    assert stored[SUPPRESSED_FIELD] == [derive_item_id("cand-expired")]
+    assert store_path.read_bytes() == prior
+
+
+def test_over_bound_batches_converge_then_replay_without_growth_or_hash_churn(
+    tmp_path: Path,
+) -> None:
+    batches = [
+        [_proposal(candidate_id=f"cand-batch-{index:03d}") for index in range(start, start + 64)]
+        for start in (0, 64, 128)
+    ]
+    responses = []
+    for batch in [*batches, *batches]:
+        responses.extend(
+            [
+                (200, _list_payload(retention_enabled=True)),
+                (200, _reconcile_payload(batch)),
+            ]
+        )
+    times = iter(
+        f"2026-08-18T{hour:02d}:04:00+00:00"
+        for hour in range(12, 18)
+    )
+    reconciler, store_path, _, _ = _make_reconciler(
+        tmp_path,
+        transport=FakeTransport(responses),
+        now=lambda: next(times),
+    )
+
+    growth = [reconciler.run_once() for _ in range(3)]
+    bounded = store_path.read_bytes()
+    bounded_hash = hashlib.sha256(bounded).hexdigest()
+    replay = [reconciler.run_once() for _ in range(3)]
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert [result["outcome"] for result in growth] == ["proposals_recorded"] * 3
+    assert len(stored["items"]) == MAX_UNKNOWN_CANDIDATES
+    assert len(stored[SUPPRESSED_FIELD]) == 64
+    assert [result["outcome"] for result in replay] == ["store_unchanged"] * 3
+    assert [result["recorded_count"] for result in replay] == [0, 0, 0]
+    assert store_path.read_bytes() == bounded
+    assert hashlib.sha256(store_path.read_bytes()).hexdigest() == bounded_hash
+
+
+def test_legacy_extras_are_sanitized_once_before_quiet_noop(tmp_path: Path) -> None:
+    store_path = tmp_path / "voice_candidate_review_items.json"
+    item = _pending_item("cand-legacy")
+    item["audio_base64"] = "synthetic-do-not-retain"
+    item["legacy_extra"] = "drop-me"
+    _seed_store(store_path, [item])
+    store = VoiceCandidateReviewStore(store_path)
+
+    first = store.upsert_projected([], now=FIXED_NOW)
+    canonical = store_path.read_bytes()
+    second = store.upsert_projected([], now=FIXED_NOW)
+
+    assert first["outcome"] == "store_reconciled"
+    assert second["outcome"] == "store_unchanged"
+    assert b"audio_base64" not in canonical
+    assert b"synthetic-do-not-retain" not in canonical
+    assert b"legacy_extra" not in canonical
+    assert store_path.read_bytes() == canonical
 
 
 def test_malformed_or_applied_true_does_not_mutate_store(tmp_path: Path) -> None:
@@ -843,24 +1036,110 @@ def test_forced_atomic_replace_failure_preserves_prior_file(tmp_path: Path) -> N
     assert_representation_clean(audits[0])
 
 
-def test_full_store_preserves_pending_items_and_reports_capacity(tmp_path: Path) -> None:
-    items = [_pending_item(f"cand-full-{index:03d}", index=index) for index in range(MAX_STORE_ITEMS)]
+def test_retention_prunes_oldest_unknown_first_and_preserves_promoted(tmp_path: Path) -> None:
+    unknown_limit = MAX_UNKNOWN_CANDIDATES
+    items = [
+        _pending_item(
+            "cand-old-a",
+            index=0,
+            first_seen="2026-08-16T00:00:00+00:00",
+            last_seen="2026-08-16T00:00:00+00:00",
+        ),
+        _pending_item(
+            "cand-old-b",
+            index=1,
+            first_seen="2026-08-16T00:00:00+00:00",
+            last_seen="2026-08-16T00:00:00+00:00",
+        ),
+    ]
+    items.extend(
+        _pending_item(
+            f"cand-recent-{index:03d}",
+            index=index + 2,
+            first_seen="2026-08-17T00:00:00+00:00",
+            last_seen="2026-08-17T00:00:00+00:00",
+        )
+        for index in range(unknown_limit - 1)
+    )
+    items.append(
+        _pending_item(
+            "cand-promoted",
+            index=unknown_limit + 1,
+            first_seen="2026-07-01T00:00:00+00:00",
+            last_seen="2026-07-01T00:00:00+00:00",
+            status="promoted",
+        )
+    )
     store_path = tmp_path / "voice_candidate_review_items.json"
-    prior = _seed_store(store_path, items)
+    _seed_store(store_path, items)
+    store = VoiceCandidateReviewStore(store_path)
+
+    result = store.upsert_projected([], now=FIXED_NOW)
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    by_id = {item["candidate_id"]: item for item in stored["items"]}
+    assert result["outcome"] == "retention_pruned"
+    assert result["pruned_count"] == 1
+    assert len(stored["items"]) == unknown_limit + 1
+    assert "cand-old-a" not in by_id
+    assert "cand-old-b" in by_id
+    assert by_id["cand-promoted"]["status"] == "promoted"
+    assert stored[SUPPRESSED_FIELD] == [derive_item_id("cand-old-a")]
+
+
+def test_promoted_capacity_reports_rejected_pending_without_pruning_promoted(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "voice_candidate_review_items.json"
+    _seed_store(
+        store_path,
+        [
+            _pending_item(f"cand-promoted-{index:03d}", index=index, status="promoted")
+            for index in range(MAX_STORE_ITEMS)
+        ],
+    )
     transport = FakeTransport(
         [
             (200, _list_payload(retention_enabled=True)),
             (200, _reconcile_payload([_proposal()])),
         ]
     )
-    reconciler, _, audits, _ = _make_reconciler(tmp_path, transport=transport)
+    reconciler, _, _, _ = _make_reconciler(tmp_path, transport=transport)
+
     result = reconciler.run_once()
-    assert result["outcome"] == "store_capacity"
-    assert store_path.read_bytes() == prior
     stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert result["outcome"] == "store_capacity"
+    assert result["recorded_count"] == 0
+    assert result["pruned_count"] == 1
     assert len(stored["items"]) == MAX_STORE_ITEMS
-    assert all(item["status"] == "pending_operator_review" for item in stored["items"])
-    assert audits[0]["outcome"] == "store_capacity"
+    assert all(item["status"] == "promoted" for item in stored["items"])
+    assert stored[SUPPRESSED_FIELD] == [derive_item_id(SYNTHETIC_CANDIDATE_ID)]
+
+
+def test_reconciler_admission_drain_uses_same_store_without_network_or_job_calls(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "voice_candidate_review_items.json"
+    _seed_store(store_path, [_pending_item("cand-admitted")])
+    reconciler, _, _, transport = _make_reconciler(tmp_path)
+
+    result = reconciler.drain_promoted_candidates(["cand-admitted"])
+    stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+    assert result == {
+        "ok": True,
+        "outcome": "promotions_recorded",
+        "promoted_count": 1,
+    }
+    assert stored["items"][0]["candidate_id"] == "cand-admitted"
+    assert stored["items"][0]["status"] == "promoted"
+    assert transport.calls == []
+    prior = store_path.read_bytes()
+    store = VoiceCandidateReviewStore(store_path)
+    repeat = store.upsert_projected([_pending_item("cand-admitted")], now=FIXED_NOW)
+    assert repeat["outcome"] == "store_unchanged"
+    assert store_path.read_bytes() == prior
 
 
 def test_captured_urls_prove_only_reconcile_post_and_no_consequence_routes(tmp_path: Path) -> None:
@@ -937,6 +1216,7 @@ def test_gateway_lifecycle_starts_and_finally_stops_without_sockets(monkeypatch:
 
     order: list[str] = []
     heartbeat_calls: list[str] = []
+    servers: list[Any] = []
 
     class SpyReconciler:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -952,6 +1232,7 @@ def test_gateway_lifecycle_starts_and_finally_stops_without_sockets(monkeypatch:
     class FakeServer:
         def __init__(self, _address: Any, _handler: Any) -> None:
             order.append("server")
+            servers.append(self)
 
         def serve_forever(self) -> None:
             order.append("serve")
@@ -993,3 +1274,6 @@ def test_gateway_lifecycle_starts_and_finally_stops_without_sockets(monkeypatch:
 
     assert heartbeat_calls == ["http://127.0.0.1:9080"]
     assert order == ["server", "construct", "start", "serve", "stop", "close"]
+    assert servers[0].voice_candidate_reconciler.kwargs == {
+        "hivemind_url": "http://127.0.0.1:6089"
+    }

@@ -19,14 +19,20 @@ on:
   push:
     paths:
       - "machine_spirit_4/hermes_admin/**"
+      - "machine_spirit_4/gateway/server.py"
+      - "machine_spirit_4/web/index.html"
       - "machine_spirit_4/scripts/runtime_common.py"
       - "tests/ms4_hermes_admin/**"
+      - "tests/ms4_gateway/*hermes*"
       - ".github/workflows/ms4-hermes-admin.yml"
   pull_request:
     paths:
       - "machine_spirit_4/hermes_admin/**"
+      - "machine_spirit_4/gateway/server.py"
+      - "machine_spirit_4/web/index.html"
       - "machine_spirit_4/scripts/runtime_common.py"
       - "tests/ms4_hermes_admin/**"
+      - "tests/ms4_gateway/*hermes*"
       - ".github/workflows/ms4-hermes-admin.yml"
   workflow_dispatch:
     inputs:
@@ -165,6 +171,9 @@ jobs:
           machine_spirit_4/hermes_admin
           machine_spirit_4/scripts/runtime_common.py
           tests/ms4_hermes_admin
+          tests/ms4_gateway/test_hermes_operator_banner.py
+          tests/ms4_gateway/test_hermes_update_button_dom.py
+          tests/ms4_gateway/test_hermes_update_endpoint.py
 
       - name: Byte-compile owned module and tests
         run: >-
@@ -172,24 +181,29 @@ jobs:
           machine_spirit_4/hermes_admin
           machine_spirit_4/scripts/runtime_common.py
           tests/ms4_hermes_admin
+          tests/ms4_gateway/test_hermes_operator_banner.py
+          tests/ms4_gateway/test_hermes_update_button_dom.py
+          tests/ms4_gateway/test_hermes_update_endpoint.py
 
-      - name: Provenance, installer, state, versioning, and workflow tests
+      - name: Full isolated Hermes updater product gate
         env:
           GIT_TERMINAL_PROMPT: "0"
           GCM_INTERACTIVE: "Never"
-        # The unaccepted test_git_bash_preflight_candidate_r3.py experiment is
-        # intentionally not an acceptance test. Promote it explicitly after
-        # its trigger-path contract and product implementation agree.
         run: >-
           python -m pytest
-          tests/ms4_hermes_admin/test_installer.py
-          tests/ms4_hermes_admin/test_installer_r1.py
-          tests/ms4_hermes_admin/test_isolation_regression_r2.py
-          tests/ms4_hermes_admin/test_provenance_r1.py
-          tests/ms4_hermes_admin/test_state.py
-          tests/ms4_hermes_admin/test_versioning.py
-          tests/ms4_hermes_admin/test_versioning_r1.py
-          tests/ms4_hermes_admin/test_workflow_contract.py
+          tests/ms4_hermes_admin
+          --basetemp "${{ runner.temp }}/ms4-hermes-admin"
+          -p no:cacheprovider
+          --strict-config
+          --strict-markers
+          -ra
+
+      - name: Hermes button and gateway route gate
+        run: >-
+          python -m pytest
+          tests/ms4_gateway
+          -k hermes
+          --basetemp "${{ runner.temp }}/ms4-hermes-gateway"
           -p no:cacheprovider
           --strict-config
           --strict-markers
@@ -237,20 +251,25 @@ jobs:
           "ruff==0.15.10"
           "PyYAML==6.0.3"
 
-      - name: Provenance, installer, state, versioning, and workflow tests
+      - name: Full isolated Hermes updater product gate
         env:
           GIT_TERMINAL_PROMPT: "0"
           GCM_INTERACTIVE: "Never"
         run: >-
           python -m pytest
-          tests/ms4_hermes_admin/test_installer.py
-          tests/ms4_hermes_admin/test_installer_r1.py
-          tests/ms4_hermes_admin/test_isolation_regression_r2.py
-          tests/ms4_hermes_admin/test_provenance_r1.py
-          tests/ms4_hermes_admin/test_state.py
-          tests/ms4_hermes_admin/test_versioning.py
-          tests/ms4_hermes_admin/test_versioning_r1.py
-          tests/ms4_hermes_admin/test_workflow_contract.py
+          tests/ms4_hermes_admin
+          --basetemp "${{ runner.temp }}/ms4-hermes-admin"
+          -p no:cacheprovider
+          --strict-config
+          --strict-markers
+          -ra
+
+      - name: Hermes button and gateway route gate
+        run: >-
+          python -m pytest
+          tests/ms4_gateway
+          -k hermes
+          --basetemp "${{ runner.temp }}/ms4-hermes-gateway"
           -p no:cacheprovider
           --strict-config
           --strict-markers

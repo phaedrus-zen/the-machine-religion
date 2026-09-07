@@ -671,7 +671,7 @@
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <button id="hermesUpdatePinBtn" class="secondary" type="button" title="Pin a specific Hermes version">Pin version…</button>
-      <button id="hermesUpdateBtn" type="button">Update Hermes</button>
+      <button id="hermesUpdateBtn" type="button" disabled>Update Hermes</button>
     </div>
   </div>
 
@@ -4506,6 +4506,16 @@ function renderVoiceTurnRow(turn) {
     m.textContent = `face=${data.foreground_model.model_id}`;
     header.appendChild(m);
   }
+  if (data.turn_id) {
+    const id = document.createElement('span'); id.className = 'pill';
+    id.textContent = `turn=${data.turn_id}`;
+    header.appendChild(id);
+  }
+  if (data.revision_id != null) {
+    const revision = document.createElement('span'); revision.className = 'pill';
+    revision.textContent = `revision=${data.revision_id}`;
+    header.appendChild(revision);
+  }
   if (data.total_ms != null) {
     const t = document.createElement('span'); t.className = 'pill';
     t.style.color = data.total_ms > 10000 ? '#eab308' : '#9999b4';
@@ -6011,6 +6021,7 @@ const hermesPinConfirm = document.getElementById('hermesPinConfirm');
 let hermesPollHandle = null;
 let hermesPinReleasesLoaded = false;
 let hermesLastInfo = null;
+let hermesStartError = null;
 
 function renderHermesVersion(info) {
   hermesVersionLine.innerHTML = '';
@@ -6022,6 +6033,12 @@ function renderHermesVersion(info) {
     arrow.className = 'pill warn';
     arrow.textContent = `→ ${info.latest}`;
     hermesVersionLine.appendChild(arrow);
+    if (hermesPolicyAllowsUnsigned(info) && info.latest_signature_state !== 'signed') {
+      const unsignedPill = document.createElement('span');
+      unsignedPill.className = 'pill warn';
+      unsignedPill.textContent = 'unsigned (policy allows)';
+      hermesVersionLine.appendChild(unsignedPill);
+    }
   } else if (info.installed_relation === 'newer' && info.latest) {
     const newer = document.createElement('span');
     newer.className = 'pill ok';
@@ -6058,15 +6075,59 @@ function ageLabel(iso) {
   return months === 1 ? '1 month ago' : `${months} months ago`;
 }
 
+// Release signature policy (HERMES_RELEASE_SIGNATURE_POLICY on the gateway):
+// 'allow_unsigned' (default) offers the newest published release even when
+// its tag is unsigned; 'require_signed' keeps the F4 signed-only gate.
+function hermesPolicyAllowsUnsigned(info) {
+  return Boolean(info) && info.release_signature_policy === 'allow_unsigned';
+}
+
+function hermesRetryLabel(info) {
+  return hermesPolicyAllowsUnsigned(info) ? 'Retry update' : 'Retry signed update';
+}
+
+function hermesUnsignedOfferCopy(info) {
+  const tag = info.latest_tag || (info.latest ? `v${info.latest}` : 'latest');
+  return `newest release ${tag} is unsigned; policy allows (HERMES_RELEASE_SIGNATURE_POLICY=allow_unsigned)`;
+}
+
 function renderHermesBanner(info) {
   const last = info.last_update;
   if (info.update_in_progress) {
+    hermesStartError = null;
     hermesBanner.classList.remove('success', 'error');
     hermesBanner.classList.add('visible');
     const phase = last?.phase || 'queued';
     hermesHeadline.innerHTML = `<span class="spinner"></span>Updating Hermes to ${last?.to_version || info.latest || 'latest'}…`;
     hermesSubline.textContent = `Phase: ${phase}`;
     hermesUpdateBtn.disabled = true;
+    hermesPinBtn.disabled = true;
+    return;
+  }
+  if (hermesStartError && info.update_available) {
+    hermesBanner.classList.add('visible', 'error');
+    hermesBanner.classList.remove('success');
+    hermesHeadline.textContent = 'Hermes update could not be started';
+    hermesSubline.textContent = hermesStartError;
+    hermesUpdateBtn.disabled = false;
+    hermesUpdateBtn.textContent = hermesRetryLabel(info);
+    hermesPinBtn.disabled = false;
+    return;
+  }
+  if (!info.update_available) hermesStartError = null;
+  const completedVersionChange = last
+    && last.status === 'success'
+    && last.from_version
+    && last.to_version
+    && last.from_version !== last.to_version
+    && last.to_version === info.current;
+  if (completedVersionChange && !info.update_available && Date.now() - new Date(last.finished_at).getTime() < 5 * 60_000) {
+    hermesBanner.classList.add('visible', 'success');
+    hermesBanner.classList.remove('error');
+    hermesHeadline.textContent = `Hermes updated to ${last.to_version || info.current}`;
+    hermesSubline.textContent = `Finished ${ageLabel(last.finished_at)}`;
+    hermesUpdateBtn.disabled = true;
+    hermesUpdateBtn.textContent = 'Update Hermes';
     hermesPinBtn.disabled = true;
     return;
   }
@@ -6112,26 +6173,25 @@ function renderHermesBanner(info) {
     const parts = [];
     if (last.to_version) parts.push(`Failed target: ${last.to_version}`);
     if (last.error) parts.push(last.error);
+    const allowsUnsigned = hermesPolicyAllowsUnsigned(info);
     if (info.latest_signature_state === 'unsigned' && info.latest) {
-      parts.push(`Latest published ${info.latest} is unsigned`);
+      parts.push(allowsUnsigned
+        ? `Latest published ${info.latest} is unsigned (policy allows)`
+        : `Latest published ${info.latest} is unsigned`);
     }
-    if (info.current) parts.push(`Installed signed ${info.current} remains current`);
+    if (info.current) {
+      parts.push(allowsUnsigned
+        ? `Installed ${info.current} remains current`
+        : `Installed signed ${info.current} remains current`);
+    }
     if (last.finished_at) parts.push(ageLabel(last.finished_at));
     hermesSubline.textContent = parts.filter(Boolean).join(' · ');
-    const canRetrySigned = Boolean(info.update_available && info.latest);
-    hermesUpdateBtn.disabled = !canRetrySigned;
-    hermesUpdateBtn.textContent = canRetrySigned ? 'Retry signed update' : 'No signed update';
+    const canRetry = Boolean(info.update_available && info.latest);
+    hermesUpdateBtn.disabled = !canRetry;
+    hermesUpdateBtn.textContent = canRetry
+      ? hermesRetryLabel(info)
+      : allowsUnsigned ? 'Update unavailable' : 'No signed update';
     hermesPinBtn.disabled = false;
-    return;
-  }
-  if (last && last.status === 'success' && !info.update_available && Date.now() - new Date(last.finished_at).getTime() < 5 * 60_000) {
-    hermesBanner.classList.add('visible', 'success');
-    hermesBanner.classList.remove('error');
-    hermesHeadline.textContent = `Hermes updated to ${last.to_version || info.current}`;
-    hermesSubline.textContent = `Finished ${ageLabel(last.finished_at)}`;
-    hermesUpdateBtn.disabled = true;
-    hermesUpdateBtn.textContent = 'Update Hermes';
-    hermesPinBtn.disabled = true;
     return;
   }
   if (info.update_available && info.latest) {
@@ -6139,14 +6199,21 @@ function renderHermesBanner(info) {
     hermesBanner.classList.remove('success', 'error');
     hermesHeadline.textContent = `Hermes update available: ${info.current || '?'} → ${info.latest}`;
     const age = ageLabel(info.latest_published_at);
-    hermesSubline.textContent = age ? `Latest signed release ${age}` : 'Official signed tag';
+    if (hermesPolicyAllowsUnsigned(info) && info.latest_signature_state !== 'signed') {
+      hermesSubline.textContent = hermesUnsignedOfferCopy(info);
+    } else {
+      hermesSubline.textContent = info.selected_signed_fallback
+        ? `Newest published ${info.published_latest} is not signed; offering latest signed ${info.latest}`
+        : age ? `Latest signed release ${age}` : 'Official signed tag';
+    }
     hermesUpdateBtn.disabled = false;
     hermesUpdateBtn.textContent = 'Update Hermes';
     hermesPinBtn.disabled = false;
     return;
   }
   hermesBanner.classList.remove('visible', 'success', 'error');
-  hermesUpdateBtn.disabled = false;
+  hermesUpdateBtn.disabled = true;
+  hermesUpdateBtn.textContent = 'Update unavailable';
   hermesPinBtn.disabled = false;
 }
 
@@ -6173,10 +6240,17 @@ async function loadHermesReleases(force) {
   try {
     const r = await fetch('/api/v1/hermes/releases');
     const data = await r.json();
+    const allowsUnsigned = hermesPolicyAllowsUnsigned(hermesLastInfo);
     const latestSigned = (data.releases || []).find((release) => release.signature_state === 'signed');
+    const latestStable = (data.releases || []).find((release) => !release.prerelease);
     hermesPinSelect.innerHTML = '';
     const latestOption = document.createElement('option');
-    if (latestSigned) {
+    if (allowsUnsigned && latestStable) {
+      latestOption.value = latestStable.version;
+      latestOption.textContent = latestStable.signature_state === 'signed'
+        ? `latest signed (${latestStable.version})`
+        : `latest (${latestStable.version}, unsigned - policy allows)`;
+    } else if (latestSigned) {
       latestOption.value = latestSigned.version;
       latestOption.textContent = `latest signed (${latestSigned.version})`;
     } else {
@@ -6188,11 +6262,13 @@ async function loadHermesReleases(force) {
     for (const release of data.releases || []) {
       const option = document.createElement('option');
       const unsigned = release.signature_state === 'unsigned';
-      option.value = unsigned ? '' : release.version;
-      option.disabled = unsigned || release.signature_state === 'unknown';
+      const offerable = allowsUnsigned || release.signature_state === 'signed';
+      option.value = offerable ? release.version : '';
+      option.disabled = !offerable;
       const label = release.prerelease ? `${release.version} (pre-release)` : release.version;
-      if (unsigned) option.textContent = `${label} (unsigned - not offered)`;
-      else if (release.signature_state === 'signed') option.textContent = `${label} (signed)`;
+      if (release.signature_state === 'signed') option.textContent = `${label} (signed)`;
+      else if (allowsUnsigned) option.textContent = `${label} (${unsigned ? 'unsigned' : 'signature unknown'} - policy allows)`;
+      else if (unsigned) option.textContent = `${label} (unsigned - not offered)`;
       else option.textContent = `${label} (signature unknown)`;
       hermesPinSelect.appendChild(option);
     }
@@ -6213,14 +6289,19 @@ async function triggerHermesUpdate(targetVersion) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `update failed: ${r.statusText}`);
+    hermesStartError = null;
+    hermesBanner.classList.remove('success', 'error');
+    hermesBanner.classList.add('visible');
+    hermesHeadline.innerHTML = `<span class="spinner"></span>Updating Hermes to ${data.to_version || targetVersion || 'latest'}…`;
+    hermesSubline.textContent = `Phase: ${data.phase || 'queued'}`;
+    await refreshHermesVersion();
   } catch (error) {
+    hermesStartError = String(error.message || error);
     hermesBanner.classList.add('visible', 'error');
     hermesHeadline.textContent = 'Hermes update could not be started';
-    hermesSubline.textContent = String(error.message || error);
+    hermesSubline.textContent = hermesStartError;
     hermesUpdateBtn.disabled = false;
     hermesPinBtn.disabled = false;
-  } finally {
-    refreshHermesVersion();
   }
 }
 
@@ -7639,6 +7720,32 @@ function voiceTurnElapsedMs(turnState) {
   return Math.max(0, Math.round(performance.now() - turnState.startedAtPerf));
 }
 
+function bindVoiceServerTurnId(turnState, value) {
+  if (!turnState || value == null || String(value).trim() === '') return true;
+  const candidate = String(value);
+  const bound = turnState.telemetry.serverTurnId;
+  if (bound == null) {
+    turnState.telemetry.serverTurnId = candidate;
+    return true;
+  }
+  return String(bound) === candidate;
+}
+
+function failVoiceTurnIdentityMismatch(turnState, receivedTurnId) {
+  const expected = turnState?.telemetry?.serverTurnId || 'unbound';
+  const received = String(receivedTurnId || 'missing');
+  const detail = `Voice stream identity changed from ${expected} to ${received}; playback was canceled.`;
+  turnState.terminalKind = 'error_fail_closed';
+  turnState.failClosedOutputDetail = detail;
+  // Identity is the ownership boundary for every decoded/scheduled chunk. A
+  // mismatch invalidates the whole stream, including audio already admitted.
+  bargeIn('voice turn identity mismatch', {playAck: false});
+  setVoiceStatus('Voice output blocked: stream identity changed.', 'error', detail);
+  setOracleStageState('blocked', 'Voice output blocked.', detail);
+  recordVoiceTurnAcceptance(turnState);
+  return new Error(detail);
+}
+
 function refreshVoiceTimingMetricsDisplay(turnState) {
   const metrics = turnState && turnState.serverMetrics;
   const pill = turnState && turnState.voicePill;
@@ -7714,6 +7821,7 @@ function voiceTurnAcceptanceSnapshot(turnState) {
     completed: turnState.completed === true,
     aborted: turnState.aborted === true,
     terminalKind: turnState.terminalKind || null,
+    serverRevisionId: turnState.serverRevisionId ?? null,
     controllerPresent: Boolean(turnState.controller),
     controllerAborted: Boolean(turnState.controller && turnState.controller.signal.aborted),
     readerPresent: Boolean(turnState.reader),
@@ -9591,6 +9699,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
     completed: false,
     aborted: false,
     terminalKind: null,
+    serverRevisionId: null,
     ttsEngine: null,
     restTtsCapacity: null,
     restTtsCapacityProvenance: null,
@@ -9773,6 +9882,9 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
         let payload = {};
         try { payload = dataText ? JSON.parse(dataText) : {}; }
         catch (e) { continue; }
+        if (!bindVoiceServerTurnId(turnState, payload.turn_id)) {
+          throw failVoiceTurnIdentityMismatch(turnState, payload.turn_id);
+        }
         if (eventName === 'status' || eventName === 'transcript' || eventName === 'text_delta') {
           turnState.telemetry.nonAudioPayloadFrames += 1;
         }
@@ -9929,9 +10041,6 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           // cap and stays consistent with chunkArrivalsMs (F1); pushing it here ran
           // ahead of admission and grew unbounded. Producer ids ORIGINATE server-side;
           // the browser relays payload.chunk_id into enqueueAudioChunk (never mints).
-          if (payload.turn_id != null && turnState.telemetry.serverTurnId == null) {
-            turnState.telemetry.serverTurnId = String(payload.turn_id);
-          }
           if (turnState.telemetry.firstSseReceivedMs == null) {
             turnState.telemetry.firstSseReceivedMs = voiceTurnElapsedMs(turnState);
             const receiptMs = turnState.telemetry.firstSseReceivedMs;
@@ -9961,9 +10070,9 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           );
           // OWNERSHIP + RETURN CONTRACT: enqueueAudioChunk() awaits
           // decodeAudioData(), so a barge-in can advance currentVoiceTurnId (and
-          // cancel this reader) WHILE the decode is in flight. It returns `false`
-          // ONLY for a genuine decode failure (the catch). A stale/cancelled turn
-          // is caught by the ownership break BELOW (which fires first), and every
+          // cancel this reader) WHILE the decode is in flight. A stale/cancelled
+          // turn also returns `false`, so the ownership break BELOW must run before
+          // `!decoded` can be interpreted as a genuine decode failure. Every other
           // INTENTIONAL drop (post-terminal late media, duplicate index,
           // out-of-order hold) returns `true` — so `!decoded` means a real decode
           // failure, never an intentional drop or a stale turn overwriting the
@@ -9984,6 +10093,7 @@ async function submitWavBlobAsVoiceTurn(wavBlob, options) {
           }
         } else if (eventName === 'done') {
           turnState.completed = true;
+          turnState.serverRevisionId = payload.revision_id ?? null;
           turnState.serverMetrics = payload.metrics || {};
           if (payload.metrics) {
             payload.metrics.client_first_acknowledgement_ms = firstAudioAt;

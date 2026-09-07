@@ -7,6 +7,7 @@ import pytest
 from machine_spirit_4.double_agent import (
     Blackboard,
     JobEnvelope,
+    JobResult,
     JobRunner,
     build_face_lobe_context_block,
     face_lobe_turn_start,
@@ -19,7 +20,7 @@ def board(tmp_path):
     return Blackboard(tmp_path / "double_agent.sqlite3")
 
 
-def _envelope(conv="conv-1", revision=1) -> JobEnvelope:
+def _envelope(conv="conv-1", revision=1, turn_id=None) -> JobEnvelope:
     env = JobEnvelope(
         job_id=safety.new_job_id(),
         parent_conversation_id=conv,
@@ -27,6 +28,7 @@ def _envelope(conv="conv-1", revision=1) -> JobEnvelope:
         background_lobe_type="deep_chat",
         user_visible_goal="Diagnose the issue.",
         internal_goal="Diagnose the issue.",
+        turn_id=turn_id,
     )
     env.validate()
     return env
@@ -43,8 +45,10 @@ def test_face_lobe_turn_start_bumps_revision_and_stales_old_jobs(board, monkeypa
             conversation_id="conv-1",
             user_message="hello first turn",
             runner=runner,
+            turn_id="ms4-turn-0123456789abcdef",
         )
         assert outcome["revision"]["revision_id"] == 1
+        assert outcome["revision"]["turn_id"] == "ms4-turn-0123456789abcdef"
         assert outcome["marked_stale"] == []
         # Second turn bumps to 2 and stales the running job.
         board.update_job_state(env.job_id, state="running")
@@ -152,6 +156,42 @@ def test_context_block_surfaces_completed_job_result_text(board):
     assert "verified completed Depth Lobe jobs" in block
     assert "Today is Thursday, May 21, 2026" in block, \
         "completed job result text must be quoted in the context block so the Face Lobe can use it"
+
+
+def test_context_block_rejects_result_from_foreign_voice_turn(board):
+    owner_turn_id = "ms4-turn-aaaaaaaaaaaaaaaa"
+    env = _envelope(
+        conv="conv-foreign-turn",
+        revision=1,
+        turn_id=owner_turn_id,
+    )
+    board.insert_job(env)
+    board.update_job_state(
+        env.job_id,
+        state="completed",
+        last_safe_user_status="Depth result identity could not be verified.",
+    )
+    board.insert_result(
+        JobResult(
+            job_id=env.job_id,
+            status="success",
+            summary="FOREIGN_TURN_SUMMARY",
+            text="FOREIGN_TURN_PRIVATE_RESULT",
+            confidence="high",
+            conversation_revision_id=1,
+            turn_id="ms4-turn-bbbbbbbbbbbbbbbb",
+        )
+    )
+
+    block = build_face_lobe_context_block(
+        conversation_id="conv-foreign-turn",
+        blackboard=board,
+    )
+
+    assert block is not None
+    assert "FOREIGN_TURN_PRIVATE_RESULT" not in block
+    assert "FOREIGN_TURN_SUMMARY" not in block
+    assert "Depth result identity could not be verified." in block
 
 
 def test_failed_job_without_result_is_not_rendered_as_completed_result(board):

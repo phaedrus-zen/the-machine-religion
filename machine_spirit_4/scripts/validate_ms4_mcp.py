@@ -154,7 +154,11 @@ def main() -> int:
 
     terminal_echo = tool_call(
         "ms4.hermes.tool.call@v1",
-        {"tool": "terminal", "args": {"command": "echo MS4_HERMES_OK", "timeout": 30, "workdir": "/"}},
+        {
+            "tool": "terminal",
+            "args": {"command": "echo MS4_HERMES_OK", "timeout": 30, "workdir": "/"},
+            "confirm": True,
+        },
         request_id=14,
     )
     terminal_payload = tool_payload(terminal_echo)

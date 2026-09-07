@@ -137,7 +137,7 @@ def test_trigger_update_preflight_precedes_validation_release_lookup_and_job_sta
 
     Local ``install_mode()`` is a metadata read and may run first so a
     current/newer no-op can skip Git-Bash. After a passing preflight the next
-    mutating effect is ``latest_version``.
+    effect is either explicit-target job acceptance or release discovery.
     """
     monkeypatch.setattr(installer.sys, "platform", platform_name)
     monkeypatch.setenv("HERMES_GIT_BASH_PATH", WRONG_EXISTING_GIT_BASH)
@@ -223,7 +223,9 @@ def test_trigger_update_preflight_precedes_validation_release_lookup_and_job_sta
         _block_external_effect(reached, "recent_releases"),
     )
     monkeypatch.setattr(
-        installer.state, "start_job", _block_external_effect(reached, "start_job")
+        installer.state,
+        "start_job",
+        _block_external_effect(reached, "start_job", as_upgrade_error=True),
     )
     monkeypatch.setattr(
         installer, "_git_fetch_resolve", _block_external_effect(reached, "fetch")
@@ -267,8 +269,12 @@ def test_trigger_update_preflight_precedes_validation_release_lookup_and_job_sta
 
         message = str(exc_info.value)
         if preflight_passes:
-            assert message == "blocked next operation: latest_version"
-            assert reached == ["install_mode", "latest_version"]
+            if update_path == "trigger":
+                assert message == "blocked next operation: start_job"
+                assert reached == ["install_mode", "start_job"]
+            else:
+                assert message == "blocked next operation: latest_version"
+                assert reached == ["install_mode", "latest_version"]
         else:
             assert "HERMES_GIT_BASH_PATH" in message
             assert error_fragment in message

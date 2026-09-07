@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from machine_spirit_4.double_agent import choose_foreground_model
+
 from . import hivemind_tools as tools
 from . import hivemind_state
 from .hivemind_tools import HivemindToolError
@@ -392,6 +394,52 @@ def readiness(hivemind_url: str, *, timeout: int = 5) -> dict[str, Any]:
     else:
         checks.append({"name": "chat_plane", "state": "pass", "detail": chat_plane["detail"]})
 
+    model_admission_failed = False
+    model_admission: dict[str, Any]
+    try:
+        model_choice = choose_foreground_model(
+            hivemind_url=hivemind_url,
+            force_refresh=False,
+        )
+        model_id = _state(getattr(model_choice, "model_id", None))
+        model_source = _state(getattr(model_choice, "source", None))
+        model_detail = _state(getattr(model_choice, "detail", None))
+        if not model_id:
+            raise ValueError("foreground model picker returned no model id")
+        if model_source in {"error", "fallback"}:
+            raise ValueError(
+                model_detail
+                or f"foreground model picker returned unadmitted source {model_source}"
+            )
+        model_admission = {
+            "status": "ready",
+            "model_id": model_id,
+            "source": model_source or None,
+            "detail": model_detail or "Foreground model picker admitted a model.",
+            "error": None,
+        }
+        checks.append({
+            "name": "model_admission",
+            "state": "pass",
+            "detail": f"Foreground model {model_id} is admitted ({model_source or 'selected'}).",
+        })
+    except Exception as exc:
+        model_admission_failed = True
+        model_error = f"Foreground model admission failed: {exc}"
+        errors.append(model_error)
+        model_admission = {
+            "status": "failed",
+            "model_id": None,
+            "source": "error",
+            "detail": model_error,
+            "error": str(exc),
+        }
+        checks.append({
+            "name": "model_admission",
+            "state": "fail",
+            "detail": model_error,
+        })
+
     if not hivemind_state.hivemind_auth_configured():
         next_actions.append({
             "label": "Set MS4_HIVEMIND_API_KEY if this cluster requires bearer auth.",
@@ -400,7 +448,12 @@ def readiness(hivemind_url: str, *, timeout: int = 5) -> dict[str, Any]:
         })
     if blockers:
         readiness_state = "blocked"
-    elif chat_plane_unknown or cluster_errors or oracle_health is not True:
+    elif (
+        model_admission_failed
+        or chat_plane_unknown
+        or cluster_errors
+        or oracle_health is not True
+    ):
         readiness_state = "degraded"
     else:
         readiness_state = "ready"
@@ -464,6 +517,7 @@ def readiness(hivemind_url: str, *, timeout: int = 5) -> dict[str, Any]:
             "detail": chat_plane["detail"],
             "error": chat_plane_error,
         },
+        "model_admission": model_admission,
         "checks": checks,
         "blockers": blockers,
         "next_actions": next_actions,

@@ -31,11 +31,11 @@ class ModelPickerChatCapabilityTests(unittest.TestCase):
     def test_depth_picker_skips_loaded_qwen3_tts_for_chat_model(self) -> None:
         choice = pick_depth([
             {"id": "Qwen3-TTS", "hivemind_status": "running", "capabilities": ["tts"]},
-            {"id": "qwen3-coder-next:latest", "hivemind_status": "installed"},
+            {"id": "qwen3.6:35b", "hivemind_status": "installed"},
         ])
 
         self.assertIsNotNone(choice)
-        self.assertEqual(choice.model_id, "qwen3-coder-next:latest")
+        self.assertEqual(choice.model_id, "qwen3.6:35b")
 
     def test_only_qwen3_tts_does_not_get_selected(self) -> None:
         catalog = [{"id": "Qwen3-TTS", "hivemind_status": "running", "capabilities": ["tts"]}]

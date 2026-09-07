@@ -39,6 +39,7 @@ from machine_spirit_4.double_agent import (
     depth_fallback_model,
     default_blackboard,
     default_runner,
+    result_matches_job_identity,
 )
 from machine_spirit_4.double_agent.model_picker import (
     DEFAULT_FOREGROUND_MODEL,
@@ -156,6 +157,7 @@ from .voice import (
     SELECTED_FACE_ADMISSION_PROFILE,
     _tts_location_policy,
     _emit_text_as_parallel_chunks,
+    _new_voice_turn_id,
     VoiceRequestError,
     VoiceUnavailable,
     last_face_model,
@@ -1850,6 +1852,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         params = self._parse_query()
         session_id = params.get("session_id") or None
         client_id = params.get("client_id") or None
+        turn_id = _new_voice_turn_id()
         # ?model= is the FACE LOBE chat model (e.g. phi4-mini). The TTS
         # model (tts-1 / tts-1-hd) is a separate knob — earlier the UI
         # was mistakenly sending ?model=tts-1 which made the Face Lobe
@@ -1897,7 +1900,13 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 if terminal_queued[0]:
                     return False
                 terminal_queued[0] = True
-            item = _VoiceSseDelivery(event=event, payload=payload, terminal=True)
+            terminal_payload = dict(payload)
+            terminal_payload.setdefault("turn_id", turn_id)
+            item = _VoiceSseDelivery(
+                event=event,
+                payload=terminal_payload,
+                terminal=True,
+            )
             with delivery_lock:
                 delivery_counts["gateway_enqueued"] += 1
             events.put(item)
@@ -1906,7 +1915,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         def emit(event: str, payload: dict[str, Any]) -> bool:
             if not client_alive.is_set() or turn_cancel.is_set():
                 return False
-            item = _VoiceSseDelivery(event=event, payload=payload)
+            event_payload = dict(payload)
+            event_payload.setdefault("turn_id", turn_id)
+            item = _VoiceSseDelivery(event=event, payload=event_payload)
             with delivery_lock:
                 delivery_counts["gateway_enqueued"] += 1
             events.put(item)
@@ -1936,6 +1947,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     cancel_event=turn_cancel,
                     transcribe_fn=transcribe_fn_override,
                     client_id=client_id,
+                    turn_id=turn_id,
                 )
                 if turn_cancel.is_set():
                     raise VoiceUnavailable(
@@ -1950,7 +1962,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 try:
                     metrics = (result or {}).get("metrics") or {}
                     append_event("voice_turn_complete", {
+                        "turn_id": (result or {}).get("turn_id") or turn_id,
                         "session_id": (result or {}).get("session_id"),
+                        "revision_id": (result or {}).get("revision_id"),
                         "transcript": (result or {}).get("transcript", "")[:200],
                         "reply_text_preview": (result or {}).get("reply_text", "")[:200],
                         "reply_text_chars": len((result or {}).get("reply_text", "") or ""),
@@ -1982,20 +1996,20 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     metrics["delivery"] = delivery_snapshot()
                 queue_terminal("done", result)
             except VoiceRequestError as exc:
-                append_event("voice_turn_failed", {"kind": "request_error", "error": str(exc)})
+                append_event("voice_turn_failed", {"turn_id": turn_id, "kind": "request_error", "error": str(exc)})
                 queue_terminal("error", {"error": str(exc)})
             except VoiceUnavailable as exc:
-                append_event("voice_turn_failed", {"kind": "fail_closed", "error": str(exc)})
+                append_event("voice_turn_failed", {"turn_id": turn_id, "kind": "fail_closed", "error": str(exc)})
                 queue_terminal("error", _voice_error_payload(exc, fail_closed=True))
             except Exception as exc:
-                append_event("voice_turn_failed", {"kind": "exception", "error": str(exc)})
+                append_event("voice_turn_failed", {"turn_id": turn_id, "kind": "exception", "error": str(exc)})
                 queue_terminal("error", {"error": str(exc)})
 
         _sse_start(self)
         if not _sse_event(
             self,
             "status",
-            {"status": "started"},
+            {"status": "started", "turn_id": turn_id},
             write_timeout=_voice_sse_write_ack_timeout(),
         ):
             cancel_turn()
@@ -2058,7 +2072,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 if not _sse_event(
                     self,
                     "heartbeat",
-                    {"status": "running"},
+                    {"status": "running", "turn_id": turn_id},
                     write_timeout=_voice_sse_write_ack_timeout(),
                 ):
                     with delivery_lock:
@@ -4191,7 +4205,10 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         # complete answer in the completion announcement's "Show details".
         result = runner.get_result(job_id)
         if result is not None:
-            snap = {**snap, "result": result}
+            if result_matches_job_identity(snap, result):
+                snap = {**snap, "result": result}
+            else:
+                snap = {**snap, "result_error": "result_identity_mismatch"}
         _json_response(self, 200, snap)
 
     def _double_agent_deliver(self, job_id: str) -> None:
@@ -4461,6 +4478,7 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     handler_cls.runner = build_runner()
     hermes_admin.initialize_state()
     try:
+        hermes_admin.recover_interrupted_update()
         hermes_admin.reconcile_durable_terminal_state()
     except Exception as exc:
         log.warning("Hermes terminal-state reconcile on startup failed: %s", exc)
@@ -4771,6 +4789,8 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     voice_candidate_reconciler = VoiceCandidateReconciler(
         hivemind_url=handler_cls.runner.hivemind_url,
     )
+    # Same-instance hook for a future manifest-owned, gated admission handler.
+    server.voice_candidate_reconciler = voice_candidate_reconciler
     voice_candidate_reconciler.start()
     print(f"MS4 gateway listening on http://{host}:{port}", flush=True)
     try:
