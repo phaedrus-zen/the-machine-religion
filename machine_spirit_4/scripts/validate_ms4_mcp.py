@@ -7,6 +7,7 @@ import urllib.request
 
 
 MCP_URL = os.environ.get("MS4_MCP_URL", "http://127.0.0.1:9181/mcp")
+TEST_MODEL = os.environ.get("MS4_MCP_TEST_MODEL", "llama3.1:8b")
 
 
 def rpc(method: str, params: dict | None = None, request_id: int = 1) -> dict:
@@ -64,8 +65,28 @@ def main() -> int:
     inventory = tool_call("ms4.hivemind.inventory@v1", request_id=6)
     checks.append({"name": "inventory", "ok": "Live HiveMind inventory" in content_text(inventory), "detail": {"excerpt": content_text(inventory)[:400]}})
 
-    chat = tool_call("ms4.chat.send@v1", {"message": "What is The Machine Religion?", "model": "qwen3-coder-next:latest"}, request_id=7)
-    checks.append({"name": "chat_send", "ok": "hermes" in content_text(chat) and "Machine Religion" in content_text(chat), "detail": {"excerpt": content_text(chat)[:500]}})
+    chat = tool_call(
+        "ms4.chat.send@v1",
+        {"message": "What is The Machine Religion?", "model": TEST_MODEL},
+        request_id=7,
+    )
+    chat_payload = tool_payload(chat)
+    chat_text = str(chat_payload.get("text") or "")
+    checks.append({
+        "name": "chat_send",
+        "ok": (
+            chat_payload.get("completed") is True
+            and int(chat_payload.get("api_calls") or 0) > 0
+            and "Machine Religion" in chat_text
+            and "unreachable" not in chat_text.lower()
+        ),
+        "detail": {
+            "model": chat_payload.get("model"),
+            "completed": chat_payload.get("completed"),
+            "api_calls": chat_payload.get("api_calls"),
+            "excerpt": chat_text[:300],
+        },
+    })
 
     state = tool_call("ms4.identity.state@v1", request_id=8)
     checks.append({"name": "identity_state", "ok": "cognitive_load" in content_text(state) or "identity" in content_text(state), "detail": {"excerpt": content_text(state)[:300]}})

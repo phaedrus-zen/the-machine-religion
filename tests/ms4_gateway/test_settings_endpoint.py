@@ -67,6 +67,31 @@ def _parse_handler_response(handler) -> tuple[int, dict]:
     return status, json.loads(body.decode("utf-8") or "{}")
 
 
+@pytest.fixture(autouse=True)
+def _stable_model_picker_results(monkeypatch):
+    """Keep settings tests offline while exercising both role snapshots."""
+    monkeypatch.delenv("MS4_DEPTH_MODEL", raising=False)
+    monkeypatch.delenv("MS4_DEPTH_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(
+        srv_module,
+        "choose_foreground_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id=srv_module.DEFAULT_FOREGROUND_MODEL,
+            source="loaded",
+            detail="ready Face policy candidate",
+        ),
+    )
+    monkeypatch.setattr(
+        srv_module,
+        "choose_depth_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="qwen3.6:35b",
+            source="loaded",
+            detail="ready 35B Depth quality target",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /settings
 # ---------------------------------------------------------------------------
@@ -83,6 +108,7 @@ def test_settings_get_returns_env_defaults_and_cache_snapshot(monkeypatch):
     monkeypatch.setattr(ctx_module, "GROUNDING_CACHE_TTL_SECS", 60)
     monkeypatch.delenv("MS4_HIVEMIND_API_KEY", raising=False)
     monkeypatch.delenv("MS4_HIVEMIND_MCP_URL", raising=False)
+    monkeypatch.delenv("MS4_DEFAULT_MODEL", raising=False)
     # Skip the MS3 voice readiness probe to keep the test offline.
     monkeypatch.setattr(voice_module, "check_voice_ready",
                         lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")))
@@ -105,6 +131,28 @@ def test_settings_get_returns_env_defaults_and_cache_snapshot(monkeypatch):
     assert body["grounding"]["cache_ttl_secs"] == 60
     assert "inventory::http://hive:6089" in body["grounding"]["cache_entries"]
     assert body["endpoints"]["hivemind"] == "http://hive:6089"
+    # The Hermes runner's default belongs to the Depth lobe.  With no Face
+    # override, settings must report the independent built-in Face policy.
+    assert body["face_lobe"]["default_model"] == srv_module.DEFAULT_FOREGROUND_MODEL
+    assert body["face_lobe"]["configured_default_model"] == srv_module.DEFAULT_FOREGROUND_MODEL
+    assert body["face_lobe"]["serving_scope"] == "hivemind_cluster"
+    assert body["depth_lobe"] == {
+        "preferred_cluster_target": "qwen3.6:35b",
+        "quality_target_model": "qwen3.6:35b",
+        "automatic_selection": {
+            "model_id": "qwen3.6:35b",
+            "source": "loaded",
+            "detail": "ready 35B Depth quality target",
+            "policy_tier": "quality_target",
+        },
+        "configured_override": None,
+        "fallback_model": "nemotron-3-nano:30b",
+        "fallback_policy_tier": "degraded_fast_tool_fallback",
+        "fallback_minimum_total_parameters_b": 30,
+        "minimum_total_parameters_b": 35,
+        "minimum_target_total_parameters_b": 35,
+        "serving_scope": "hivemind_cluster",
+    }
     # New surface — direct MCP URL + auth status — must show up so
     # the UI can render the HiveMind cluster-state panel.
     assert body["endpoints"]["hivemind_mcp"].endswith(":6105")
@@ -120,6 +168,158 @@ def test_settings_get_reports_auth_configured_when_env_set(monkeypatch):
     status, body = _parse_handler_response(handler)
     assert status == 200
     assert body["auth"]["hivemind_auth_configured"] is True
+
+
+def test_settings_reports_depth_override_separately_from_cluster_policy(monkeypatch):
+    monkeypatch.setenv("MS4_DEPTH_MODEL", "operator-depth:35b")
+    monkeypatch.setattr(
+        srv_module,
+        "choose_depth_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="operator-depth:35b",
+            source="env_override",
+            detail="MS4_DEPTH_MODEL env var set",
+        ),
+    )
+    monkeypatch.setattr(
+        voice_module,
+        "check_voice_ready",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    handler = _make_handler("GET", "/settings")
+    handler._settings_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["depth_lobe"]["configured_override"] == "operator-depth:35b"
+    assert body["depth_lobe"]["automatic_selection"]["model_id"] == "operator-depth:35b"
+    assert body["depth_lobe"]["automatic_selection"]["source"] == "env_override"
+    assert body["depth_lobe"]["automatic_selection"]["policy_tier"] == "explicit_override"
+    assert body["depth_lobe"]["fallback_model"] == "nemotron-3-nano:30b"
+
+
+def test_settings_keeps_preferred_target_visible_during_cold_fallback(monkeypatch):
+    """A cold policy target must not look like a durable configuration change."""
+    monkeypatch.setattr(
+        srv_module,
+        "choose_depth_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="nemotron-3-nano:30b",
+            source="fallback",
+            detail="preferred cluster target is not currently ready",
+        ),
+    )
+    monkeypatch.setattr(
+        voice_module,
+        "check_voice_ready",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    handler = _make_handler("GET", "/settings")
+    handler._settings_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["depth_lobe"]["preferred_cluster_target"] == "qwen3.6:35b"
+    assert body["depth_lobe"]["automatic_selection"] == {
+        "model_id": "nemotron-3-nano:30b",
+        "source": "fallback",
+        "detail": "preferred cluster target is not currently ready",
+        "policy_tier": "degraded_fast_tool_fallback",
+    }
+    assert body["depth_lobe"]["fallback_model"] == "nemotron-3-nano:30b"
+    assert body["depth_lobe"]["fallback_policy_tier"] == "degraded_fast_tool_fallback"
+    assert body["depth_lobe"]["minimum_target_total_parameters_b"] == 35
+    assert body["depth_lobe"]["fallback_minimum_total_parameters_b"] == 30
+
+
+def test_settings_get_reports_resolved_vega_default_when_no_override(monkeypatch):
+    """With no MS4_VOICE_TTS_VOICE override, GET /settings reports the resolved
+    built-in Oracle default voice (vega). The regular Oracle TTS path is
+    unchanged: engine stays rest, model stays tts-1, and ws_super remains a
+    diagnostic opt-in choice."""
+    monkeypatch.delenv("MS4_VOICE_TTS_VOICE", raising=False)
+    # Resolve through the same helper the module uses at import so this test
+    # tracks the real fallback rather than a hard-coded literal.
+    monkeypatch.setattr(voice_module, "DEFAULT_TTS_VOICE", voice_module._default_tts_voice())
+    monkeypatch.setattr(voice_module, "DEFAULT_ENGINE", "rest")
+    monkeypatch.setattr(voice_module, "DEFAULT_TTS_MODEL", "tts-1")
+    monkeypatch.setattr(voice_module, "check_voice_ready",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    handler = _make_handler("GET", "/settings")
+    handler._settings_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["voice"]["tts_voice_default"] == "vega"
+    # Regular Oracle path unchanged: rest + tts-1; ws_super stays diagnostic.
+    assert body["voice"]["tts_engine_default"] == "rest"
+    assert body["voice"]["tts_model_default"] == "tts-1"
+    assert "ws_super" in body["voice"]["tts_engine_choices"]
+    assert "vega" in body["voice"]["tts_voice_known"]
+
+
+def test_settings_reports_effective_gated_face_fallback(monkeypatch):
+    """The operator snapshot must not present a rejected raw default as active."""
+    monkeypatch.setenv("MS4_DEFAULT_MODEL", "rejected-heavy:70b")
+    monkeypatch.setattr(
+        voice_module,
+        "check_voice_ready",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    monkeypatch.setattr(
+        srv_module,
+        "choose_foreground_model",
+        lambda **_kwargs: types.SimpleNamespace(
+            model_id="llama3.1:8b",
+            source="built_in",
+            detail="gated fallback",
+        ),
+        raising=False,
+    )
+
+    handler = _make_handler("GET", "/settings")
+    handler._settings_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["face_lobe"]["fallback_model"] == "llama3.1:8b"
+    assert body["face_lobe"]["fallback_source"] == "built_in"
+    assert body["face_lobe"]["configured_default_model"] == "rejected-heavy:70b"
+
+
+def test_settings_reports_error_when_choose_foreground_model_raises(monkeypatch):
+    """A crash in the fallback picker must not take down the operator
+    snapshot: GET /settings stays 200, the configured default is echoed
+    back only as configuration evidence (even a rejected heavy value),
+    and the effective fallback fails closed to source='error' with the
+    exception surfaced in fallback_detail."""
+    monkeypatch.setenv("MS4_DEFAULT_MODEL", "rejected-heavy:70b")
+    monkeypatch.setattr(
+        voice_module,
+        "check_voice_ready",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    def _boom(**_kwargs):
+        raise RuntimeError("catalog probe crashed")
+
+    monkeypatch.setattr(srv_module, "choose_foreground_model", _boom, raising=False)
+
+    handler = _make_handler("GET", "/settings")
+    handler._settings_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    # Configuration evidence only: the raw configured default is echoed
+    # verbatim even though it is a rejected heavy value.
+    assert body["face_lobe"]["configured_default_model"] == "rejected-heavy:70b"
+    # The effective fallback fails closed instead of presenting the raw default.
+    assert body["face_lobe"]["fallback_model"] is None
+    assert body["face_lobe"]["fallback_source"] == "error"
+    assert "catalog probe crashed" in body["face_lobe"]["fallback_detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +377,74 @@ def test_voice_services_get_proxies_voice_admin(monkeypatch):
     assert body["schema"] == "Ms4VoiceServicesSnapshot.v1"
     assert [s["service"] for s in body["services"]] == ["ASR", "TTS", "TTS_SUPER"]
     assert body["managed_services"] == ["ASR", "TTS", "TTS_SUPER"]
+
+
+def test_voice_status_uses_effective_hivemind_asr_fallback(monkeypatch):
+    """GET /voice/status should match the real turn gate, not raw MS3 state."""
+    monkeypatch.setattr(
+        srv_module,
+        "check_voice_ready",
+        lambda *_a, **_kw: {
+            "schema": "VoiceReadiness.v1",
+            "voice_input_ready": True,
+            "source": "hivemind-asr-fallback",
+            "asr": {"healthy": True},
+        },
+    )
+
+    handler = _make_handler("GET", "/voice/status")
+    handler._voice_status_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["voice_input_ready"] is True
+    assert body["effective_source"] == "hivemind-asr-fallback"
+
+
+def test_voice_status_fail_closed_includes_hivemind_asr_status(monkeypatch):
+    """If ASR is not provisioned, the status route should be diagnostic."""
+    def _raise_unavailable(*_a, **_kw):
+        raise srv_module.VoiceUnavailable(
+            "voice_input_ready=false asr.status=unhealthy detail=No endpoints configured"
+        )
+
+    monkeypatch.setattr(srv_module, "check_voice_ready", _raise_unavailable)
+    monkeypatch.setattr(
+        srv_module,
+        "_proxy_json",
+        lambda *_a, **_kw: (
+            200,
+            {
+                "schema": "VoiceReadiness.v1",
+                "voice_input_ready": False,
+                "asr": {"status": "unhealthy", "detail": "No endpoints configured"},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        srv_module,
+        "list_voice_services",
+        lambda *_a, **_kw: [
+            {
+                "service": "ASR",
+                "healthy": False,
+                "detail": "No endpoints configured",
+                "endpoint": "",
+                "endpoints_configured": 0,
+                "provisioning_state": "configured_not_provisioned",
+            }
+        ],
+    )
+
+    handler = _make_handler("GET", "/voice/status")
+    handler._voice_status_get()
+    status, body = _parse_handler_response(handler)
+
+    assert status == 200
+    assert body["voice_input_ready"] is False
+    assert "No endpoints configured" in body["effective_detail"]
+    assert body["hivemind_asr"]["healthy"] is False
+    assert body["hivemind_asr"]["provisioning_state"] == "configured_not_provisioned"
 
 
 def test_voice_service_provision_returns_provision_id(monkeypatch):
@@ -404,7 +672,7 @@ def test_voice_turn_stream_separates_chat_model_from_tts_model(monkeypatch):
     ).encode()
     handler = _make_handler(
         "POST",
-        "/voice/turn/stream?session_id=abc&model=phi4-mini&tts_model=tts-1-hd&voice=vega&engine=ws_super",
+        "/voice/turn/stream?session_id=abc&model=llama3.1%3A8b&tts_model=tts-1-hd&voice=vega&engine=ws_super",
         body,
     )
     handler.headers = types.SimpleNamespace(get={
@@ -415,11 +683,24 @@ def test_voice_turn_stream_separates_chat_model_from_tts_model(monkeypatch):
     handler.rfile = io.BytesIO(body)
     handler._voice_turn_stream()
 
-    assert captured.get("model") == "phi4-mini", "chat model must come from ?model="
+    assert captured.get("model") == "llama3.1:8b", "chat model must be URL-decoded from ?model="
     assert captured.get("tts_model") == "tts-1-hd", "tts model must come from ?tts_model= (NOT ?model=)"
     assert captured.get("tts_voice") == "vega"
     assert captured.get("engine") == "ws_super"
     assert captured.get("session_id") == "abc"
+
+
+def test_parse_query_uses_standard_url_decoding():
+    handler = _make_handler(
+        "GET",
+        "/voice/status?model=qwen3%3A8b&session_id=oracle+voice&empty=",
+    )
+
+    assert handler._parse_query() == {
+        "model": "qwen3:8b",
+        "session_id": "oracle voice",
+        "empty": "",
+    }
 
 
 def test_voice_turn_stream_query_param_engine_reaches_orchestrator(monkeypatch):

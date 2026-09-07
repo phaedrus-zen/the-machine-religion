@@ -9,7 +9,7 @@ import json
 import types
 
 import machine_spirit_4.gateway.server as srv_module
-from machine_spirit_4.double_agent import JobEnvelope, JobResult, default_runner, safety
+from machine_spirit_4.double_agent import JobEnvelope, JobEvent, JobResult, default_runner, safety
 
 
 def _seed_completed_job(*, text: str) -> str:
@@ -54,6 +54,31 @@ def _seed_running_job() -> str:
     return env.job_id
 
 
+def _seed_running_job_with_events() -> str:
+    job_id = _seed_running_job()
+    board = default_runner().blackboard
+    board.insert_event(
+        JobEvent.make(
+            job_id=job_id,
+            type="job.tool.call.completed",
+            safe_user_status="Finished tool hivemind_cluster_summary",
+            payload={
+                "tool": "hivemind_cluster_summary",
+                "result_excerpt": '{"healthy":true,"cluster_statistics":{"total_nodes":4}}',
+            },
+        )
+    )
+    board.insert_event(
+        JobEvent.make(
+            job_id=job_id,
+            type="job.checkpoint",
+            safe_user_status="Tool completed (hivemind_cluster_summary); waiting for the Depth model final answer.",
+            payload={"last_event_type": "job.tool.call.completed"},
+        )
+    )
+    return job_id
+
+
 def _make_handler(method: str, path: str) -> srv_module.Ms4GatewayHandler:
     handler = srv_module.Ms4GatewayHandler.__new__(srv_module.Ms4GatewayHandler)
     handler.command = method
@@ -96,6 +121,19 @@ def test_detail_running_job_has_no_result():
     assert status == 200
     assert payload["state"] == "running"
     assert "result" not in payload  # no JobResult persisted yet
+
+
+def test_events_endpoint_preserves_tool_excerpt_and_checkpoint():
+    job_id = _seed_running_job_with_events()
+    h = _make_handler("GET", f"/api/v1/double-agent/jobs/{job_id}/events?limit=20")
+    h._double_agent_events(f"{job_id}?limit=20")
+    status, payload = _read_response(h)
+    assert status == 200
+    events = payload["events"]
+    completed = [e for e in events if e["type"] == "job.tool.call.completed"]
+    checkpoints = [e for e in events if e["type"] == "job.checkpoint"]
+    assert completed[-1]["payload"]["result_excerpt"].startswith('{"healthy":true')
+    assert "waiting for the Depth model final answer" in checkpoints[-1]["safe_user_status"]
 
 
 def test_runner_get_result_wrapper():

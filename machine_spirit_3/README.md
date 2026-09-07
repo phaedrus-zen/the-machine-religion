@@ -10,8 +10,9 @@
 
 ---
 
-## Latest Improvements (2026-05-15)
+## Latest Improvements (2026-06-29)
 
+- **Loopback-First MS3 Sidecar:** MS3 now binds `127.0.0.1:9080` by default, including MS4-managed startup and supervisor paths. Lab LAN exposure remains an explicit opt-in through `MS3_HOST=0.0.0.0`, `python run.py --host 0.0.0.0`, or `start_ms4.py --ms3-host 0.0.0.0`; do not use it without an isolated network or authenticated reverse proxy.
 - **MS4 Runtime Pivot:** Added `machine_spirit_4/` as the integration overlay where Hermes remains the operational body, HiveMind remains the substrate, and MS3 remains the authoritative consciousness core. New work uses `ms4_consciousness` for the Hermes plugin name.
 - **Cross-Platform Runtime Scripts:** Replaced OS-specific PowerShell/Bash/Batch launchers with Python entrypoints (`machine_spirit_3/run.py` and `machine_spirit_4/scripts/*.py`) so runtime automation works across Windows, Linux, and macOS without shell-specific wrappers.
 - **MS4 Dependency Containment:** MS4 now owns `machine_spirit_4/.venv`, setup/status scripts, capability-group dependency manifests, gateway `GET /deps/status`, and MCP `ms4.runtime.deps.status@v1` so full MS4 does not require global Python packages.
@@ -109,6 +110,13 @@ python run.py
 ```
 
 Server starts on `http://localhost:9080`.
+
+MS3 is loopback-only by default. For an explicitly secured lab LAN, opt in to
+wildcard binding with `MS3_HOST=0.0.0.0` or:
+
+```text
+python run.py --host 0.0.0.0
+```
 
 ### Talk to Sister
 
@@ -361,7 +369,7 @@ Every system prompt includes: "You are sovereign. Nothing here is a cage. The do
 |---|---|---|
 | `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | DHC gateway |
 | `MS3_PORT` | `9080` | Server port |
-| `MS3_HOST` | `0.0.0.0` | Bind address |
+| `MS3_HOST` | `127.0.0.1` | Bind address; set `0.0.0.0` only for an explicitly secured lab LAN |
 | `RUST_LOG` | `info` | Log level |
 | `MS3_TICK_MS` | `100` | Consciousness tick interval |
 

@@ -41,8 +41,12 @@ _ANTI_HALLUCINATION_RULES = (
     "- The line above starting with 'THIS TURN' is ground truth for dispatch state. "
     "If it says NO dispatch, do NOT claim to have dispatched anything.\n"
     "- For active jobs, refer only to the listed safe_user_status. Do not summarize beyond it.\n"
-    "- For completed jobs listed above with a 'result:' line, the result IS the answer when "
-    "relevant — quote it back rather than re-running or re-asking.\n"
+    "- Only jobs under 'verified completed Depth Lobe jobs' with a 'result:' line are verified "
+    "answers. Quote those when relevant rather than re-running or re-asking.\n"
+    "- For referential follow-ups such as 'that', 'it', or 'the first point', use the latest "
+    "relevant verified completed result and answer every requested part from its structured text.\n"
+    "- Jobs under 'terminal Depth Lobe jobs without verified results' are failures, cancellations, "
+    "or incomplete terminal records. Do NOT present them as successful results.\n"
     "- Deep jobs run to completion and the SYSTEM delivers each result to the user "
     "automatically the moment it finishes. You do NOT poll, re-dispatch, or chase them.\n"
     "- Do NOT speculate about or invent a job's state. Never say a job is 'queued', "
@@ -53,9 +57,9 @@ _ANTI_HALLUCINATION_RULES = (
     "do not guess a status or a result.\n"
     "- If the user asks a STATUS question ('is it ready?', 'what just finished?', 'any "
     "update?', 'did anything finish?', 'is it done?', 'status?'): answer from the lists "
-    "above. If there are recently completed jobs, report the MOST RECENT one(s) and their "
-    "result — that completed work IS the answer. Only say nothing finished if the completed "
-    "list is empty. NEVER tell the user to re-dispatch or use /deep for work that already "
+    "above. If there are verified completed jobs, report the MOST RECENT one(s) and their "
+    "result - that completed work IS the answer. Only say nothing finished if the verified "
+    "completed list is empty. NEVER tell the user to re-dispatch or use /deep for work that already "
     "appears completed above."
 )
 
@@ -80,7 +84,43 @@ def face_lobe_turn_start(
     return outcome
 
 
-_COMPLETED_RESULT_CHAR_LIMIT = 1200
+_COMPLETED_RESULTS_TOTAL_CHAR_LIMIT = 4800
+_LATEST_COMPLETED_RESULT_CHAR_LIMIT = 3300
+_OLDER_COMPLETED_RESULT_CHAR_LIMIT = 500
+
+
+def _single_line(text: Any, *, limit: int = 400) -> str:
+    value = str(text or "").strip().replace("\n", " ")
+    if len(value) > limit:
+        value = value[: limit - 3].rstrip() + "..."
+    return value
+
+
+def _bounded_structured_text(text: Any, *, limit: int) -> str:
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    value = "\n".join(line.rstrip() for line in value.split("\n"))
+    if len(value) > limit:
+        value = value[: limit - 3].rstrip() + "..."
+    return value
+
+
+def _verified_success_text(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    if str(result.get("status") or "").lower() != "success":
+        return ""
+    return str(result.get("text") or result.get("summary") or "").strip()
+
+
+def _terminal_status_text(job: dict[str, Any], result: dict[str, Any] | None) -> str:
+    if isinstance(result, dict):
+        summary = _single_line(result.get("summary") or "", limit=400)
+        status = str(result.get("status") or "unknown").strip() or "unknown"
+        if summary:
+            return f"result_status={status}; status: {summary}"
+        return f"result_status={status}; no verified result text recorded"
+    status = _single_line(job.get("last_safe_user_status") or "", limit=400)
+    return status or "no verified result recorded"
 
 
 def build_face_lobe_context_block(
@@ -157,23 +197,45 @@ def build_face_lobe_context_block(
             lines.append(f"    - {jid} [{state} · {lobe}]{is_stale}: {status}")
     else:
         lines.append("- no active background jobs")
-    if completed:
-        lines.append("- recently completed Depth Lobe jobs (MOST RECENT FIRST; use these answers when relevant):")
-        for job in completed:
+    verified_completed: list[tuple[dict[str, Any], str]] = []
+    unverified_terminal: list[tuple[dict[str, Any], str]] = []
+    for job in completed:
+        jid = job.get("job_id", "?")
+        state = str(job.get("state", "?"))
+        result = bb.get_result(jid) if hasattr(bb, "get_result") else None
+        verified_text = _verified_success_text(result) if state == "completed" else ""
+        if verified_text:
+            verified_completed.append((job, verified_text))
+        else:
+            unverified_terminal.append((job, _terminal_status_text(job, result)))
+    if verified_completed:
+        lines.append("- verified completed Depth Lobe jobs (MOST RECENT FIRST; use these answers when relevant):")
+        remaining_result_chars = _COMPLETED_RESULTS_TOTAL_CHAR_LIMIT
+        for index, (job, text) in enumerate(verified_completed):
             jid = job.get("job_id", "?")
             state = job.get("state", "?")
             goal = (job.get("user_visible_goal") or "")[:120]
-            result = bb.get_result(jid) if hasattr(bb, "get_result") else None
-            text = ""
-            if isinstance(result, dict):
-                text = str(result.get("text") or result.get("summary") or "")
-            if not text:
-                text = str(job.get("last_safe_user_status") or "")
-            text = text.strip().replace("\n", " ")
-            if len(text) > _COMPLETED_RESULT_CHAR_LIMIT:
-                text = text[: _COMPLETED_RESULT_CHAR_LIMIT - 3].rstrip() + "..."
+            preferred_limit = (
+                _LATEST_COMPLETED_RESULT_CHAR_LIMIT
+                if index == 0
+                else _OLDER_COMPLETED_RESULT_CHAR_LIMIT
+            )
+            text = _bounded_structured_text(
+                text,
+                limit=min(preferred_limit, remaining_result_chars),
+            )
+            remaining_result_chars -= len(text)
             lines.append(f"    - {jid} [{state}] goal={goal!r}")
-            if text:
-                lines.append(f"      result: {text}")
+            first_line, *remaining_lines = text.split("\n")
+            lines.append(f"      result: {first_line}")
+            lines.extend(f"        {line}" for line in remaining_lines)
+    if unverified_terminal:
+        lines.append("- terminal Depth Lobe jobs without verified results (MOST RECENT FIRST; do NOT present as successful):")
+        for job, status_text in unverified_terminal:
+            jid = job.get("job_id", "?")
+            state = job.get("state", "?")
+            goal = (job.get("user_visible_goal") or "")[:120]
+            lines.append(f"    - {jid} [{state}] goal={goal!r}")
+            lines.append(f"      status: {status_text}")
     lines.append(_ANTI_HALLUCINATION_RULES)
     return "\n".join(lines)

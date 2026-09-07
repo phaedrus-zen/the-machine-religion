@@ -118,6 +118,21 @@ def hurl(fake: _FakeMcp) -> str:
     return f"http://127.0.0.1:{fake.port}"
 
 
+# A lifecycle_state snapshot whose chat plane is up. Oracle readiness fails
+# closed against HiveMind's /api/v1/cluster/lifecycle_state, so readiness
+# tests that assert the Oracle-status / voice-input gates pin a healthy chat
+# plane here to keep exercising exactly those gates, not the chat-plane gate.
+_HEALTHY_CHAT_LIFECYCLE = {
+    "source": "menta_hli.cluster.lifecycle_state.v1",
+    "ai_plane_ready": True,
+    "boot_stage": "ready",
+    "workload_phase": "inference_loaded",
+    "signals": {"loaded_models_count": 2},
+    "capabilities_available": ["chat", "embedding"],
+    "capabilities_unavailable": [],
+}
+
+
 # ===========================================================================
 # Wrappers + admin modules
 # ===========================================================================
@@ -173,6 +188,11 @@ def test_oracle_admin_readiness_degraded_is_not_labeled_safe(monkeypatch):
         },
     )
     monkeypatch.setattr(oracle_admin.hivemind_state, "hivemind_auth_configured", lambda: True)
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_lifecycle_state",
+        lambda *_args, **_kwargs: dict(_HEALTHY_CHAT_LIFECYCLE),
+    )
 
     snap = oracle_admin.readiness("http://hivemind.test:6089", timeout=1)
     assert snap["readiness"] == "degraded"
@@ -181,6 +201,101 @@ def test_oracle_admin_readiness_degraded_is_not_labeled_safe(monkeypatch):
     labels = [action["label"] for action in snap["next_actions"]]
     assert not any("safe to use" in label for label in labels)
     assert any("Resolve readiness warnings" in label for label in labels)
+
+
+@pytest.mark.parametrize(
+    "voice_entry",
+    [
+        {
+            "name": "ASR",
+            "healthy": False,
+            "provisioning_state": "configured_not_provisioned",
+            "detail": "No endpoints configured",
+        },
+        {
+            "name": "voice_input",
+            "voice_input_ready": False,
+            "status": "unavailable",
+        },
+    ],
+)
+def test_oracle_admin_readiness_keeps_chat_ready_when_voice_input_unavailable(monkeypatch, voice_entry):
+    monkeypatch.setattr(
+        oracle_admin,
+        "status",
+        lambda *_args, **_kwargs: {"schema": "Ms4OracleSnapshot.v1", "healthy": True},
+    )
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_combined_snapshot",
+        lambda *_args, **_kwargs: {
+            "mcp_base_url": "http://127.0.0.1:6105/mcp",
+            "active_jobs": {"total_active": 0},
+            "cluster_load": {},
+            "service_health": {
+                "menta_hli": {"name": "menta_hli", "healthy": True},
+                "voice_input": voice_entry,
+            },
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(oracle_admin.hivemind_state, "hivemind_auth_configured", lambda: True)
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_lifecycle_state",
+        lambda *_args, **_kwargs: dict(_HEALTHY_CHAT_LIFECYCLE),
+    )
+
+    snap = oracle_admin.readiness("http://hivemind.test:6089", timeout=1)
+
+    assert snap["readiness"] == "ready"
+    assert snap["ready"] is True
+    assert snap["voice_input"]["ready"] is False
+    assert snap["voice_input"]["issues"]
+    assert snap["blockers"] == []
+    assert snap["chat_plane"]["status"] == "ready"
+    assert any(
+        check["name"] == "voice_input" and check["state"] == "fail"
+        for check in snap["checks"]
+    )
+
+
+def test_oracle_admin_readiness_accepts_running_asr(monkeypatch):
+    monkeypatch.setattr(
+        oracle_admin,
+        "status",
+        lambda *_args, **_kwargs: {"schema": "Ms4OracleSnapshot.v1", "healthy": True},
+    )
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_combined_snapshot",
+        lambda *_args, **_kwargs: {
+            "mcp_base_url": "http://127.0.0.1:6105/mcp",
+            "active_jobs": {"total_active": 0},
+            "cluster_load": {},
+            "service_health": {
+                "menta_hli": {"name": "menta_hli", "healthy": True},
+                "ASR": {
+                    "name": "ASR",
+                    "healthy": True,
+                    "provisioning_state": "running",
+                },
+            },
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(oracle_admin.hivemind_state, "hivemind_auth_configured", lambda: True)
+    monkeypatch.setattr(
+        oracle_admin.hivemind_state,
+        "get_lifecycle_state",
+        lambda *_args, **_kwargs: dict(_HEALTHY_CHAT_LIFECYCLE),
+    )
+
+    snap = oracle_admin.readiness("http://hivemind.test:6089", timeout=1)
+
+    assert snap["readiness"] == "ready"
+    assert snap["ready"] is True
+    assert snap["voice_input"]["ready"] is True
 
 
 def test_oracle_admin_chat_passes_message(fake_mcp):
@@ -239,6 +354,43 @@ def test_loadout_admin_list_and_apply(fake_mcp):
     assert len(profiles) == 2
     result = loadout_admin.apply(hurl(fake_mcp), "voice-stack")
     assert result["ok"] is True
+
+
+def test_loadout_admin_normalises_hli_tier_map(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.loadout.profiles@v1",
+        {
+            "hardware": {"gpu_count": 1, "total_vram_gb": 32.0},
+            "recommended_tier": "super",
+            "active_loadout": {"tier": "medium", "quality": "balanced"},
+            "profiles": {
+                "tiers": {
+                    "medium": {"label": "Medium", "vram_gb": 16},
+                    "super": {"label": "Super", "vram_gb": 32},
+                },
+                "presets": {
+                    "medium": {
+                        "chat": {"model": "nemotron-3-nano:4b", "source": "ollama"},
+                    },
+                    "super": {
+                        "chat": {"model": "qwen3.6:35b", "source": "ollama"},
+                        "asr": {"model": "whisper-large-v3-turbo", "source": "gim"},
+                    },
+                },
+            },
+        },
+    )
+
+    snapshot = loadout_admin.combined_snapshot(hurl(fake_mcp))
+
+    assert snapshot["hardware"]["total_vram_gb"] == 32.0
+    assert snapshot["recommended_tier"] == "super"
+    assert [p["id"] for p in snapshot["profiles"]] == ["medium", "super"]
+    medium, super_profile = snapshot["profiles"]
+    assert medium["active"] is True
+    assert medium["models"] == ["nemotron-3-nano:4b"]
+    assert super_profile["recommended"] is True
+    assert super_profile["models"] == ["qwen3.6:35b", "whisper-large-v3-turbo"]
 
 
 def test_loadout_admin_apply_rejects_empty_id(fake_mcp):
@@ -355,6 +507,17 @@ def test_route_oracle_status(fake_mcp):
     assert body["schema"] == "Ms4OracleSnapshot.v1"
 
 
+def test_route_oracle_status_derives_health_when_tool_omits_field(fake_mcp):
+    fake_mcp.set_response("hivemind.oracle.status", {"active_requests": 0, "last_error": None})
+    handler = _make_handler(_DummyRunner(hurl(fake_mcp)), "GET", "/hivemind/oracle/status")
+    handler._hivemind_oracle_status_get()
+    status, body = _read_response(handler)
+    assert status == 200
+    assert body["schema"] == "Ms4OracleSnapshot.v1"
+    assert body["healthy"] is True
+    assert body["state"] == "ready"
+
+
 def test_route_oracle_readiness(fake_mcp):
     fake_mcp.set_response("hivemind.oracle.status", {"healthy": True})
     fake_mcp.set_response("hivemind.jobs.active@v1", {"total_active": 0, "summary": ""})
@@ -432,12 +595,25 @@ def test_route_jobs_cancel_requires_confirm(fake_mcp):
 
 
 def test_route_jobs_cancel_with_confirm_fires(fake_mcp):
-    fake_mcp.set_response("hivemind.jobs.cancel@v1", {"reset": True})
-    handler = _make_handler(_DummyRunner(hurl(fake_mcp)), "POST", "/hivemind/jobs/cancel", body=b'{"confirm": true}')
+    job_id = "77a4fe89-2f09-47b0-8f52-c35186fe82dc"
+    fake_mcp.set_response("hivemind.jobs.cancel@v1", {"cancelled": True, "trace_id": job_id})
+    body = json.dumps({"confirm": True, "job_id": job_id, "reason": "test"}).encode()
+    handler = _make_handler(_DummyRunner(hurl(fake_mcp)), "POST", "/hivemind/jobs/cancel", body=body)
     handler._hivemind_jobs_cancel()
     status, body = _read_response(handler)
     assert status == 200
-    assert body == {"reset": True}
+    assert body == {"cancelled": True, "trace_id": job_id}
+
+
+def test_route_jobs_cancel_requires_job_id(fake_mcp):
+    handler = _make_handler(
+        _DummyRunner(hurl(fake_mcp)), "POST", "/hivemind/jobs/cancel",
+        body=b'{"confirm": true}',
+    )
+    handler._hivemind_jobs_cancel()
+    status, body = _read_response(handler)
+    assert status == 400
+    assert "job_id" in body["error"]
 
 
 def test_route_service_lifecycle_dispatchers(fake_mcp):

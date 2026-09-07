@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Callable, Optional
 
 from . import catalog as catalog_mod
@@ -148,12 +150,13 @@ class ToolResolution:
     tools: tuple[ResolvedTool, ...]
     catalog_version: str
     fallback_reason: str | None = None
+    deterministic_arguments: dict[str, Any] | None = None
 
     def top_tool(self) -> ResolvedTool | None:
         return self.tools[0] if self.tools else None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema": self.schema,
             "query": self.query,
             "tier": self.tier,
@@ -163,6 +166,11 @@ class ToolResolution:
             "catalog_version": self.catalog_version,
             "fallback_reason": self.fallback_reason,
         }
+        if self.deterministic_arguments is not None:
+            payload["deterministic_arguments"] = dict(
+                self.deterministic_arguments
+            )
+        return payload
 
 
 def _empty_resolution(query: str, catalog_version: str, reason: str) -> ToolResolution:
@@ -187,6 +195,342 @@ def _resolved(entry: ToolEntry, score: float) -> ResolvedTool:
         kind=entry.kind,
         inline_eligible=is_inline_eligible(entry),
     )
+
+
+def _single_entry_deterministic_resolution(
+    query: str,
+    catalog: Catalog,
+    entry: ToolEntry,
+    *,
+    deterministic_arguments: dict[str, Any] | None = None,
+) -> ToolResolution:
+    return ToolResolution(
+        schema="Ms4ToolResolution.v1",
+        query=query,
+        tier=TIER_DETERMINISTIC,
+        confidence=_deterministic_confidence(),
+        toolboxes=(entry.toolbox,),
+        tools=(_resolved(entry, 1.0),),
+        catalog_version=catalog.version,
+        deterministic_arguments=deterministic_arguments,
+    )
+
+
+_CATALOG_NAME_SEGMENT_CHARS = r"A-Za-z0-9_@-"
+
+
+def _single_explicit_catalog_entry(query: str, catalog: Catalog) -> ToolEntry | None:
+    """Return the sole distinct catalog tool named verbatim in ``query``."""
+    matched: dict[str, ToolEntry] = {}
+    for entry in catalog.tools:
+        if not entry.name:
+            continue
+        # Catalog ids use dotted ASCII segments (plus @version). Treat a
+        # terminal dot as punctuation, but reject dotted or hyphenated
+        # continuations that make the known name part of a longer token.
+        pattern = (
+            rf"(?<![{_CATALOG_NAME_SEGMENT_CHARS}])"
+            rf"(?<![{_CATALOG_NAME_SEGMENT_CHARS}]\.)"
+            rf"{re.escape(entry.name)}"
+            rf"(?![{_CATALOG_NAME_SEGMENT_CHARS}])"
+            rf"(?!\.[{_CATALOG_NAME_SEGMENT_CHARS}])"
+        )
+        if re.search(pattern, query, re.IGNORECASE):
+            matched.setdefault(entry.name.casefold(), entry)
+            if len(matched) > 1:
+                return None
+    return next(iter(matched.values()), None)
+
+
+_SERVICE_NAME_MAX_CHARS = 64
+_SERVICE_RAW_NAME_MAX_CHARS = 160
+_SERVICE_NAME_PATTERN = (
+    r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?"
+)
+_SERVICE_RAW_NAME_PATTERN = (
+    r"[A-Za-z0-9_-]"
+    r"(?:[A-Za-z0-9_, \t-]{0,158}?[A-Za-z0-9_-])?"
+)
+_SERVICE_ACTION_RE = re.compile(
+    r"\A[ \t]*"
+    r"(?:Oracle,[ \t]+please[ \t]+)?"
+    r"(?P<action>enable|disable|restart)[ \t]+"
+    r"(?:the[ \t]+)?"
+    rf"(?P<service>{_SERVICE_RAW_NAME_PATTERN})"
+    r"(?:[ \t]+service)?"
+    r"(?:[ \t]+with[ \t]+"
+    r"(?P<explicit>hivemind\.services\.(?:enable|disable|restart)@v[1-9][0-9]*))?"
+    r"[.!?]?[ \t]*\Z",
+    re.IGNORECASE | re.ASCII,
+)
+_SERVICE_ACTION_CANONICAL = {
+    "enable": "hivemind.services.enable@v1",
+    "disable": "hivemind.services.disable@v1",
+    "restart": "hivemind.services.restart@v1",
+}
+_SERVICE_ACTION_PREFIX_RE = re.compile(
+    r"\A[ \t]*(?:Oracle,[ \t]+please[ \t]+)?"
+    r"(?P<action>enable|disable|restart)[ \t]+",
+    re.IGNORECASE | re.ASCII,
+)
+_SERVICE_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|,", re.ASCII)
+_SERVICE_NAME_TYPED_PART_RE = re.compile(
+    r"\A[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?\Z",
+    re.ASCII,
+)
+_SERVICE_NAME_NORMALIZED_RE = re.compile(
+    rf"\A{_SERVICE_NAME_PATTERN}\Z",
+    re.ASCII,
+)
+_SERVICE_NAME_SPOKEN_PART_RE = re.compile(r"\A[A-Za-z0-9]+\Z", re.ASCII)
+_SERVICE_NAME_SPOKEN_ALIASES = MappingProxyType({
+    ("menta", "human", "bridge"): "menta_human_bridge",
+})
+_SERVICE_CANONICAL_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_@-])"
+    r"(hivemind\.services\.(?:enable|disable|restart)@v[1-9][0-9]*)"
+    r"(?![A-Za-z0-9_@-])",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+@dataclass(frozen=True)
+class _ServiceActionMatch:
+    canonical_tool: str
+    service_name: str
+    explicit_canonical: str | None
+
+    @property
+    def conflicts(self) -> bool:
+        return (
+            self.explicit_canonical is not None
+            and self.explicit_canonical.casefold()
+            != self.canonical_tool.casefold()
+        )
+
+
+def _normalize_spoken_service_name(raw: str) -> str | None:
+    """Normalize one short typed/ASR service identifier."""
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or len(raw) > _SERVICE_RAW_NAME_MAX_CHARS
+        or re.fullmatch(r"[A-Za-z0-9_, \t-]+", raw, re.ASCII) is None
+    ):
+        return None
+    text = raw.strip(" \t")
+    text = re.sub(r"[ \t]+service\Z", "", text, flags=re.IGNORECASE)
+    if not text:
+        return None
+    tokens = _SERVICE_NAME_TOKEN_RE.findall(text)
+    if not tokens:
+        return None
+    remainder = _SERVICE_NAME_TOKEN_RE.sub("", text)
+    if remainder.strip(" \t"):
+        return None
+    for index, token in enumerate(tokens):
+        if token != ",":
+            continue
+        previous = tokens[index - 1].casefold() if index > 0 else ""
+        following = (
+            tokens[index + 1].casefold()
+            if index + 1 < len(tokens)
+            else ""
+        )
+        if previous != "underscore" and following != "underscore":
+            return None
+    words = [token for token in tokens if token != ","]
+    if not words or len(words) > 8:
+        return None
+    normalized_parts: list[str] = []
+    separator_pending = False
+    for word in words:
+        folded = word.casefold()
+        if folded == "underscore":
+            if not normalized_parts or separator_pending:
+                return None
+            separator_pending = True
+            continue
+        if (
+            _SERVICE_NAME_TYPED_PART_RE.fullmatch(word) is None
+        ):
+            return None
+        normalized_parts.append(folded)
+        separator_pending = False
+    if not normalized_parts or separator_pending:
+        return None
+    typed_identifier = (
+        len(words) == 1
+        and "," not in tokens
+        and ("_" in words[0] or "-" in words[0])
+    )
+    spoken_alias_key = tuple(normalized_parts)
+    spoken_alias = _SERVICE_NAME_SPOKEN_ALIASES.get(spoken_alias_key)
+    if spoken_alias is not None and not all(
+        _SERVICE_NAME_SPOKEN_PART_RE.fullmatch(part) is not None
+        for part in normalized_parts
+    ):
+        return None
+    if not typed_identifier and not spoken_alias:
+        return None
+    normalized = (
+        "_".join(normalized_parts)
+        if typed_identifier
+        else str(spoken_alias)
+    )
+    if (
+        len(normalized) > _SERVICE_NAME_MAX_CHARS
+        or _SERVICE_NAME_NORMALIZED_RE.fullmatch(normalized) is None
+    ):
+        return None
+    return normalized
+
+
+def _parse_service_action_command(query: str) -> _ServiceActionMatch | None:
+    """Parse one bounded whole-utterance service mutation command."""
+    match = _SERVICE_ACTION_RE.fullmatch(query)
+    if match is None:
+        return None
+    service_name = _normalize_spoken_service_name(match.group("service"))
+    if service_name is None:
+        return None
+    canonical = _SERVICE_ACTION_CANONICAL[match.group("action").casefold()]
+    return _ServiceActionMatch(
+        canonical_tool=canonical,
+        service_name=service_name,
+        explicit_canonical=match.group("explicit"),
+    )
+
+
+def _service_action_has_canonical_conflict(query: str) -> bool:
+    prefix = _SERVICE_ACTION_PREFIX_RE.match(query)
+    if prefix is None:
+        return False
+    explicit = [
+        match.group(1).casefold()
+        for match in _SERVICE_CANONICAL_TOKEN_RE.finditer(query)
+    ]
+    if not explicit:
+        return False
+    expected = _SERVICE_ACTION_CANONICAL[prefix.group("action").casefold()].casefold()
+    return len(explicit) != 1 or explicit[0] != expected
+
+
+def _single_service_action_entry(
+    command: _ServiceActionMatch,
+    catalog: Catalog,
+) -> ToolEntry | None:
+    canonical = command.canonical_tool
+    entries = [entry for entry in catalog.tools if entry.name == canonical]
+    return entries[0] if len(entries) == 1 else None
+
+
+_READ_INTENT_CUE_RE = re.compile(
+    r"\b(?:list|show|status|summary|active|current|what|which)\b",
+    re.IGNORECASE,
+)
+_MUTATION_WORD_PATTERN = (
+    r"(?:"
+    r"cancel(?:ing|ling)?|delet(?:e|ing)|start(?:ing)?|stop(?:ping)?|"
+    r"creat(?:e|ing)|mutat(?:e|ing)|chang(?:e|ing)|restart(?:ing)?|"
+    r"attach(?:ing)?|detach(?:ing)?|isolat(?:e|ing)|deploy(?:ing)?|"
+    r"enabl(?:e|ing)|disabl(?:e|ing)"
+    r")"
+)
+_MUTATION_INTENT_RE = re.compile(
+    rf"\b{_MUTATION_WORD_PATTERN}\b",
+    re.IGNORECASE,
+)
+_MUTATION_LIST_ITEM_PATTERN = rf"(?:force\s+)?{_MUTATION_WORD_PATTERN}"
+_COORDINATED_MUTATION_LIST_PATTERN = (
+    rf"{_MUTATION_LIST_ITEM_PATTERN}"
+    rf"(?:\s*,\s*{_MUTATION_LIST_ITEM_PATTERN})*"
+    rf"\s*,?\s*(?:or|and)\s+{_MUTATION_LIST_ITEM_PATTERN}"
+)
+_NEGATED_MUTATION_RE = re.compile(
+    rf"\b(?:do\s+not|don't|dont|never|without|instead\s+of)\s+"
+    rf"(?:{_COORDINATED_MUTATION_LIST_PATTERN}|{_MUTATION_LIST_ITEM_PATTERN})\b",
+    re.IGNORECASE,
+)
+_GENERIC_READ_SCORE_RATIO = 0.8
+
+
+def _read_intent_cues(query: str) -> set[str]:
+    return {match.group(0).lower() for match in _READ_INTENT_CUE_RE.finditer(query)}
+
+
+def _has_explicit_mutation_intent(query: str) -> bool:
+    """Return whether ``query`` positively asks for a mutation.
+
+    Safety-oriented read prompts often name forbidden actions ("do not
+    delete, attach, or start"). Remove those negated clauses before
+    looking for an effectful verb so their vocabulary cannot suppress a
+    clear read intent. A positive mutation cue always wins.
+    """
+    lower = query.lower().replace("’", "'")
+    without_negated_mutations = _NEGATED_MUTATION_RE.sub(" ", lower)
+    return _MUTATION_INTENT_RE.search(without_negated_mutations) is not None
+
+
+def _has_read_intent(query: str) -> bool:
+    return bool(_read_intent_cues(query)) and not _has_explicit_mutation_intent(query)
+
+
+def _prefer_read_tools(
+    query: str,
+    tools: tuple[ResolvedTool, ...],
+) -> tuple[ResolvedTool, ...]:
+    """Stable read-intent tie-break inside the already-selected toolbox.
+
+    Retrieval still chooses the toolbox and supplies semantic scores.
+    For an unambiguously read-oriented query whose original top is
+    positively mutating, this may promote a compatible inline-safe read
+    from that same toolbox. Otherwise it preserves the original ranking.
+    It never looks at required arguments, preserving the router contract
+    that a required-argument #1 cannot be replaced merely by a zero-arg #2.
+    """
+    if not tools or not _has_read_intent(query):
+        return tools
+
+    cues = _read_intent_cues(query)
+    direct_verbs = cues & {"list", "status", "summary", "active", "current"}
+    selected_toolbox = tools[0].toolbox
+    selected_positions = [
+        index for index, tool in enumerate(tools) if tool.toolbox == selected_toolbox
+    ]
+    selected = [tools[index] for index in selected_positions]
+    top_verb = catalog_mod.tool_verb(selected[0].name).replace("_", " ")
+    top_is_mutating = _MUTATION_INTENT_RE.search(top_verb) is not None
+    if selected[0].inline_eligible or not top_is_mutating:
+        return tools
+    top_score = selected[0].score
+
+    def compatibility(tool: ResolvedTool) -> int:
+        if not tool.inline_eligible:
+            return 0
+        verb = catalog_mod.tool_verb(tool.name)
+        if verb in direct_verbs:
+            return 3
+        if (
+            "current" in cues
+            and verb in {"active", "status", "state", "latest"}
+        ):
+            return 2
+        if (
+            verb == "list"
+            and cues & {"show", "what", "which", "current"}
+            and (top_score <= 0.0 or tool.score >= top_score * _GENERIC_READ_SCORE_RATIO)
+        ):
+            return 1
+        return 0
+
+    if not any(compatibility(tool) for tool in selected):
+        return tools
+    selected.sort(key=compatibility, reverse=True)
+    ranked = list(tools)
+    for index, tool in zip(selected_positions, selected):
+        ranked[index] = tool
+    return tuple(ranked)
 
 
 # ---------------------------------------------------------------------------
@@ -453,13 +797,14 @@ def _resolve_via_hm_search(
 
     if not tools:
         return None
+    ranked_tools = _prefer_read_tools(query, tuple(tools))[:top_k]
     return ToolResolution(
         schema="Ms4ToolResolution.v1",
         query=query,
         tier=TIER_HM_SEARCH,
-        confidence=tools[0].score,
+        confidence=ranked_tools[0].score,
         toolboxes=tuple(toolboxes[:3]),
-        tools=tuple(tools),
+        tools=ranked_tools,
         catalog_version=catalog.version,
     )
 
@@ -515,6 +860,43 @@ def resolve(
     if not query or not query.strip():
         return _empty_resolution(query, catalog.version, "empty query")
 
+    if _service_action_has_canonical_conflict(query):
+        return _empty_resolution(
+            query,
+            catalog.version,
+            "natural service action conflicts with explicit canonical tool",
+        )
+
+    service_action = _parse_service_action_command(query)
+    if service_action is not None:
+        if service_action.conflicts:
+            return _empty_resolution(
+                query,
+                catalog.version,
+                "natural service action conflicts with explicit canonical tool",
+            )
+        service_action_entry = _single_service_action_entry(
+            service_action,
+            catalog,
+        )
+        if service_action_entry is not None:
+            return _single_entry_deterministic_resolution(
+                query,
+                catalog,
+                service_action_entry,
+                deterministic_arguments={
+                    "service_name": service_action.service_name
+                },
+            )
+
+    explicit_entry = _single_explicit_catalog_entry(query, catalog)
+    if explicit_entry is not None:
+        return _single_entry_deterministic_resolution(
+            query,
+            catalog,
+            explicit_entry,
+        )
+
     if index is None:
         index = index_mod.get_index(catalog, hivemind_url=hivemind_url)
 
@@ -534,8 +916,14 @@ def resolve(
         winner = det_toolboxes[0]
         # Rank tools within the matched toolbox via the index; fall
         # back to catalog order when the index can't score them.
+        toolbox_entries = catalog.toolboxes.get(winner, ())
+        candidate_k = max(k, len(toolbox_entries)) if _has_read_intent(query) else k
         hits = index_mod.query_tools(
-            index, query, top_k=k, toolbox_filter={winner}, hivemind_url=hivemind_url
+            index,
+            query,
+            top_k=candidate_k,
+            toolbox_filter={winner},
+            hivemind_url=hivemind_url,
         )
         tools = _hits_to_tools(hits, by_name)
         if not tools:
@@ -543,8 +931,9 @@ def resolve(
             # return the toolbox's tools in catalog order; the toolbox
             # itself was a confident keyword match.
             tools = tuple(
-                _resolved(e, 0.0) for e in catalog.toolboxes.get(winner, ())[:k]
+                _resolved(entry, 0.0) for entry in toolbox_entries[:candidate_k]
             )
+        tools = _prefer_read_tools(query, tools)[:k]
         return ToolResolution(
             schema="Ms4ToolResolution.v1",
             query=query,
@@ -579,7 +968,12 @@ def resolve(
         # toolbox, hand those tools back at low confidence; else "none".
         if shortlist_boxes:
             box = shortlist_boxes[0]
-            tools = tuple(_resolved(e, 0.0) for e in catalog.toolboxes.get(box, ())[:k])
+            entries = catalog.toolboxes.get(box, ())
+            candidate_entries = entries if _has_read_intent(query) else entries[:k]
+            tools = _prefer_read_tools(
+                query,
+                tuple(_resolved(entry, 0.0) for entry in candidate_entries),
+            )[:k]
             return ToolResolution(
                 schema="Ms4ToolResolution.v1",
                 query=query,
@@ -593,6 +987,25 @@ def resolve(
         return _empty_resolution(query, catalog.version, "no deterministic or embedding match")
 
     tools = _hits_to_tools(tool_hits, by_name)
+    if tools and _has_read_intent(query):
+        selected_toolbox = tools[0].toolbox
+        selected_hits = index_mod.query_tools(
+            index,
+            query,
+            top_k=max(k, len(catalog.toolboxes.get(selected_toolbox, ()))),
+            toolbox_filter={selected_toolbox},
+            hivemind_url=hivemind_url,
+        )
+        selected_tools = _prefer_read_tools(
+            query,
+            _hits_to_tools(selected_hits, by_name),
+        )
+        if selected_tools and selected_tools[0].name != tools[0].name:
+            promoted = selected_tools[0]
+            tools = (promoted,) + tuple(
+                tool for tool in tools if tool.name != promoted.name
+            )
+    tools = tools[:k]
     top_score = tools[0].score if tools else 0.0
     resolution = ToolResolution(
         schema="Ms4ToolResolution.v1",

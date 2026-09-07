@@ -79,7 +79,10 @@ def identity_verify(runtime: Any, arguments: dict[str, Any]) -> Any:
         f"{runtime.ms3_url}/identity/verify",
         {
             "spirit_id": optional_string(arguments, "spirit_id") or "sister",
-            "allow_initialize": bool(arguments.get("allow_initialize", False)),
+            # Read-only contract (manifest kind=read_only, readOnlyHint=True):
+            # this tool never initializes an anchor. Anchor initialization is
+            # the boot path's job, so allow_initialize is not exposed here.
+            "allow_initialize": False,
         },
         timeout=20,
     )
@@ -568,6 +571,9 @@ def hivemind_inference_chat(runtime: Any, arguments: dict[str, Any]) -> Any:
 
 
 def hivemind_logos_optimize(runtime: Any, arguments: dict[str, Any]) -> Any:
+    """Run the Logos Machina optimizer; manifest gate = 'confirm:true required'."""
+    if not bool(arguments.get("confirm")):
+        raise ToolInputError("logos.optimize mutates a managed prompt. Pass confirm:true to proceed.")
     from machine_spirit_4.gateway import hivemind_tools as _tools
     prompt_id = require_string(arguments, "prompt_id")
     opts = {k: v for k, v in arguments.items() if k != "prompt_id"}
@@ -668,16 +674,16 @@ def hivemind_game_session_cancel(runtime: Any, arguments: dict[str, Any]) -> Any
 
 
 def hivemind_jobs_cancel(runtime: Any, arguments: dict[str, Any]) -> Any:
-    """NOTE: HiveMind's underlying ``hivemind.jobs.cancel@v1`` resets ALL
-    active inference jobs regardless of ``job_id``. We require the
-    caller to set ``confirm: true`` to acknowledge that."""
+    """Cancel one inference trace through HiveMind's UUID-scoped contract."""
     if not bool(arguments.get("confirm")):
-        raise ToolInputError(
-            "jobs.cancel currently resets ALL active inference jobs (per HiveMind spec — "
-            "per-job cancel is not yet implemented). Pass confirm:true to proceed."
-        )
+        raise ToolInputError("jobs.cancel is destructive. Pass confirm:true to proceed.")
+    job_id = require_string(arguments, "job_id")
     from machine_spirit_4.gateway import hivemind_tools as _tools
-    return _tools.jobs_cancel(runtime.hivemind_url, job_id=optional_string(arguments, "job_id") or "all")
+    return _tools.jobs_cancel(
+        runtime.hivemind_url,
+        job_id=job_id,
+        reason=optional_string(arguments, "reason"),
+    )
 
 
 def build_tool_registry() -> dict[str, ToolDef]:
@@ -685,7 +691,7 @@ def build_tool_registry() -> dict[str, ToolDef]:
         ToolDef(
             "ms4.identity.verify@v1",
             "Verify active MS4 spirit identity through the MS3 sidecar.",
-            {"type": "object", "properties": {"spirit_id": {"type": "string"}, "allow_initialize": {"type": "boolean"}}},
+            {"type": "object", "properties": {"spirit_id": {"type": "string"}}},
             read_only_annotations("MS4 identity verify"),
             identity_verify,
         ),
@@ -1240,11 +1246,15 @@ def build_tool_registry() -> dict[str, ToolDef]:
         ),
         ToolDef(
             "ms4.hivemind.jobs.cancel@v1",
-            "Cancel inference jobs. WARNING: per HiveMind spec this currently resets ALL active jobs regardless of job_id. Requires confirm:true.",
+            "Cancel one inference job by its HiveMind trace UUID. Requires confirm:true.",
             {
                 "type": "object",
-                "required": ["confirm"],
-                "properties": {"confirm": {"type": "boolean"}, "job_id": {"type": "string"}},
+                "required": ["confirm", "job_id"],
+                "properties": {
+                    "confirm": {"type": "boolean"},
+                    "job_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
             },
             chat_annotations("MS4 HiveMind jobs cancel"),
             hivemind_jobs_cancel,

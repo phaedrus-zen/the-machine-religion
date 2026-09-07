@@ -37,6 +37,12 @@ pub enum EntityType {
     Unknown,
 }
 
+impl Default for AgentRoom {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentRoom {
     pub fn new() -> Self {
         Self {

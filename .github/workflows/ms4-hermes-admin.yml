@@ -1,0 +1,257 @@
+# CI contract for the MS4 Hermes updater.
+#
+# Hosted coverage is native execution on GitHub's fixed standard-runner labels:
+# Python 3.11/3.12/3.13 on Linux x64/ARM64, Windows x64/ARM64, and macOS
+# Intel/Apple Silicon. Windows ARM64 is a GitHub public-preview runner. Each
+# cell verifies the runner and interpreter architecture before running tests;
+# missing git/ssh-keygen is a failure, never a provenance-test skip.
+#
+# Explicit holds are not represented as hosted successes:
+#   * Jetson/Thor-specific ARM64 hardware is a manual self-hosted gate with a
+#     dedicated runner label and a Tegra identity check.
+#   * Operator signing-key/allowed_signers provisioning, PyPI attestation, and
+#     a live Hermes update/restart remain external-runtime gates. This workflow
+#     neither performs nor claims them.
+
+name: ms4-hermes-admin
+
+on:
+  push:
+    paths:
+      - "machine_spirit_4/hermes_admin/**"
+      - "machine_spirit_4/scripts/runtime_common.py"
+      - "tests/ms4_hermes_admin/**"
+      - ".github/workflows/ms4-hermes-admin.yml"
+  pull_request:
+    paths:
+      - "machine_spirit_4/hermes_admin/**"
+      - "machine_spirit_4/scripts/runtime_common.py"
+      - "tests/ms4_hermes_admin/**"
+      - ".github/workflows/ms4-hermes-admin.yml"
+  workflow_dispatch:
+    inputs:
+      run_jetson_thor_hardware_gate:
+        description: "Run on a registered self-hosted Jetson/Thor ARM64 runner"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ms4-hermes-admin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hosted-contract:
+    name: ${{ matrix.os_family }}-${{ matrix.arch }} / py${{ matrix.python_version }}${{ matrix.tier_suffix }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.11", "3.12", "3.13"]
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - windows-2025
+          - windows-11-arm
+          - macos-15-intel
+          - macos-15
+        include:
+          - runner: ubuntu-24.04
+            os_family: linux
+            arch: x64
+            runner_os: Linux
+            runner_arch: X64
+            python_arch: x64
+            tier_suffix: ""
+          - runner: ubuntu-24.04-arm
+            os_family: linux
+            arch: arm64
+            runner_os: Linux
+            runner_arch: ARM64
+            python_arch: arm64
+            tier_suffix: ""
+          - runner: windows-2025
+            os_family: windows
+            arch: x64
+            runner_os: Windows
+            runner_arch: X64
+            python_arch: x64
+            tier_suffix: ""
+          - runner: windows-11-arm
+            os_family: windows
+            arch: arm64
+            runner_os: Windows
+            runner_arch: ARM64
+            python_arch: arm64
+            tier_suffix: " (runner public preview)"
+          - runner: macos-15-intel
+            os_family: macos
+            arch: x64
+            runner_os: macOS
+            runner_arch: X64
+            python_arch: x64
+            tier_suffix: ""
+          - runner: macos-15
+            os_family: macos
+            arch: arm64
+            runner_os: macOS
+            runner_arch: ARM64
+            python_arch: arm64
+            tier_suffix: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Set up Python ${{ matrix.python_version }} (${{ matrix.python_arch }})
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: ${{ matrix.python_version }}
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Verify native matrix cell
+        env:
+          EXPECTED_OS: ${{ matrix.runner_os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner_arch }}
+          EXPECTED_PYTHON_ARCH: ${{ matrix.arch }}
+          EXPECTED_PYTHON_VERSION: ${{ matrix.python_version }}
+        run: >-
+          python -c "import os, platform, sys;
+          aliases={'amd64':'x64','x86_64':'x64','arm64':'arm64','aarch64':'arm64'};
+          machine=aliases.get(platform.machine().lower(), platform.machine().lower());
+          version=f'{sys.version_info.major}.{sys.version_info.minor}';
+          expected=(os.environ['EXPECTED_OS'], os.environ['EXPECTED_RUNNER_ARCH'], os.environ['EXPECTED_PYTHON_ARCH'], os.environ['EXPECTED_PYTHON_VERSION']);
+          actual=(os.environ.get('RUNNER_OS'), os.environ.get('RUNNER_ARCH'), machine, version);
+          print(f'expected={expected} actual={actual}');
+          raise SystemExit(f'native matrix mismatch: expected {expected}, got {actual}') if actual != expected else None"
+
+      - name: Require provenance executables
+        run: >-
+          python -c "import shutil;
+          missing=[name for name in ('git','ssh-keygen') if shutil.which(name) is None];
+          print('git=' + str(shutil.which('git'))); print('ssh-keygen=' + str(shutil.which('ssh-keygen')));
+          raise SystemExit('missing required provenance executable(s): ' + ', '.join(missing)) if missing else None"
+
+      - name: Install pinned CI and build tooling
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "setuptools==81.0.0"
+          "pytest==9.0.2"
+          "ruff==0.15.10"
+          "PyYAML==6.0.3"
+
+      - name: Record toolchain
+        run: >-
+          python -c "import setuptools, sys, yaml;
+          print(sys.version); print('setuptools=' + setuptools.__version__); print('PyYAML=' + yaml.__version__)"
+      - name: Record executable versions
+        run: |
+          python --version
+          python -m pip --version
+          python -m pytest --version
+          python -m ruff --version
+          git --version
+
+      - name: Ruff owned paths
+        run: >-
+          python -m ruff check
+          --isolated
+          --no-cache
+          --target-version py311
+          --select E4,E7,E9,F
+          --ignore E731
+          machine_spirit_4/hermes_admin
+          machine_spirit_4/scripts/runtime_common.py
+          tests/ms4_hermes_admin
+
+      - name: Byte-compile owned module and tests
+        run: >-
+          python -m compileall -q
+          machine_spirit_4/hermes_admin
+          machine_spirit_4/scripts/runtime_common.py
+          tests/ms4_hermes_admin
+
+      - name: Provenance, installer, state, versioning, and workflow tests
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+          GCM_INTERACTIVE: "Never"
+        # The unaccepted test_git_bash_preflight_candidate_r3.py experiment is
+        # intentionally not an acceptance test. Promote it explicitly after
+        # its trigger-path contract and product implementation agree.
+        run: >-
+          python -m pytest
+          tests/ms4_hermes_admin/test_installer.py
+          tests/ms4_hermes_admin/test_installer_r1.py
+          tests/ms4_hermes_admin/test_isolation_regression_r2.py
+          tests/ms4_hermes_admin/test_provenance_r1.py
+          tests/ms4_hermes_admin/test_state.py
+          tests/ms4_hermes_admin/test_versioning.py
+          tests/ms4_hermes_admin/test_versioning_r1.py
+          tests/ms4_hermes_admin/test_workflow_contract.py
+          -p no:cacheprovider
+          --strict-config
+          --strict-markers
+          -ra
+
+  jetson-thor-hardware-gate:
+    name: HOLD unless dispatched / Jetson- or Thor-class ARM64 / py${{ matrix.python_version }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_jetson_thor_hardware_gate }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.11", "3.12", "3.13"]
+    runs-on: [self-hosted, linux, ARM64, hermes-jetson-thor]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Verify NVIDIA Tegra hardware identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          test -r /etc/nv_tegra_release
+          cat /etc/nv_tegra_release
+
+      - name: Set up Python ${{ matrix.python_version }} ARM64
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: ${{ matrix.python_version }}
+          architecture: arm64
+
+      - name: Require provenance executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v git
+          command -v ssh-keygen
+
+      - name: Install pinned CI and build tooling
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "setuptools==81.0.0"
+          "pytest==9.0.2"
+          "ruff==0.15.10"
+          "PyYAML==6.0.3"
+
+      - name: Provenance, installer, state, versioning, and workflow tests
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+          GCM_INTERACTIVE: "Never"
+        run: >-
+          python -m pytest
+          tests/ms4_hermes_admin/test_installer.py
+          tests/ms4_hermes_admin/test_installer_r1.py
+          tests/ms4_hermes_admin/test_isolation_regression_r2.py
+          tests/ms4_hermes_admin/test_provenance_r1.py
+          tests/ms4_hermes_admin/test_state.py
+          tests/ms4_hermes_admin/test_versioning.py
+          tests/ms4_hermes_admin/test_versioning_r1.py
+          tests/ms4_hermes_admin/test_workflow_contract.py
+          -p no:cacheprovider
+          --strict-config
+          --strict-markers
+          -ra

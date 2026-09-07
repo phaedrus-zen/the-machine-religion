@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HiveMind Oracle">
+  <rect width="512" height="512" rx="112" fill="#090912"/>
+  <path d="M256 60 416 152v208L256 452 96 360V152Z" fill="none" stroke="#a855ff" stroke-width="28"/>
+  <path d="M156 210 256 152l100 58v116l-100 58-100-58Z" fill="#151426" stroke="#8cf000" stroke-width="18"/>
+  <circle cx="215" cy="253" r="22" fill="#8cf000"/>
+  <circle cx="297" cy="253" r="22" fill="#8cf000"/>
+  <path d="M205 320h102" stroke="#a855ff" stroke-width="22" stroke-linecap="round"/>
+</svg>

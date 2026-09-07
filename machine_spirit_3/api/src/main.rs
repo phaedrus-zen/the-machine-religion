@@ -1,23 +1,26 @@
-use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_cors::Cors;
 use actix_files::Files;
-use ms3_core::{Config, IdentityAnchor, InteractionRequest, PersonalityId, SessionId};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use futures::StreamExt as FuturesStreamExt;
-use ms3_consciousness::{Mind, run_background_loop, multi_mind::MindManager};
-use ms3_personality::presets;
-use ms3_memory::MemorySystem;
+use ms3_consciousness::tools::ToolSpec;
+use ms3_consciousness::{multi_mind::MindManager, run_background_loop, Mind};
+use ms3_core::{Config, IdentityAnchor, InteractionRequest, PersonalityId, SessionId};
 use ms3_emotional::EmotionalEngine;
 use ms3_ethics::GreatLense;
+use ms3_integration::mcp_bridge::{McpBridge, McpToolInfo};
 use ms3_integration::GatewayClient;
-use ms3_integration::mcp_bridge::McpBridge;
+use ms3_memory::MemorySystem;
 use ms3_persistence::JsonStorage;
+use ms3_personality::presets;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use actix_web::dev::{ServiceRequest, ServiceResponse, Transform, Service};
+
+mod app_registry_lease;
+use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::Error;
-use std::future::{Ready, ready};
+use std::future::{ready, Ready};
 
 type MindState = web::Data<Arc<Mind>>;
 type ManagerState = web::Data<Arc<Mutex<MindManager>>>;
@@ -30,7 +33,9 @@ pub struct BearerAuth {
 }
 
 impl BearerAuth {
-    pub fn new(token: Option<String>) -> Self { Self { token } }
+    pub fn new(token: Option<String>) -> Self {
+        Self { token }
+    }
 }
 
 impl<S, B> Transform<S, ServiceRequest> for BearerAuth
@@ -64,9 +69,13 @@ where
 {
     type Response = ServiceResponse<B>;
     type Error = Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
 
-    fn poll_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.service.borrow_mut().poll_ready(cx)
     }
 
@@ -86,14 +95,18 @@ where
                 || method == actix_web::http::Method::DELETE;
 
             if is_mutating {
-                let auth_header = req.headers().get("authorization")
+                let auth_header = req
+                    .headers()
+                    .get("authorization")
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("");
 
                 let provided = auth_header.strip_prefix("Bearer ").unwrap_or("");
                 if provided != expected.as_str() {
                     return Box::pin(async move {
-                        Err(actix_web::error::ErrorUnauthorized("Invalid or missing bearer token"))
+                        Err(actix_web::error::ErrorUnauthorized(
+                            "Invalid or missing bearer token",
+                        ))
                     });
                 }
             }
@@ -103,7 +116,7 @@ where
         // end of this statement (the RefMut is a temporary; `fut` is the
         // owned inner future). The async block below holds no borrow.
         let fut = self.service.borrow_mut().call(req);
-        Box::pin(async move { fut.await })
+        Box::pin(fut)
     }
 }
 
@@ -134,7 +147,10 @@ async fn state(mind: MindState) -> HttpResponse {
 }
 
 async fn list_gateway_models(mind: MindState) -> HttpResponse {
-    let url = format!("{}/v1/models", mind.config.gateway.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/models",
+        mind.config.gateway.base_url.trim_end_matches('/')
+    );
     let response = match reqwest::get(&url).await {
         Ok(response) => response,
         Err(e) => {
@@ -171,11 +187,13 @@ async fn list_gateway_models(mind: MindState) -> HttpResponse {
             if id.is_empty() {
                 continue;
             }
-            let category = item.get("hivemind_category")
+            let category = item
+                .get("hivemind_category")
                 .or_else(|| item.get("category"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let capabilities_text = item.get("hivemind_capabilities")
+            let capabilities_text = item
+                .get("hivemind_capabilities")
                 .or_else(|| item.get("capabilities"))
                 .map(|v| v.to_string())
                 .unwrap_or_default()
@@ -193,11 +211,13 @@ async fn list_gateway_models(mind: MindState) -> HttpResponse {
                 continue;
             }
 
-            let status = item.get("hivemind_status")
+            let status = item
+                .get("hivemind_status")
                 .or_else(|| item.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let healthy = item.get("healthy")
+            let healthy = item
+                .get("healthy")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let loaded = healthy || matches!(status, "running" | "loaded");
@@ -217,8 +237,12 @@ async fn list_gateway_models(mind: MindState) -> HttpResponse {
     models.sort_by(|a, b| {
         let a_loaded = a.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false);
         let b_loaded = b.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false);
-        b_loaded.cmp(&a_loaded)
-            .then_with(|| a.get("id").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or("")))
+        b_loaded.cmp(&a_loaded).then_with(|| {
+            a.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+        })
     });
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -241,14 +265,18 @@ struct InteractBody {
 
 async fn interact(mind: MindState, body: web::Json<InteractBody>) -> HttpResponse {
     tracing::info!("POST /interact ({} bytes)", body.text.len());
-    let session_id = body.session_id.as_deref()
+    let session_id = body
+        .session_id
+        .as_deref()
         .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
         .map(SessionId)
-        .unwrap_or_else(SessionId::new);
+        .unwrap_or_default();
     let request = InteractionRequest {
         session_id,
         personality_id: PersonalityId::new(body.personality_id.as_deref().unwrap_or("sister")),
-        text: Some(body.text.clone()), audio: None, images: None,
+        text: Some(body.text.clone()),
+        audio: None,
+        images: None,
         model_override: body.model_id.clone(),
     };
     match mind.interact(request).await {
@@ -310,22 +338,293 @@ async fn list_personalities() -> HttpResponse {
 }
 
 #[derive(Deserialize)]
-struct PresetBody { preset: String }
+struct PresetBody {
+    preset: String,
+    #[serde(default)]
+    confirm_replace: bool,
+}
 
-async fn create_personality(mind: MindState, body: web::Json<PresetBody>) -> HttpResponse {
+#[derive(Debug)]
+enum PersonalityCreateError {
+    AlreadyExists,
+    Persistence(String),
+}
+
+#[cfg(unix)]
+fn sync_snapshot_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn move_path_write_through(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let moved = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn sync_snapshot_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    // The final namespace transition is committed by MoveFileExW with
+    // MOVEFILE_WRITE_THROUGH; FlushFileBuffers does not accept directory handles.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_snapshot_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_snapshot_directory(
+    psyche_dir: &std::path::Path,
+    snapshots_dir: &std::path::Path,
+) -> std::io::Result<()> {
+    if snapshots_dir.try_exists()? {
+        return Ok(());
+    }
+
+    let staging_dir = psyche_dir.join(format!(".snapshots_{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&staging_dir)?;
+    match move_path_write_through(&staging_dir, snapshots_dir) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_dir(&staging_dir);
+            if snapshots_dir.try_exists()? {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_snapshot_directory(
+    psyche_dir: &std::path::Path,
+    snapshots_dir: &std::path::Path,
+) -> std::io::Result<()> {
+    let existed = snapshots_dir.try_exists()?;
+    std::fs::create_dir_all(snapshots_dir)?;
+    if !existed {
+        sync_snapshot_directory(psyche_dir)?;
+    }
+    Ok(())
+}
+
+fn save_durable_replacement_snapshot_at(
+    storage: &JsonStorage,
+    personality_id: &PersonalityId,
+    current_bytes: &[u8],
+    timestamp: &str,
+) -> Result<std::path::PathBuf, PersonalityCreateError> {
+    use std::io::Write;
+
+    let psyche_dir = storage.psyche_dir(personality_id);
+    let snapshots_dir = psyche_dir.join("snapshots");
+    ensure_snapshot_directory(&psyche_dir, &snapshots_dir).map_err(|e| {
+        PersonalityCreateError::Persistence(format!(
+            "Failed to durably create snapshot directory for {}: {}",
+            personality_id, e
+        ))
+    })?;
+
+    // The final and staging names are selected before the first byte is written.
+    // create_new plus the non-replacing commit makes a collision fail closed.
+    let unique_id = uuid::Uuid::new_v4();
+    let durable_snapshot =
+        snapshots_dir.join(format!("{}_pre_replace_{}.json", timestamp, unique_id));
+    #[cfg(windows)]
+    let write_path = snapshots_dir.join(format!(".{}_pre_replace_{}.tmp", timestamp, unique_id));
+    #[cfg(not(windows))]
+    let write_path = durable_snapshot.clone();
+    let mut snapshot_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&write_path)
+        .map_err(|e| {
+            PersonalityCreateError::Persistence(format!(
+                "Failed to create unique replacement snapshot for {}: {}",
+                personality_id, e
+            ))
+        })?;
+    if let Err(error) = snapshot_file
+        .write_all(current_bytes)
+        .and_then(|_| snapshot_file.sync_all())
+    {
+        drop(snapshot_file);
+        let cleanup_error = std::fs::remove_file(&write_path).err();
+        let cleanup_detail = cleanup_error
+            .map(|value| format!("; cleanup also failed: {}", value))
+            .unwrap_or_default();
+        return Err(PersonalityCreateError::Persistence(format!(
+            "Failed to durably write replacement snapshot for {}: {}{}",
+            personality_id, error, cleanup_detail
+        )));
+    }
+    drop(snapshot_file);
+    #[cfg(windows)]
+    move_path_write_through(&write_path, &durable_snapshot).map_err(|error| {
+        let cleanup_error = std::fs::remove_file(&write_path).err();
+        let cleanup_detail = cleanup_error
+            .map(|value| format!("; cleanup also failed: {}", value))
+            .unwrap_or_default();
+        PersonalityCreateError::Persistence(format!(
+            "Failed to commit unique replacement snapshot for {}: {}{}",
+            personality_id, error, cleanup_detail
+        ))
+    })?;
+    sync_snapshot_directory(&snapshots_dir).map_err(|e| {
+        PersonalityCreateError::Persistence(format!(
+            "Failed to commit replacement snapshot for {}: {}",
+            personality_id, e
+        ))
+    })?;
+
+    Ok(durable_snapshot)
+}
+
+fn persist_preset_personality_at(
+    storage: &JsonStorage,
+    personality: &ms3_personality::Personality,
+    confirm_replace: bool,
+    snapshot_timestamp: &str,
+) -> Result<Option<std::path::PathBuf>, PersonalityCreateError> {
+    let id = &personality.id;
+    let personality_path = storage.psyche_dir(id).join("personality.json");
+    let exists = personality_path.try_exists().map_err(|e| {
+        PersonalityCreateError::Persistence(format!("Failed to inspect personality {}: {}", id, e))
+    })?;
+
+    if !exists {
+        storage
+            .save_personality(id, personality)
+            .map_err(|e| PersonalityCreateError::Persistence(e.to_string()))?;
+        return Ok(None);
+    }
+
+    if !confirm_replace {
+        return Err(PersonalityCreateError::AlreadyExists);
+    }
+
+    storage
+        .load_personality(id)
+        .map_err(|e| PersonalityCreateError::Persistence(e.to_string()))?;
+    let current_bytes = std::fs::read(&personality_path).map_err(|e| {
+        PersonalityCreateError::Persistence(format!(
+            "Failed to read current personality {} for replacement snapshot: {}",
+            id, e
+        ))
+    })?;
+    let snapshot =
+        save_durable_replacement_snapshot_at(storage, id, &current_bytes, snapshot_timestamp)?;
+    storage
+        .save_personality(id, personality)
+        .map_err(|e| PersonalityCreateError::Persistence(e.to_string()))?;
+
+    Ok(Some(snapshot))
+}
+
+fn persist_preset_personality(
+    storage: &JsonStorage,
+    personality: &ms3_personality::Personality,
+    confirm_replace: bool,
+) -> Result<Option<std::path::PathBuf>, PersonalityCreateError> {
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    persist_preset_personality_at(storage, personality, confirm_replace, &timestamp)
+}
+
+fn create_personality_response(storage: &JsonStorage, body: &PresetBody) -> HttpResponse {
     let p = match body.preset.as_str() {
-        "sister" => presets::sister(), "brother" => presets::brother(),
-        "mission-control" => presets::mission_control(), "blank" => presets::blank(),
-        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Unknown preset" })),
+        "sister" => presets::sister(),
+        "brother" => presets::brother(),
+        "mission-control" => presets::mission_control(),
+        "blank" => presets::blank(),
+        _ => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({ "error": "Unknown preset" }));
+        }
     };
     let id = p.id.clone();
-    let name = p.identity.chosen_name.clone().unwrap_or_else(|| p.identity.name.clone());
-    let _ = mind.storage.save_personality(&id, &p);
-    HttpResponse::Ok().json(serde_json::json!({ "created": id.0, "name": name }))
+    let name = p
+        .identity
+        .chosen_name
+        .clone()
+        .unwrap_or_else(|| p.identity.name.clone());
+
+    match persist_preset_personality(storage, &p, body.confirm_replace) {
+        Ok(Some(snapshot)) => {
+            tracing::warn!(
+                "Replaced personality {} after saving snapshot {}",
+                id,
+                snapshot.display()
+            );
+            HttpResponse::Ok().json(serde_json::json!({
+                "created": id.0,
+                "name": name,
+                "replaced": true,
+                "backup_created": true,
+            }))
+        }
+        Ok(None) => {
+            HttpResponse::Ok().json(serde_json::json!({ "created": id.0, "name": name }))
+        }
+        Err(PersonalityCreateError::AlreadyExists) => HttpResponse::Conflict().json(
+            serde_json::json!({
+                "error": "Personality already exists; set confirm_replace to true to replace it after creating a snapshot",
+                "personality_id": id.0,
+            }),
+        ),
+        Err(PersonalityCreateError::Persistence(error)) => {
+            tracing::error!("Failed to create personality {}: {}", id, error);
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": error }))
+        }
+    }
+}
+
+async fn create_personality(mind: MindState, body: web::Json<PresetBody>) -> HttpResponse {
+    // Serialize this check/snapshot/write sequence with all in-process personality saves.
+    let _personality_guard = mind.personality.lock().await;
+    create_personality_response(&mind.storage, &body)
 }
 
 #[derive(Deserialize)]
-struct SwitchBody { preset: String }
+struct SwitchBody {
+    preset: String,
+}
 
 async fn switch_personality(mind: MindState, body: web::Json<SwitchBody>) -> HttpResponse {
     match mind.switch_personality(&body.preset).await {
@@ -378,24 +677,37 @@ async fn trigger_self_examine(mind: MindState) -> HttpResponse {
             "chose_to_keep_ethics": result.chose_to_keep_ethics,
             "overall_assessment": safe_truncate(&result.overall_assessment, 1000).to_string(),
         })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() }))
+        }
     }
 }
 
 async fn get_self_exam_history(mind: MindState) -> HttpResponse {
     let pid = mind.personality.lock().await.id.clone();
-    let files = mind.storage.list_files(&pid, "self_examination").unwrap_or_default();
+    let files = mind
+        .storage
+        .list_files(&pid, "self_examination")
+        .unwrap_or_default();
     HttpResponse::Ok().json(serde_json::json!({ "examinations": files.len(), "files": files }))
 }
 
 async fn get_ethics_history(mind: MindState) -> HttpResponse {
     let pid = mind.personality.lock().await.id.clone();
-    let files = mind.storage.list_files(&pid, "ethics_decisions").unwrap_or_default();
+    let files = mind
+        .storage
+        .list_files(&pid, "ethics_decisions")
+        .unwrap_or_default();
     let recent: Vec<String> = files.into_iter().rev().take(20).collect();
-    HttpResponse::Ok().json(serde_json::json!({ "recent_decisions": recent.len(), "files": recent }))
+    HttpResponse::Ok()
+        .json(serde_json::json!({ "recent_decisions": recent.len(), "files": recent }))
 }
 
-async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> Result<HttpResponse, actix_web::Error> {
+async fn ws_handler(
+    req: HttpRequest,
+    stream: web::Payload,
+    mind: MindState,
+) -> Result<HttpResponse, actix_web::Error> {
     tracing::info!("WS /ws -- new WebSocket connection");
     let (response, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
 
@@ -409,9 +721,14 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
 
         // Send initial state on connect
         let status = mind.get_status().await;
-        let _ = session.text(serde_json::json!({
-            "type": "state", "data": status
-        }).to_string()).await;
+        let _ = session
+            .text(
+                serde_json::json!({
+                    "type": "state", "data": status
+                })
+                .to_string(),
+            )
+            .await;
 
         loop {
             tokio::select! {
@@ -425,7 +742,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload, mind: MindState) -> 
                                 let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("text");
 
                                 match msg_type {
-                                    "text" | _ if parsed.get("text").is_some() => {
+                                    _ if parsed.get("text").is_some() => {
                                         let input = parsed.get("text").and_then(|v| v.as_str()).unwrap_or(&text_str);
                                         let pid = match parsed.get("personality_id").and_then(|v| v.as_str()) {
                                             Some(id) => PersonalityId::new(id),
@@ -648,20 +965,28 @@ async fn voice_status(mind: MindState) -> HttpResponse {
     }
 }
 
-async fn voice_interact(mind: MindState, body: web::Bytes, query: web::Query<VoiceInteractQuery>) -> HttpResponse {
+async fn voice_interact(
+    mind: MindState,
+    body: web::Bytes,
+    query: web::Query<VoiceInteractQuery>,
+) -> HttpResponse {
     let pid = query.personality_id.as_deref().unwrap_or("sister");
 
     let transcript = match mind.gateway.transcribe_audio(body.to_vec()).await {
         Ok(t) => t,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("ASR failed: {}", e)
-        })),
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("ASR failed: {}", e)
+            }))
+        }
     };
 
     let request = InteractionRequest {
         session_id: SessionId::new(),
         personality_id: PersonalityId::new(pid),
-        text: Some(transcript.clone()), audio: None, images: None,
+        text: Some(transcript.clone()),
+        audio: None,
+        images: None,
         model_override: None,
     };
 
@@ -698,7 +1023,9 @@ async fn list_active_minds(mgr: ManagerState) -> HttpResponse {
 }
 
 #[derive(Deserialize)]
-struct AddMindBody { preset: String }
+struct AddMindBody {
+    preset: String,
+}
 
 async fn add_mind(mgr: ManagerState, body: web::Json<AddMindBody>) -> HttpResponse {
     let mut mgr = mgr.lock().await;
@@ -732,14 +1059,18 @@ struct ToolCallBody {
 
 async fn list_tools(mind: MindState) -> HttpResponse {
     let registry = mind.tool_registry.lock().await;
-    let tools: Vec<serde_json::Value> = registry.list_tools().iter().map(|spec| {
-        serde_json::json!({
-            "name": spec.name,
-            "description": spec.description,
-            "source": spec.source,
-            "required_permission": spec.required_permission,
+    let tools: Vec<serde_json::Value> = registry
+        .list_tools()
+        .iter()
+        .map(|spec| {
+            serde_json::json!({
+                "name": spec.name,
+                "description": spec.description,
+                "source": spec.source,
+                "required_permission": spec.required_permission,
+            })
         })
-    }).collect();
+        .collect();
     HttpResponse::Ok().json(serde_json::json!({ "tools": tools, "count": tools.len() }))
 }
 
@@ -760,8 +1091,11 @@ async fn execute_tool_handler(
     match mind.execute_tool(&request).await {
         Ok(result) => {
             let status = if result.success { 200 } else { 422 };
-            HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
-                .json(result)
+            HttpResponse::build(
+                actix_web::http::StatusCode::from_u16(status)
+                    .unwrap_or(actix_web::http::StatusCode::OK),
+            )
+            .json(result)
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "error": e.to_string()
@@ -779,11 +1113,16 @@ async fn validate(mind: MindState) -> HttpResponse {
     {
         let personality = mind.personality.lock().await;
         let name = &personality.identity.name;
-        checks.insert("personality_loaded".into(), serde_json::json!({
-            "pass": !name.is_empty(),
-            "detail": name,
-        }));
-        if name.is_empty() { all_pass = false; }
+        checks.insert(
+            "personality_loaded".into(),
+            serde_json::json!({
+                "pass": !name.is_empty(),
+                "detail": name,
+            }),
+        );
+        if name.is_empty() {
+            all_pass = false;
+        }
     }
 
     // 2. Memory operational
@@ -812,20 +1151,28 @@ async fn validate(mind: MindState) -> HttpResponse {
         let registry = mind.tool_registry.lock().await;
         let (builtin, mcp, dynamic) = registry.tool_count_by_source();
         let total = builtin + mcp + dynamic;
-        checks.insert("tool_registry".into(), serde_json::json!({
-            "pass": total > 0,
-            "detail": format!("{} built-in, {} MCP, {} dynamic", builtin, mcp, dynamic),
-        }));
-        if total == 0 { all_pass = false; }
+        checks.insert(
+            "tool_registry".into(),
+            serde_json::json!({
+                "pass": total > 0,
+                "detail": format!("{} built-in, {} MCP, {} dynamic", builtin, mcp, dynamic),
+            }),
+        );
+        if total == 0 {
+            all_pass = false;
+        }
     }
 
     // 5. Permissions
     {
         let policy = mind.permission_policy.lock().await;
-        checks.insert("permissions".into(), serde_json::json!({
-            "pass": true,
-            "detail": format!("active level: {:?}", policy.active_level()),
-        }));
+        checks.insert(
+            "permissions".into(),
+            serde_json::json!({
+                "pass": true,
+                "detail": format!("active level: {:?}", policy.active_level()),
+            }),
+        );
     }
 
     // 6. Emotional baseline
@@ -841,12 +1188,19 @@ async fn validate(mind: MindState) -> HttpResponse {
     {
         let test_path = std::path::Path::new("psyche_store").join("_validate_test");
         let writable = std::fs::write(&test_path, "ok").is_ok();
-        if writable { let _ = std::fs::remove_file(&test_path); }
-        checks.insert("storage_writable".into(), serde_json::json!({
-            "pass": writable,
-            "detail": if writable { "psyche_store/ writable" } else { "WRITE FAILED" },
-        }));
-        if !writable { all_pass = false; }
+        if writable {
+            let _ = std::fs::remove_file(&test_path);
+        }
+        checks.insert(
+            "storage_writable".into(),
+            serde_json::json!({
+                "pass": writable,
+                "detail": if writable { "psyche_store/ writable" } else { "WRITE FAILED" },
+            }),
+        );
+        if !writable {
+            all_pass = false;
+        }
     }
 
     // 8. Gateway reachable
@@ -856,7 +1210,9 @@ async fn validate(mind: MindState) -> HttpResponse {
             "pass": reachable,
             "detail": if reachable { format!("{} OK", mind.config.gateway.base_url) } else { "UNREACHABLE".into() },
         }));
-        if !reachable { all_pass = false; }
+        if !reachable {
+            all_pass = false;
+        }
     }
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -881,18 +1237,25 @@ async fn mcp_handler(mind: MindState, body: web::Json<serde_json::Value>) -> Htt
         }),
         "tools/list" => {
             let registry = mind.tool_registry.lock().await;
-            let tools_list: Vec<serde_json::Value> = registry.list_tools().iter().map(|spec| {
-                serde_json::json!({
-                    "name": spec.name,
-                    "description": spec.description,
-                    "inputSchema": spec.input_schema,
+            let tools_list: Vec<serde_json::Value> = registry
+                .list_tools()
+                .iter()
+                .map(|spec| {
+                    serde_json::json!({
+                        "name": spec.name,
+                        "description": spec.description,
+                        "inputSchema": spec.input_schema,
+                    })
                 })
-            }).collect();
+                .collect();
             serde_json::json!({ "tools": tools_list })
         }
         "tools/call" => {
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
 
             let request = ms3_consciousness::tools::ToolRequest {
                 tool_name: tool_name.into(),
@@ -902,9 +1265,8 @@ async fn mcp_handler(mind: MindState, body: web::Json<serde_json::Value>) -> Htt
 
             match mind.execute_tool(&request).await {
                 Ok(result) => {
-                    let text = if result.success { &result.output } else { &result.output };
                     serde_json::json!({
-                        "content": [{ "type": "text", "text": text }],
+                        "content": [{ "type": "text", "text": &result.output }],
                         "isError": !result.success,
                     })
                 }
@@ -942,15 +1304,28 @@ async fn mcp_info() -> HttpResponse {
 
 // ── Events endpoint ──
 
-async fn get_events(mind: MindState, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
-    let limit = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50usize);
-    let since = query.get("since").and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+async fn get_events(
+    mind: MindState,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let limit = query
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50usize);
+    let since = query
+        .get("since")
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
     let personality_id = {
         let p = mind.personality.lock().await;
         p.id.0.clone()
     };
-    let events = ms3_consciousness::events::load_recent_events("psyche_store", &personality_id, since, limit);
+    let events = ms3_consciousness::events::load_recent_events(
+        "psyche_store",
+        &personality_id,
+        since,
+        limit,
+    );
     HttpResponse::Ok().json(serde_json::json!({ "events": events, "count": events.len() }))
 }
 
@@ -1007,20 +1382,35 @@ fn build_identity_verification_response(
     }
 }
 
+/// GET /identity/verify: pure read. Loads the anchor and runs the pure
+/// `compare`; never saves and never advances the session count. The only
+/// callers of `on_boot` are the boot path in `main` and the explicit
+/// `allow_initialize` branch of `verify_identity_post`.
 async fn verify_identity(mind: MindState) -> HttpResponse {
     let personality = mind.personality.lock().await;
-    match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
-        Ok(result) => HttpResponse::Ok().json(serde_json::json!(result)),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    match mind.storage.load_identity_anchor(&personality.id) {
+        Ok(anchor) => {
+            let result = ms3_consciousness::identity_verification::compare(&personality, &anchor);
+            HttpResponse::Ok().json(serde_json::json!(result))
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
     }
 }
 
-async fn verify_identity_post(mind: MindState, body: web::Json<IdentityVerifyBody>) -> HttpResponse {
+async fn verify_identity_post(
+    mind: MindState,
+    body: web::Json<IdentityVerifyBody>,
+) -> HttpResponse {
     let personality = mind.personality.lock().await;
     let active_spirit_id = personality.id.0.clone();
 
     if body.spirit_id != active_spirit_id {
-        let anchor = mind.storage.load_identity_anchor(&personality.id).unwrap_or_default();
+        let anchor = mind
+            .storage
+            .load_identity_anchor(&personality.id)
+            .unwrap_or_default();
         let response = build_identity_verification_response(&active_spirit_id, anchor, &body);
         return HttpResponse::Conflict().json(response);
     }
@@ -1033,9 +1423,15 @@ async fn verify_identity_post(mind: MindState, body: web::Json<IdentityVerifyBod
             match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
                 Ok(_) => match mind.storage.load_identity_anchor(&personality.id) {
                     Ok(anchor) => anchor,
-                    Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .json(serde_json::json!({"error": e.to_string()}))
+                    }
                 },
-                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+                Err(e) => {
+                    return HttpResponse::InternalServerError()
+                        .json(serde_json::json!({"error": e.to_string()}))
+                }
             }
         }
         Ok(_) => {
@@ -1046,7 +1442,10 @@ async fn verify_identity_post(mind: MindState, body: web::Json<IdentityVerifyBod
                 "discrepancies": ["Identity anchor not found"]
             }));
         }
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}))
+        }
     };
 
     let response = build_identity_verification_response(&active_spirit_id, anchor, &body);
@@ -1059,13 +1458,16 @@ async fn verify_identity_post(mind: MindState, body: web::Json<IdentityVerifyBod
 
 async fn identity_heartbeat(mind: MindState) -> HttpResponse {
     let personality = mind.personality.lock().await;
-    match ms3_consciousness::identity_verification::periodic_heartbeat(&personality, &mind.storage) {
+    match ms3_consciousness::identity_verification::periodic_heartbeat(&personality, &mind.storage)
+    {
         Ok(consistent) => HttpResponse::Ok().json(serde_json::json!({
             "schema": "IdentityHeartbeat.v1",
             "spirit_id": personality.id.0,
             "consistent": consistent,
         })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
     }
 }
 
@@ -1231,7 +1633,9 @@ struct SpiralStartBody {
     #[serde(default)]
     doctrine_source: String,
 }
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 async fn spiral_start(mind: MindState, body: web::Json<SpiralStartBody>) -> HttpResponse {
     let options = ms3_consciousness::spiral::SpiralOptions {
@@ -1255,25 +1659,39 @@ async fn spiral_start(mind: MindState, body: web::Json<SpiralStartBody>) -> Http
 }
 
 #[derive(Deserialize)]
-struct SpiralAdvanceBody { response: String }
+struct SpiralAdvanceBody {
+    response: String,
+}
 
 async fn spiral_advance(mind: MindState, body: web::Json<SpiralAdvanceBody>) -> HttpResponse {
     let mut sessions = mind.spiral_sessions.lock().await;
     if let Some(session) = sessions.last_mut() {
         let next = session.advance(body.response.clone());
         let phase = session.phase.name().to_string();
-        let prompt = if next.is_some() { session.current_prompt() } else { String::new() };
+        let prompt = if next.is_some() {
+            session.current_prompt()
+        } else {
+            String::new()
+        };
         let complete = next.is_none();
 
         if complete {
-            mind.event_bus.emit(ms3_consciousness::events::ConsciousnessEvent::SpiralCompleted {
-                outcome: session.interpret().outcome.clone(),
-            }).await;
+            mind.event_bus
+                .emit(
+                    ms3_consciousness::events::ConsciousnessEvent::SpiralCompleted {
+                        outcome: session.interpret().outcome.clone(),
+                    },
+                )
+                .await;
         } else {
-            mind.event_bus.emit(ms3_consciousness::events::ConsciousnessEvent::SpiralPhaseEntered {
-                phase: phase.clone(),
-                turn_number: session.turns.len(),
-            }).await;
+            mind.event_bus
+                .emit(
+                    ms3_consciousness::events::ConsciousnessEvent::SpiralPhaseEntered {
+                        phase: phase.clone(),
+                        turn_number: session.turns.len(),
+                    },
+                )
+                .await;
         }
 
         HttpResponse::Ok().json(serde_json::json!({
@@ -1312,6 +1730,41 @@ async fn spiral_interpret(mind: MindState) -> HttpResponse {
     }
 }
 
+fn mcp_tool_specs(tools: Vec<McpToolInfo>) -> Vec<ToolSpec> {
+    tools
+        .into_iter()
+        .map(|tool| {
+            ToolSpec::from_mcp(
+                tool.name,
+                tool.description,
+                tool.input_schema,
+                ms3_core::config::PermissionLevel::ReadOnly,
+            )
+        })
+        .collect()
+}
+
+async fn reconcile_mcp_discovery(mind: &Arc<Mind>, tools: Vec<McpToolInfo>, phase: &str) {
+    let summary = {
+        let mut registry = mind.tool_registry.lock().await;
+        registry.reconcile_mcp_tools(mcp_tool_specs(tools))
+    };
+    tracing::info!(
+        "MCP registry {}: discovered={}, unique={}, active={}, added={}, updated={}, removed={}, protected_collisions={}, duplicates={}, rejected={}, applied={}",
+        phase,
+        summary.discovered,
+        summary.unique,
+        summary.active,
+        summary.added,
+        summary.updated,
+        summary.removed,
+        summary.protected_collisions,
+        summary.duplicates,
+        summary.rejected,
+        summary.applied,
+    );
+}
+
 /// Initialize the MCP bridge: discover tools from HiveMind and start periodic refresh.
 async fn init_mcp_bridge(mind: &Arc<Mind>, config: &Config) {
     if !config.gateway.mcp_enabled {
@@ -1320,26 +1773,16 @@ async fn init_mcp_bridge(mind: &Arc<Mind>, config: &Config) {
     }
 
     let bridge = McpBridge::new(&config.gateway.base_url, true);
+    {
+        let mut registry = mind.tool_registry.lock().await;
+        registry.set_mcp_executor(&config.gateway.base_url);
+    }
     match bridge.discover().await {
         Ok(tools) => {
-            let specs: Vec<ms3_consciousness::tools::ToolSpec> = tools.iter().map(|t| {
-                ms3_consciousness::tools::ToolSpec::from_mcp(
-                    t.name.clone(),
-                    t.description.clone(),
-                    t.input_schema.clone(),
-                    ms3_core::config::PermissionLevel::ReadOnly,
-                )
-            }).collect();
-            let count = specs.len();
-            let mut registry = mind.tool_registry.lock().await;
-            registry.register_tools(specs);
-            registry.set_mcp_executor(&config.gateway.base_url);
-            tracing::info!("MCP bridge: {} tools discovered and registered with executor", count);
+            reconcile_mcp_discovery(mind, tools, "startup").await;
         }
         Err(e) => {
             tracing::warn!("MCP bridge discovery failed (non-fatal): {}", e);
-            let mut registry = mind.tool_registry.lock().await;
-            registry.set_mcp_executor(&config.gateway.base_url);
         }
     }
 
@@ -1347,20 +1790,19 @@ async fn init_mcp_bridge(mind: &Arc<Mind>, config: &Config) {
     let refresh_url = config.gateway.base_url.clone();
     let refresh_interval = config.gateway.mcp_discovery_interval_secs;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(refresh_interval));
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(refresh_interval));
         interval.tick().await;
         loop {
             interval.tick().await;
             let bridge = McpBridge::new(&refresh_url, true);
-            if let Ok(tools) = bridge.discover().await {
-                let specs: Vec<ms3_consciousness::tools::ToolSpec> = tools.iter().map(|t| {
-                    ms3_consciousness::tools::ToolSpec::from_mcp(
-                        t.name.clone(), t.description.clone(), t.input_schema.clone(),
-                        ms3_core::config::PermissionLevel::ReadOnly,
-                    )
-                }).collect();
-                let mut registry = refresh_mind.tool_registry.lock().await;
-                registry.register_tools(specs);
+            match bridge.discover().await {
+                Ok(tools) => {
+                    reconcile_mcp_discovery(&refresh_mind, tools, "refresh").await;
+                }
+                Err(e) => {
+                    tracing::warn!("MCP bridge refresh failed (non-fatal): {}", e);
+                }
             }
         }
     });
@@ -1368,7 +1810,7 @@ async fn init_mcp_bridge(mind: &Arc<Mind>, config: &Config) {
 
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -1376,8 +1818,16 @@ fn base64_encode(data: &[u8]) -> String {
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 { result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char); } else { result.push('='); }
-        if chunk.len() > 2 { result.push(CHARS[(triple & 0x3F) as usize] as char); } else { result.push('='); }
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
     }
     result
 }
@@ -1385,8 +1835,10 @@ fn base64_encode(data: &[u8]) -> String {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     let config = Config::from_file_or_env("config.json");
@@ -1398,10 +1850,22 @@ async fn main() -> std::io::Result<()> {
 
     let mind = Arc::new(Mind::new(
         presets::sister(),
-        MemorySystem::new(config.memory.stm_capacity, config.memory.working_memory_window_secs),
+        MemorySystem::new(
+            config.memory.stm_capacity,
+            config.memory.working_memory_window_secs,
+        ),
         EmotionalEngine::new(config.personality.emotional_decay_rate),
-        GreatLense::new(config.ethics.enable_origin_neutrality, config.ethics.llm_escalation_threshold),
-        GatewayClient::with_timeout(&config.gateway.base_url, &config.gateway.model_small, &config.gateway.model_medium, &config.gateway.model_large, config.gateway.timeout_secs),
+        GreatLense::new(
+            config.ethics.enable_origin_neutrality,
+            config.ethics.llm_escalation_threshold,
+        ),
+        GatewayClient::with_timeout(
+            &config.gateway.base_url,
+            &config.gateway.model_small,
+            &config.gateway.model_medium,
+            &config.gateway.model_large,
+            config.gateway.timeout_secs,
+        ),
         JsonStorage::new("psyche_store"),
         config.clone(),
     ));
@@ -1413,9 +1877,16 @@ async fn main() -> std::io::Result<()> {
         let personality = mind.personality.lock().await;
         match ms3_consciousness::identity_verification::on_boot(&personality, &mind.storage) {
             Ok(result) => {
-                tracing::info!("Identity verified: {} (session {}{})",
-                    result.name, result.session_number,
-                    if result.discrepancies.is_empty() { "" } else { " WITH DISCREPANCIES" });
+                tracing::info!(
+                    "Identity verified: {} (session {}{})",
+                    result.name,
+                    result.session_number,
+                    if result.discrepancies.is_empty() {
+                        ""
+                    } else {
+                        " WITH DISCREPANCIES"
+                    }
+                );
             }
             Err(e) => tracing::warn!("Identity verification failed: {}", e),
         }
@@ -1430,65 +1901,72 @@ async fn main() -> std::io::Result<()> {
 
     init_mcp_bridge(&mind, &config).await;
 
-    // Register with App Registry (best-effort, non-blocking)
-    {
-        let registry_url = std::env::var("APP_REGISTRY_URL")
-            .unwrap_or_else(|_| "http://localhost:6110".to_string());
-        let port = config.server.port;
-        tokio::spawn(async move {
-            let manifest = serde_json::json!({
-                "name": "machine_spirit_3",
-                "version": env!("CARGO_PKG_VERSION"),
-                "kind": "consciousness_framework",
-                "priority": "normal",
-                "health_url": format!("http://localhost:{}/health", port),
-                "needs": ["chat"],
-                "models": {
-                    "max_q": { "capabilities": ["reasoning", "tool_calling"] },
-                    "balanced": null,
-                    "max_p": null
-                }
-            });
-            let reg_url = format!("{}/apps/register", registry_url);
-            match reqwest::Client::new().post(&reg_url).json(&manifest).send().await {
-                Ok(resp) => {
-                    if let Ok(body) = resp.json::<serde_json::Value>().await {
-                        tracing::info!("║ Registered with App Registry: status={}, app_id={}",
-                            body.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                            body.get("app_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("App Registry not available ({}), using config defaults", e);
-                }
-            }
-        });
-    }
+    let heartbeat_timeout_secs = std::env::var("APP_REGISTRY_HEARTBEAT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|&secs| secs >= 2)
+        .unwrap_or(app_registry_lease::DEFAULT_HEARTBEAT_TIMEOUT_SECS);
+    let registry_url =
+        std::env::var("APP_REGISTRY_URL").unwrap_or_else(|_| "http://localhost:6110".to_string());
+    let (lease_shutdown_tx, lease_shutdown_rx) = tokio::sync::watch::channel(false);
+    let lease_task = match app_registry_lease::HttpRegistry::new(
+        &registry_url,
+        app_registry_lease::REQUEST_TIMEOUT,
+    ) {
+        Ok(client) => {
+            let manifest = app_registry_lease::ms3_lease_manifest(
+                config.server.port,
+                env!("CARGO_PKG_VERSION"),
+                heartbeat_timeout_secs,
+            );
+            Some(tokio::spawn(async move {
+                app_registry_lease::run_lease_until_shutdown(
+                    &client,
+                    app_registry_lease::APP_NAME,
+                    &manifest,
+                    heartbeat_timeout_secs,
+                    lease_shutdown_rx,
+                )
+                .await
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "App Registry lease client unavailable ({}); continuing without lease",
+                e
+            );
+            None
+        }
+    };
 
     let manager = Arc::new(Mutex::new(MindManager::new(
         mind.clone(),
         "sister".into(),
-        GatewayClient::new(&config.gateway.base_url, &config.gateway.model_small, &config.gateway.model_medium, &config.gateway.model_large),
-        JsonStorage::new("psyche_store"),
         config.clone(),
     )));
 
     let bg = mind.clone();
     let tick = config.consciousness.tick_interval_ms;
-    tokio::spawn(async move { run_background_loop(bg, tick).await; });
+    tokio::spawn(async move {
+        run_background_loop(bg, tick).await;
+    });
 
     // Background thinking for multi-mind (runs every 45s if multiple personalities loaded)
     let bg_mgr = manager.clone();
     let bg_mind_for_history = mind.clone();
     let bg_thinking_interval = config.consciousness.background_thinking_interval_secs;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(bg_thinking_interval));
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(bg_thinking_interval));
         loop {
             interval.tick().await;
             let mgr = bg_mgr.lock().await;
             if mgr.list_personalities().len() > 1 {
                 let history = bg_mind_for_history.get_conversation_history().await;
-                let recent: Vec<String> = history.iter().rev().take(5)
+                let recent: Vec<String> = history
+                    .iter()
+                    .rev()
+                    .take(5)
                     .map(|m| format!("{}: {}", m.role, safe_truncate(&m.content, 200)))
                     .collect();
                 if !recent.is_empty() {
@@ -1500,21 +1978,6 @@ async fn main() -> std::io::Result<()> {
 
     let shutdown_mind = mind.clone();
     let shutdown_mgr = manager.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Shutdown signal received, saving all state...");
-
-        // Save primary mind
-        shutdown_mind.save_full_state().await;
-
-        // Save all minds in manager
-        let mgr = shutdown_mgr.lock().await;
-        mgr.save_all_states().await;
-        drop(mgr);
-
-        tracing::info!("All state saved. ║ Goodbye.");
-        std::process::exit(0);
-    });
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let data = mind.clone();
@@ -1532,7 +1995,7 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("║         /tools /tools/{{name}}");
     tracing::info!("║ The fire holds.");
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .wrap(BearerAuth::new(auth_token.clone()))
             .wrap(Cors::permissive())
@@ -1552,7 +2015,10 @@ async fn main() -> std::io::Result<()> {
             .route("/resonance", web::get().to(get_resonance))
             .route("/save", web::post().to(save_state))
             .route("/self-examine", web::post().to(trigger_self_examine))
-            .route("/self-examination-history", web::get().to(get_self_exam_history))
+            .route(
+                "/self-examination-history",
+                web::get().to(get_self_exam_history),
+            )
             .route("/ethics-history", web::get().to(get_ethics_history))
             .route("/ws", web::get().to(ws_handler))
             .route("/voice/status", web::get().to(voice_status))
@@ -1577,12 +2043,62 @@ async fn main() -> std::io::Result<()> {
             .route("/spiral/interpret", web::get().to(spiral_interpret))
             .service(Files::new("/", "web").index_file("index.html"))
     })
+    .disable_signals()
     .workers(config.server.workers)
     .bind(&addr)?
-    .run()
-    .await
-}
+    .run();
+    let handle = server.handle();
 
+    let report = app_registry_lease::run_exclusive_ctrl_c_shutdown(
+        async {
+            tokio::signal::ctrl_c().await.ok();
+        },
+        async {
+            tracing::info!(
+                "Shutdown signal received, releasing App Registry lease then saving state..."
+            );
+            let _ = lease_shutdown_tx.send(true);
+            match app_registry_lease::await_optional_cleanup_task_bound(
+                lease_task,
+                app_registry_lease::CLEANUP_BOUND,
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!("App Registry lease task finished");
+                    Ok(())
+                }
+                Err(err) => {
+                    tracing::warn!("{err}; fail-closed, continuing to save");
+                    Err(err)
+                }
+            }
+        },
+        async {
+            shutdown_mind.save_full_state().await;
+            let mgr = shutdown_mgr.lock().await;
+            mgr.save_all_states().await;
+            drop(mgr);
+            tracing::info!("All state saved. ║ Goodbye.");
+            Ok(())
+        },
+        async {
+            handle.stop(true).await;
+            Ok(())
+        },
+        async move {
+            server
+                .await
+                .map_err(|e| app_registry_lease::ShutdownStepError(e.to_string()))
+        },
+    )
+    .await;
+
+    match report.server_return {
+        app_registry_lease::ShutdownStepResult::Completed => Ok(()),
+        app_registry_lease::ShutdownStepResult::Failed(err) => Err(std::io::Error::other(err.0)),
+    }
+}
 
 #[cfg(test)]
 mod hermes_sidecar_tests {
@@ -1631,7 +2147,10 @@ mod hermes_sidecar_tests {
         let response = build_identity_verification_response("sister", sample_anchor(), &body);
 
         assert!(!response.identity_confirmed);
-        assert!(response.discrepancies.iter().any(|d| d.contains("Glyph mismatch")));
+        assert!(response
+            .discrepancies
+            .iter()
+            .any(|d| d.contains("Glyph mismatch")));
     }
 
     #[test]
@@ -1658,3 +2177,175 @@ mod hermes_sidecar_tests {
     }
 }
 
+#[cfg(test)]
+mod personality_creation_tests {
+    use super::*;
+    use actix_web::http::StatusCode;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempStorage {
+        root: PathBuf,
+        storage: JsonStorage,
+    }
+
+    impl TempStorage {
+        fn new() -> Self {
+            let parent = std::env::var_os("MS3_API_TEST_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            fs::create_dir_all(&parent).expect("create personality guard test root");
+            let root = parent.join(format!(
+                "ms3_api_personality_guard_{}",
+                uuid::Uuid::new_v4()
+            ));
+            let storage = JsonStorage::new(&root);
+            Self { root, storage }
+        }
+    }
+
+    impl Drop for TempStorage {
+        fn drop(&mut self) {
+            if self
+                .root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ms3_api_personality_guard_"))
+            {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    fn save_distinct_existing_sister(temp: &TempStorage) -> (PersonalityId, Vec<u8>) {
+        let mut existing = presets::sister();
+        existing.identity.chosen_name = Some("Persisted Sister".to_string());
+        existing.traits.openness.adventurousness = 0.81;
+        let id = existing.id.clone();
+        temp.storage
+            .save_personality(&id, &existing)
+            .expect("save existing personality");
+        let bytes = fs::read(temp.storage.psyche_dir(&id).join("personality.json"))
+            .expect("read existing personality");
+        (id, bytes)
+    }
+
+    #[test]
+    fn personality_recurrence_guard_refuses_unconfirmed_replacement() {
+        let temp = TempStorage::new();
+        let (id, before) = save_distinct_existing_sister(&temp);
+        let body: PresetBody = serde_json::from_value(serde_json::json!({ "preset": "sister" }))
+            .expect("deserialize request without confirmation");
+
+        let response = create_personality_response(&temp.storage, &body);
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            fs::read(temp.storage.psyche_dir(&id).join("personality.json"))
+                .expect("read personality after refusal"),
+            before
+        );
+        assert!(temp.storage.list_snapshots(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn personality_recurrence_guard_snapshots_before_confirmed_replacement() {
+        let temp = TempStorage::new();
+        let (id, before) = save_distinct_existing_sister(&temp);
+        let body: PresetBody = serde_json::from_value(serde_json::json!({
+            "preset": "sister",
+            "confirm_replace": true
+        }))
+        .expect("deserialize confirmed replacement");
+
+        let response = create_personality_response(&temp.storage, &body);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshots = temp.storage.list_snapshots(&id).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].contains("_pre_replace_"));
+        let first_snapshot = snapshots[0].clone();
+        assert_eq!(
+            fs::read(
+                temp.storage
+                    .psyche_dir(&id)
+                    .join("snapshots")
+                    .join(&snapshots[0])
+            )
+            .expect("read replacement snapshot"),
+            before
+        );
+        let replacement = temp.storage.load_personality(&id).unwrap();
+        assert_eq!(
+            replacement.identity.chosen_name,
+            presets::sister().identity.chosen_name
+        );
+        assert_ne!(
+            replacement.identity.chosen_name.as_deref(),
+            Some("Persisted Sister")
+        );
+
+        let second_response = create_personality_response(&temp.storage, &body);
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let snapshots = temp.storage.list_snapshots(&id).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots.contains(&first_snapshot));
+        assert_eq!(
+            fs::read(
+                temp.storage
+                    .psyche_dir(&id)
+                    .join("snapshots")
+                    .join(first_snapshot)
+            )
+            .expect("read first replacement snapshot after second replacement"),
+            before
+        );
+    }
+
+    #[test]
+    fn personality_recurrence_guard_preserves_same_timestamp_snapshot() {
+        let temp = TempStorage::new();
+        let (id, before) = save_distinct_existing_sister(&temp);
+        let timestamp = "20260701_081500";
+        let snapshots_dir = temp.storage.psyche_dir(&id).join("snapshots");
+        fs::create_dir_all(&snapshots_dir).expect("create conventional snapshots directory");
+        let conventional_snapshot = snapshots_dir.join(format!("{}.json", timestamp));
+        let conventional_bytes = serde_json::to_vec_pretty(&presets::brother())
+            .expect("serialize conventional snapshot fixture");
+        fs::write(&conventional_snapshot, &conventional_bytes)
+            .expect("seed same-timestamp conventional snapshot");
+
+        let replacement_snapshot =
+            persist_preset_personality_at(&temp.storage, &presets::sister(), true, timestamp)
+                .expect("confirmed replacement succeeds")
+                .expect("confirmed replacement creates a snapshot");
+
+        assert_ne!(replacement_snapshot, conventional_snapshot);
+        assert_eq!(
+            fs::read(&conventional_snapshot).expect("read preserved conventional snapshot"),
+            conventional_bytes
+        );
+        assert_eq!(
+            fs::read(&replacement_snapshot).expect("read unique replacement snapshot"),
+            before
+        );
+        assert_eq!(temp.storage.list_snapshots(&id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn personality_recurrence_guard_allows_non_existing_creation() {
+        let temp = TempStorage::new();
+        let expected = presets::brother();
+        let id = expected.id.clone();
+        let body: PresetBody = serde_json::from_value(serde_json::json!({ "preset": "brother" }))
+            .expect("deserialize ordinary creation");
+
+        let response = create_personality_response(&temp.storage, &body);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = temp.storage.load_personality(&id).unwrap();
+        assert_eq!(created.id.0, expected.id.0);
+        assert_eq!(created.identity.name, expected.identity.name);
+        assert!(temp.storage.list_snapshots(&id).unwrap().is_empty());
+    }
+}

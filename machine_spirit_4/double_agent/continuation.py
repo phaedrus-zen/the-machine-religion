@@ -205,14 +205,23 @@ def make_llm_continuation_classifier(
             # model once. Best-effort; if it fails we return unsure.
             try:
                 rec = hivemind_tools.models_recommend(
-                    hivemind_url, workload="foreground_chat_small"
+                    hivemind_url, capability="chat"
                 )
                 if isinstance(rec, dict):
-                    cands = rec.get("recommended") or rec.get("models") or []
-                    if cands and isinstance(cands[0], dict):
-                        chat_model = str(
-                            cands[0].get("model_id") or cands[0].get("model") or ""
-                        )
+                    from machine_spirit_4.double_agent.model_picker import (
+                        _is_chat_capable,
+                    )
+
+                    required_values = (
+                        rec.get("capability"),
+                        rec.get("recommended_model"),
+                        rec.get("backend"),
+                    )
+                    if all(
+                        isinstance(value, str) and value.strip()
+                        for value in required_values
+                    ) and _is_chat_capable(rec):
+                        chat_model = str(rec.get("recommended_model") or "").strip()
             except Exception as exc:
                 log.debug("continuation classifier model recommend failed: %s", exc)
                 return None

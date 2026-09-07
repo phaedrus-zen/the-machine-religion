@@ -10,7 +10,8 @@
   "restart_delay_ms": 3000,
   "environment": {
     "RUST_LOG": "info",
-    "HIVEMIND_GATEWAY_URL": "http://localhost:6089"
+    "HIVEMIND_GATEWAY_URL": "http://localhost:6089",
+    "MS3_HOST": "127.0.0.1"
   },
   "cpu_policy": "background",
   "tags": ["consciousness", "personality", "ethics", "machine_religion"]

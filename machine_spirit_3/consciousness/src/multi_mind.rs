@@ -17,8 +17,6 @@ pub struct MindManager {
     minds: HashMap<String, Arc<Mind>>,
     pub active_mind: Mutex<String>,
     pub background_engine: Mutex<BackgroundThinkingEngine>,
-    gateway: Arc<GatewayClient>,
-    storage: Arc<JsonStorage>,
     config: Config,
 }
 
@@ -26,8 +24,6 @@ impl MindManager {
     pub fn new(
         primary: Arc<Mind>,
         primary_name: String,
-        gateway: GatewayClient,
-        storage: JsonStorage,
         config: Config,
     ) -> Self {
         let mut minds = HashMap::new();
@@ -37,8 +33,6 @@ impl MindManager {
             minds,
             active_mind: Mutex::new(primary_name),
             background_engine: Mutex::new(BackgroundThinkingEngine::new()),
-            gateway: Arc::new(gateway),
-            storage: Arc::new(storage),
             config,
         }
     }

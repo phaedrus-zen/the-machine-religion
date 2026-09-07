@@ -98,6 +98,12 @@ Start everything:
 python machine_spirit_4/scripts/start_ms4.py
 ```
 
+The launcher binds the MS3 identity/ethics sidecar to `127.0.0.1:9080` by
+default, matching the local-only MS4 front door. An isolated lab deployment
+can opt in explicitly with `--ms3-host 0.0.0.0` or `MS3_HOST=0.0.0.0`; because
+MS3 has no application-layer authentication by default, wildcard binding must
+not be used on an untrusted network.
+
 ## Fused Gateway
 
 Run the fused MS4 front door:
@@ -180,12 +186,17 @@ Effectful desktop actions use `POST /desktop/action` or MCP `ms4.desktop.action@
 
 MS4 has a working voice loop today. Hold the mic button on `http://127.0.0.1:9180/`, speak, release. The gateway transcribes the clip via HiveMind ASR, runs the transcript through the normal MS4 chat path (Face Lobe context block, revision bump, Double Agent inputs all apply), synthesizes the reply via HiveMind TTS, and plays it back. Fail-closed against MS3 `/voice/status` so a missing ASR doesn't hold the UI hostage.
 
+Input readiness, ASR transcript, reasoning result, synthesized bytes, playback/delivery receipt, persisted `/voice/recent-turns`, and visible UI status are separate facts. `voice_input_ready` never means output was delivered. Oracle chat readiness (`/hivemind/oracle/readiness`) stays ready when only ASR is unprovisioned; the voice banner reports input provisioning separately.
+
 Routes (gateway port 9180):
 
 ```text
 POST /voice/transcribe         # multipart "file=" or raw audio/* body -> {"text":"...","model":"..."}
 POST /voice/synthesize         # JSON {"text":"...","model":"tts-1","voice":"alloy","response_format":"wav"} -> audio bytes
 POST /voice/turn               # multipart "file=" or raw audio/* body -> JSON with transcript + reply_text + reply_audio_base64
+GET  /voice/recent-turns       # one-generation reverse scan; equal-size/larger same-inode rewrite is generation_changed; last-good is bound to a bounded metadata/content generation token (invalidated by equal-size/larger rewrite); proven-empty vs scan_budget_exhausted; UI proven-empty requires complete===true && !incomplete && non-error source
+GET  /voice/status             # voice *input* readiness only
+GET  /hivemind/oracle/readiness  # Oracle *chat* readiness; ASR is nested voice_input, not overall degraded
 ```
 
 Tuning env vars:
@@ -356,7 +367,7 @@ Building on the May 25 expansion, MS4 now wraps every operationally-meaningful H
 - **Inference**: `inference_{models,chat}`
 - **Logos** (prompt optimization): `logos_{prompts_list,prompts_get,prompts_fork,optimize,evaluate_generate,candidates_promote}`
 - **Services lifecycle**: `services_{list,enable,disable,restart}` (extends the existing `services_maintenance_*`)
-- **Jobs**: `jobs_cancel` (with a strong warning — HiveMind currently resets ALL active jobs regardless of `job_id`)
+- **Jobs**: `jobs_cancel` (UUID-scoped cancellation; `confirm:true` and `job_id` required)
 - **Math**: `math_calculate`
 - **Crown** extended from 3 → 17 wrappers: `session_{current,start,stop}`, `events_list`, `marker_add`, `triggers_{list,fire_test,emergency_enable,emergency_disable}`, `trigger_packs_{list,activate}`, `combos_list`, `trees_list`, `calibration_profiles_{list,activate}`
 
@@ -389,7 +400,7 @@ Building on the May 25 expansion, MS4 now wraps every operationally-meaningful H
 | `/hivemind/logos/candidates/<id>/promote` | POST | Promote a candidate to canonical |
 | `/hivemind/services` | GET | All Warden-managed services |
 | `/hivemind/services/<name>/{enable\|disable\|restart}` | POST | Per-service lifecycle |
-| `/hivemind/jobs/cancel` | POST | Cancel inference jobs (requires `confirm:true`; resets ALL per HiveMind spec) |
+| `/hivemind/jobs/cancel` | POST | Cancel one inference trace (requires `confirm:true` + `job_id`) |
 
 **17 new MS4 MCP proxies** (registry 48 → **65 tools**, manifest aligned):
 `ms4.hivemind.oracle.{status,chat}`, `ms4.hivemind.training.{backends,start,status}`, `ms4.hivemind.adapters.{list,deploy}`, `ms4.hivemind.loadout.{profiles,apply}`, `ms4.hivemind.deploy.gim`, `ms4.hivemind.inference.{models,chat}`, `ms4.hivemind.logos.optimize`, `ms4.hivemind.services.{enable,disable,restart}`, `ms4.hivemind.jobs.cancel` — all `@v1`. Other agents driving MS4 via MCP can now reach the full HiveMind operational surface and inherit MS4's ethics + audit pipeline.
@@ -504,7 +515,9 @@ This also fixed a regression where the GPU-P round left 5 `vm.*` rows stale in `
 
 ### MS4 as a Warden-managed service (draft)
 
-`machine_spirit_4/warden_service.json` is a draft service definition mirroring MS3's, so MS4 can become a Warden-supervised service (Phase 3A). It launches the gateway via the contained-venv Python + `scripts/run_ms4_gateway.py` (an external process, like `menta_psykyo_supervisor`, NOT a compiled binary). The `_flags_to_confirm` block lists the fields that must be reconciled against the real Warden schema before registration. Registering it into HiveMind `core_microservices.json` + restarting Warden is an approval-gated op performed on the HiveMind side.
+Current auto-start story: Windows uses the per-user `HiveMind Oracle.lnk` Startup shortcut to run hidden PowerShell, which invokes the contained `python.exe machine_spirit_4/scripts/supervise_ms4.py --watch --interval-seconds 300`. The named-mutex watchdog stays in the operator's interactive identity, starts only missing MS3/MS4 ports every five minutes, and opens `http://127.0.0.1:9180/` as an Edge app once per boot. Keeping the watchdog in user context is required for Hermes terminal tools, WSL, and desktop capture. The console interpreter is used deliberately because nested child launches from Windows `pythonw.exe` stall before importing the gateway. The legacy `MS4-Spirit-AutoStart` scheduled task is disabled on this host: interactive task actions currently enter a suspended state, while SYSTEM-owned MS4 processes cannot use the operator's WSL context. This Startup watchdog is the active path for the local Oracle experience.
+
+`machine_spirit_4/warden_service.json` is reference-only for now: a draft service definition mirroring MS3's, so MS4 can become a Warden-supervised service later (Phase 3A). It launches the gateway via the contained-venv Python + `scripts/run_ms4_gateway.py` (an external process, like `menta_psykyo_supervisor`, NOT a compiled binary). The `_autostart_decision` and `_flags_to_confirm` blocks record why it is not the active path yet. Registering it into HiveMind `core_microservices.json` + restarting Warden must be a deliberate HiveMind-side runtime-registry change after the real Warden schema is reconciled.
 
 ### HiveMind admin surfaces (May 25 2026)
 
@@ -560,7 +573,7 @@ REST routes added (audit-logged):
 
 Integrations that wire the new tools into existing flows:
 
-* **`model_picker` tries `hivemind.models.recommend@v1` first.** Cluster-aware recommendation beats the hand-rolled priority list when HiveMind has visibility we don't (loaded-vs-cold state, current load, VRAM headroom). Falls back to the existing logic so turning the tool off can't break MS4. `ForegroundChoice.source` shows which path won — `hivemind.models.recommend` vs `loaded` / `available` / `fallback`.
+* **`model_picker` treats `hivemind.models.recommend@v1` as advisory.** The generic chat recommendation is reconciled against the same live `/v1/models` catalog as MS4's Face-role policy. A loaded/reachable policy candidate wins first (`nemotron-3-nano:4b` when ready); a recommendation can survive only when it is itself foreground-safe and catalog-ready and no policy candidate is ready. Turning the tool off still falls through to the catalog policy and gated fallback. Exact selected-Face warm+chat is a separate request-local gate: TMR presents the typed lease on HLI `x-hivemind-recommend-*` headers, prewarm validates without consume, and HLI consumes on the first visible content token.
 * **`voice_admin.request_voice_service` checks `hivemind.service_health@v1` for maintenance windows** before provisioning. Operators can override with `allow_during_maintenance=True` (the Settings UI exposes a "Provision anyway" affordance when the maintenance pill is showing).
 * **`vision.analyze_local_image` tries `hivemind.vlm.chat@v1` first**, falls back to `hivemind.vlm.describe_image@v1`, then to the raw `/v1/chat/completions` shape. Each pass cycles through every model in `_model_attempts(...)` so a model returning empty visible text on the chat path can be rescued on the describe path or vice versa.
 * **`hermes_runner` injects `current cluster date/time` into the Face Lobe context block** when `hivemind.time.now@v1` is reachable, falling back to local time. Cached with positive-TTL 30s, negative-TTL 5s so a transiently-offline cluster doesn't force the slow path on every chat turn.
@@ -639,6 +652,35 @@ Implementation lives in `gateway/hivemind_state.py`. Fail-soft — per-tool fail
 MS4_HIVEMIND_MCP_URL    # pin direct MCP URL; default derives :6105 from MS4_HIVEMIND_URL
 MS4_HIVEMIND_API_KEY    # bearer token for MENTA_API_KEYS-protected clusters; empty = dev mode
 ```
+
+**Depth worker namespace preflight.** If a Depth worker runs outside the
+Windows host namespace (for example WSL, a container, or a remote POSIX
+sandbox), `127.0.0.1` points at that worker namespace, not necessarily the
+Windows host. Run this from the same shell/environment that will launch the
+Depth worker:
+
+```powershell
+python machine_spirit_4\double_agent\_worker_entry.py --preflight --json
+```
+
+On POSIX/WSL, use the POSIX path form:
+
+```bash
+python3 machine_spirit_4/double_agent/_worker_entry.py --preflight --json
+```
+
+If the JSON report includes
+`"code": "posix_loopback_namespace_unreachable"`, inject host-routable
+addresses instead of loopback before launching the worker:
+
+```text
+MS4_HIVEMIND_URL=http://<host-ip>:6089
+MS4_HIVEMIND_MCP_URL=http://<host-ip>:6105/mcp
+MS4_MS3_URL=http://<host-ip>:9080
+```
+
+Do not hard-code a machine-specific host IP in source config; choose it at
+runtime and rerun the preflight until the report has `"ok": true`.
 
 **Live evidence (May 22 2026 against the operator's cluster):**
 
@@ -793,12 +835,12 @@ The MS4 UI now has a `⚙ Settings` button (top right of the Double Agent panel)
 | **TTS model** | Per-turn override for `MS4_VOICE_TTS_MODEL`. `tts-1` (faster) or `tts-1-hd` (higher quality). | `ms4_tts_model` |
 | **Clear grounding cache** | Calls `POST /settings/clear-grounding-cache`. Drops every inventory + tools cached entry so the next matching turn refetches from HiveMind. | n/a |
 
-A read-only **Server defaults** panel below the controls shows the current effective gateway state — voice engine default, voice/model defaults, ASR readiness, grounding cache TTL + entries, Hermes version, Face Lobe default model — straight from `GET /settings` so the operator can see what the server thinks without grep'ing env vars.
+A read-only **Server defaults** panel below the controls shows the current effective gateway state — voice engine default, voice/model defaults, ASR readiness, grounding cache TTL + entries, Hermes version, and the separate Face/Depth model roles — straight from `GET /settings` so the operator can see what the server thinks without grep'ing env vars. `face_lobe.serving_scope` and `depth_lobe.serving_scope` are `hivemind_cluster`; the Depth block exposes both `preferred_cluster_target`/`quality_target_model` (durable Qwen 35B policy intent) and `automatic_selection` (the model currently selected by readiness/fallback). `minimum_target_total_parameters_b=35` is the quality gate. Nemotron 30B is separately identified by `fallback_policy_tier=degraded_fast_tool_fallback`, not presented as satisfying that gate.
 
 Server endpoints:
 
 ```text
-GET  /settings                              # snapshot of voice + grounding + Hermes state
+GET  /settings                              # voice, grounding, Hermes, Face + Depth policy snapshot
 POST /settings/clear-grounding-cache        # idempotent, audit-logged
 ```
 
@@ -873,7 +915,7 @@ Fully-local selections are honored verbatim — no cloud requirement.
 
 **Voice stall guard.** Because a heavy/cloud Face model can be slow or stall, the streaming voice turn has a **first-token watchdog** (`MS4_VOICE_FIRST_TOKEN_TIMEOUT_S`, default 20s): if the model produces no first token within the budget, the turn fails over to the canned "trouble reaching the cluster" reflex and ends cleanly instead of freezing the UI on "streaming…". A first token stands the watchdog down, so slow-but-streaming models still run to completion.
 
-**Voice brevity + chunk coalescing.** Voice replies are spoken aloud, so the Face Lobe is told (on voice turns only) to keep it to 2-3 short sentences and summarize instead of reading out lists/inventories — otherwise a verbose model produces a multi-minute spoken answer (`MS4_VOICE_BREVITY=0` to disable). After the first (fast) chunk, the sentence chunker also coalesces short sentences up to `MS4_VOICE_MIN_CHUNK_WORDS` (default 6) so a chatty reply makes fewer TTS calls and spends less time in the in-order reordering queue (the `held_for_inorder_ms` metric). These cut both the length and the chunk churn of voice turns when a heavy Face model is selected.
+**Complete voice replies + opt-in legacy brevity.** Voice now follows the same complete conversational-answer contract as text by default. `MS4_VOICE_BREVITY=1` explicitly opts into the legacy shortened spoken mode when an operator knowingly prefers less synthesis time. Substantive contextual follow-ups are buffered before text/TTS delivery: explicit expansion, evidence that would change a conclusion, revision under a changed assumption or constraint, correction, and final synthesis. The delivery gate rejects generic deferral, underlength output, and intent-specific semantic omissions; resolved latency revisions must preserve ordered Face/Depth staging, and end-to-end voice corrections must cover the input/ASR, Face generation, TTS, and audible-playback path. One grounded corrective generation is allowed; a second incomplete or semantically wrong candidate fails closed without entering speech or conversation history. Explicit requests for a brief answer and ordinary small talk remain on the fast path. Completed-job dispatch acknowledgements copied from history are removed before validation and TTS. After the first safe chunk, the sentence chunker still coalesces short sentences up to `MS4_VOICE_MIN_CHUNK_WORDS` (default 6), reducing TTS calls and time in the in-order queue without deleting requested substance.
 
 **Audio prebuffer (no first→second-word gap).** The browser player holds the first chunk(s) of each turn until a second chunk is decoded (or the first is already long enough, or a ~400ms timeout), then plays everything gaplessly via Web Audio. This kills the audible gap a tiny first chunk ("Hey") otherwise leaves before the second word, at the cost of a small, bounded delay to the very first sound.
 
@@ -914,24 +956,30 @@ Honest ceiling: tts-1 itself is ~0.3s/word on this cluster, so first audio floor
 
 **TTS concurrency scale-out (Jun 2 2026, post-HiveMind-fix).** HiveMind responded to `docs/specs/HIVEMIND_VOICE_PERF_REPORT.md` (see `HIVEMIND_VOICE_PERF_RESPONSE_2026-06-02.md`): they forwarded `keep_alive` (committed) and shipped **`POST /provision/tts/scale`** (launches N TTS GIM replicas, round-robins `/v1/audio/speech` across them). Their v2 confirmed our original premise — **`GEN_LOCK` serializes generation per GIM process**, so throughput scales **near-linearly with replica count** (1 GIM 2.73 rps → 3 GIM 6.58 rps). And TTS is **GPU-idle (~5–10% util, ~3 GB/GIM)**, so replicas can be **packed multiple-per-GPU** (`target` may exceed GPU count). Because parallelism == replica count, MS4 **auto-provisions replicas on boot + periodically** (`provision_tts_replicas()`). **But there's a hard ceiling we learned painfully:** the TTS GIMs are **CPU-bound**, and leaving ~6 of them running pegged the CPU at 100% and **starved the LLM** (`/v1/chat/completions` timed out) and real-speech ASR — over-provisioning TTS breaks the rest of the voice loop. So the default `target` is a deliberately modest **2** (`MS4_VOICE_TTS_REPLICA_TARGET`; empty/0 = one-per-GPU) — enough to keep a typical reply smooth while leaving CPU for the LLM + ASR. Raise it only with CPU headroom (or TTS on dedicated nodes). Note the scale endpoint only **adds** replicas (floors), so MS4 can't shrink an oversized pool — that's a HiveMind-side reset. Other tunables: `MS4_VOICE_TTS_AUTOSCALE` (default on), `MS4_VOICE_TTS_AUTOSCALE_SECS` (default 600s; 0 = boot-only). MS4 stays on the **batch (REST) path**: HiveMind confirmed the **WS streaming path is the source of the "weird pauses"** (RTF ~0.34, ~10× slower than batch; the GIM's per-chunk delivery architecture throttles generation — needs a GIM rebuild). Still open cluster-side: WS streaming reliability (Findings 2–3), GPU affinity, `/api/ps` accounting.
 
-## Face Lobe Model (Hardware-Aware)
+## Face Lobe Model (Cluster-Aware)
 
 The Face Lobe picks a small/fast model (when set to "Auto") with a clear precedence:
 
 1. Per-turn `"model"` from the request (or the model dropdown) wins.
 2. Otherwise `MS4_FOREGROUND_MODEL` env var wins.
-3. Otherwise MS4 consults HiveMind's live `/v1/models` catalog (20s timeout, 60s cache). Catalog entries are normalized: an entry with `hivemind_status` ∈ `{installed, running, cloud_ready}` and `hivemind_reachable: true` is treated as **loaded/warm**; `hivemind_status: available` is **cold (needs provisioning)**. The picker runs a two-pass match against this priority list:
+3. Otherwise MS4 consults HiveMind's live, cluster-wide `/v1/models` catalog (20s timeout, 60s cache). Catalog entries are normalized: an entry with `hivemind_status` ∈ `{installed, running, cloud_ready}` and `hivemind_reachable: true` is treated as **loaded/warm**; `hivemind_status: available` is **cold (needs provisioning)** and is not selected for an interactive Face turn. The priority begins:
 
-   `phi4-mini` → `phi3.5` → `gemma4` → `gemma3` → `gemma2` → `llama3.1:8b` → `llama3.2:8b` → `dolphin-llama3` → `llama3.1` → `qwen3:8b` → `qwen3` → `gemma` → `qwen3-coder-next:latest`
+   `nemotron-3-nano:4b` → `qwen3:8b` → `llama3.1:8b` → `llama3.2:8b` → `qwen2.5:7b` → other gated small-chat families.
 
-   - **Loaded pass**: first priority pattern with at least one warm match wins.
-   - **Available pass**: only if no priority pattern is warm anywhere, pick the highest-priority cold candidate.
+   The first loaded/reachable, Face-safe match wins. `nemotron-3-nano:4b`
+   is the policy default; model placement may be on any routable HiveMind
+   node rather than the machine running MS4.
+
+   HiveMind's generic `capability=chat` recommendation is advisory: it cannot
+   displace a ready higher-priority Face candidate merely because the cluster's
+   general recommender prefers another chat model.
 
    Within a tier, canonical model ids (`llama3.1:8b`) beat alias-suffixed variants (`llama3.1:8b_ollama`, `llama3.1:8b_gim`).
 
-4. Final fallback (no catalog match / `/v1/models` down): `qwen3-coder-next:latest`.
+4. Final Face fallback (no catalog match / `/v1/models` down):
+   `nemotron-3-nano:4b`.
 
-If the chosen model returns empty content for any reason (cold-load race, model preempted off the GPU mid-stream, etc.), `FaceLobeChat` automatically retries once with the fallback model (`MS4_DEFAULT_MODEL`, default `qwen3-coder-next:latest`) and surfaces `fallback_used: true` + `requested_model` on the response so the operator can see what actually served the turn. Streaming calls have a per-stream stall timeout (`MS4_FACE_LOBE_STREAM_STALL_TIMEOUT`, default 12 s) so a stalled HiveMind connection can never hang the worker thread forever.
+If the chosen model returns empty content for any reason (cold-load race, model preempted off the GPU mid-stream, etc.), `FaceLobeChat` automatically retries once through the gated Face picker (`MS4_DEFAULT_MODEL`, default `nemotron-3-nano:4b`) and surfaces `fallback_used: true` + `requested_model` on the response so the operator can see what actually served the turn. Streaming calls have a per-stream stall timeout (`MS4_FACE_LOBE_STREAM_STALL_TIMEOUT`, default 12 s) so a stalled HiveMind connection can never hang the worker thread forever.
 
 ## Per-Turn Metrics + Anti-Hallucination
 
@@ -968,7 +1016,7 @@ The same response also includes `face_lobe_context_block` — the exact authorit
 
 Sub-2B models (`qwen2.5:0.5b`, `tinyllama:1.1b`) are deliberately NOT in the auto-pick list — they don't reliably follow the Face Lobe system prompt and produced unsolicited refusals on benign greetings in live testing. To force a tiny model anyway, set `MS4_FOREGROUND_MODEL=qwen2.5:0.5b` (or pass `"model"` per request).
 
-The selection is reported back on every chat response under `face_lobe_model.{model_id,source,detail}` so the operator can see what was actually used. Background Double Agent workers keep using the heavier `MS4_DEFAULT_MODEL` (`qwen3-coder-next:latest`) unless their envelope overrides via `resource_request.model_override`.
+The selection is reported back on every chat response under `face_lobe_model.{model_id,source,detail}` so the operator can see what was actually used. Background Double Agent workers use the separate Depth policy (`MS4_DEPTH_MODEL` explicit override, then a cluster catalog pick, then gated `MS4_DEPTH_FALLBACK_MODEL`) rather than inheriting the Face default.
 
 ## Double Agent
 
@@ -988,7 +1036,7 @@ Every chat response payload now includes:
 {
   "router": {"schema":"Ms4RouteDecision.v1","kind":"deep","confidence":0.83,"source":"heuristic","reason":"contains a code block; action verbs: implement, refactor","goal":"...","override":false},
   "dispatched_job": {"job_id":"da-...","state":"queued"},
-  "depth_lobe_model": {"schema":"Ms4DepthModel.v1","model_id":"qwen3-coder-next:latest","source":"loaded"}
+  "depth_lobe_model": {"schema":"Ms4DepthModel.v1","model_id":"nemotron-3-nano:30b","source":"loaded"}
 }
 ```
 
@@ -1000,10 +1048,45 @@ The MS4 UI shows a purple "🧠 Depth Lobe dispatched (model) — job da-... · 
 
 1. `resource_request.model_override` on the job envelope (per-job pin).
 2. `MS4_DEPTH_MODEL` env var.
-3. Auto-pick the highest-priority big coder/reasoning model that is `loaded` in HiveMind: `qwen3-coder-next:latest` → `qwen3-coder` → `qwen2.5-coder:32b` → `qwen2.5-coder` → `qwen3-next` → `qwen3.6:27b` → `qwen3.5` → `deepseek-v3` → `deepseek-r1` → `deepseek-coder-v2` → `deepseek-coder` → `codestral` → `phi4-reasoning` → `phi4` → `qwen3-8b` → `qwen3` → `llama-3.3-70b` → `llama-3.1-70b` → `mistral`.
-4. Final fallback: `MS4_DEFAULT_MODEL` (currently `qwen3-coder-next:latest`).
+3. Auto-pick a loaded/reachable model from HiveMind's cluster-wide catalog,
+   enforcing the HLI policy's explicit 35B total-parameter quality floor. The
+   preferred target is `qwen3.6:35b`, followed only by quality-floor-safe
+   coder/reasoning families. Mutable or unsized aliases and loaded 8–32B
+   models do not silently satisfy the quality target.
+4. Final automatic fallback: gated `MS4_DEPTH_FALLBACK_MODEL` (built-in
+   `nemotron-3-nano:30b`). This is a deliberately degraded fast/tool tier with
+   its own 30B fallback safety floor; it does not satisfy the 35B quality gate.
+   A configured fallback below 30B is ignored.
 
 Cached 60 s like the foreground picker.
+
+The ordering is a preference, not a claim that any candidate is perfect. A
+truly absent or unreachable quality target falls through to the separately
+labeled degraded tier. Nemotron is the verified tool-capable fallback. Gemma 31B
+remains available through an explicit envelope or
+`MS4_DEPTH_MODEL` override, but is excluded from automatic catalog promotion
+after bounded live jobs exceeded the latency gate without reaching a tool call.
+`qwen3.6:35b` still needs full workload acceptance before being
+treated as proven rather than the lead candidate.
+
+`GET /settings` keeps that durable preference separate from runtime state:
+`depth_lobe.preferred_cluster_target` remains `qwen3.6:35b`, while
+`depth_lobe.automatic_selection` reports the currently effective model, source,
+selection detail, and `policy_tier`. Qwen reports `quality_target`; Nemotron
+reports `degraded_fast_tool_fallback`. The settings payload also exposes the
+35B target floor and separate 30B fallback floor, so fallback cannot be mistaken
+for a quality-floor pass.
+
+Depth readiness is cluster-scoped: HLI `/v1/models` reporting the exact Qwen
+target as `hivemind_status=installed` and `hivemind_reachable=true` keeps Qwen
+eligible across idle provider unloads. Its absence from a provider-local
+`/api/tags` snapshot does not by itself demote it. An absent, merely
+`available`, or unreachable target still falls through safely to Nemotron.
+
+This is a cluster placement policy, not a local-load policy. The MS4 machine
+does not need either model installed locally, and the 16 GiB fleet minimum does
+not mean Face and Depth must co-reside on one 16 GiB GPU. HiveMind may keep the
+4B Face model warm on one node and route the 30–35B Depth model to another.
 
 ### Continuation detection (don't stale work the user is waiting for)
 
@@ -1046,9 +1129,9 @@ ms4.double_agent.mark_stale@v1
 
 Web UI at `http://127.0.0.1:9180/` shows a Double Agent panel above the chat when the current conversation has any active or recently completed jobs. Each row reports `last_safe_user_status` only (no model reasoning leaked) and offers a Cancel button for in-flight jobs. A "Submit deep job…" dialog lets the operator dispatch a job directly tied to the current chat session id.
 
-**Completion loop (May 30 2026).** Deep jobs now run to completion no matter what you type next — asking "is it done?" no longer stales the job you're waiting on (it used to: the revision bump killed it). When a job the UI was watching reaches a terminal state, it proactively injects an inline chat bubble — "Deep job done — \<goal\>: \<summary\>" with a **Show details** expander that pulls the full `result.text` from `GET /api/v1/double-agent/jobs/{id}`. Only an explicit Cancel stops a job. Set `MS4_DA_AUTOSTALE=1` to restore the legacy revision-driven staling.
+**Completion loop (updated Aug 2026).** Deep jobs run to completion unless the operator explicitly cancels them. A successful terminal job is delivered through `POST /api/v1/double-agent/jobs/{id}/deliver`, bound idempotently into the exact conversation history, and rendered automatically as a normal assistant answer containing the full verified `result.text`. There is no summary-only bubble, hidden-answer click, or client-invented “want more?” turn. Failed, partial, stale, canceled, truncated, or warning-bearing work remains a labeled system result and is never committed or spoken as a successful answer. Set `MS4_DA_AUTOSTALE=1` only to restore the legacy revision-driven staling behavior.
 
-**Proactive *spoken* completion (Jun 1 2026).** The visual bubble isn't enough in a hands-free voice conversation — you'd have to glance at the screen or ask "is it done?". So when you've used voice this session (`voiceModeActive`), a completed deep job now also **speaks up on its own**: a soft two-tone notify chime, then a short synthesized announcement ("Heads up — that's ready. Here's the gist: …. Want the full details?") via the same REST TTS path. It's scheduled through `speakCompletionWhenQuiet()`, which holds the announcement until you're not mid-utterance and no reply audio is playing (it never talks over you; ~20s budget, then it defers to the visual bubble). Toggle it in Settings → "Speak deep-job completions aloud" (`ms4_da_speak_completions`, default on). Text-only sessions keep just the visual bubble.
+**Proactive *spoken* completion (updated Aug 2026).** In an active voice conversation, the same full verified Depth answer is queued after an optional two-tone cue and spoken in ordered TTS chunks once neither the user nor Oracle is speaking. Muting the cue never suppresses the answer. Voice uses complete-answer behavior by default (`MS4_VOICE_BREVITY=0`); the legacy shortened spoken mode is explicit opt-in. REST synthesis has workload-scaled and progress-aware deadlines, the browser retains a longer independent terminal-envelope budget plus a finite no-progress watchdog, and duration-gated or otherwise incomplete audio resolves as degraded instead of “done.” Toggle proactive Depth narration in Settings → “Speak deep-job completions aloud” (`ms4_da_speak_completions`, default on). Text-only sessions receive the same complete visible assistant answer without audio.
 
 Face Lobe wiring (every `Ms4HermesRunner.chat` turn):
 
@@ -1121,7 +1204,7 @@ Cluster-wide hosting (register an upstream once for every MCP client on the clus
 
 Phase B (HiveMind delegation):** when `hivemind.tools.search@v1` exists in the live catalog (and `MS4_QM_DELEGATE=1`), the cascade delegates retrieval to that shared, auto-updating substrate index (tier `hm_search`) and re-attaches local safety classification so the router's gates still apply; it falls back to the local engine on any failure. The HiveMind-side primitive itself is an approval-gated change — the exact spec is in `docs/quartermaster/HIVEMIND_TOOLS_SEARCH_CHANGESET.md` (do not modify the HiveMind repo / restart Warden without approval).
 
-**Phase E (Depth Lobe trimming):** the Depth Lobe worker is a Hermes agent, so `ResourceRequest.enabled_toolsets` optionally restricts which Hermes *toolsets* it loads (`taxonomy.hermes_toolsets_for_query` maps a request to a conservative toolset list, defaulting to `None` = full catalog escape hatch). Wired through `_construct_agent`/`new_background_agent` → `AIAgent(enabled_toolsets=…)` and the worker. Opt-in via `MS4_QM_TRIM_DEPTH=1`. (Hermes *toolsets* — its own tools — are distinct from Quartermaster *toolboxes*, which are HiveMind tool domains.)
+**Phase E (Depth Lobe trimming):** the Depth Lobe worker is a Hermes agent, so `ResourceRequest.enabled_toolsets` optionally restricts which Hermes *toolsets* it loads (`taxonomy.hermes_toolsets_for_query` maps a request to a conservative toolset list, defaulting to `None` = full catalog escape hatch). Wired through `_construct_agent`/`new_background_agent` → `AIAgent(enabled_toolsets=…)` and the worker. Opt-in via `MS4_QM_TRIM_DEPTH=1`. (Hermes *toolsets* — its own tools — are distinct from Quartermaster *toolboxes*, which are HiveMind tool domains.) The TMR-owned `mcp-hivemind` toolset also exposes `ms4_skills_list` and `ms4_skill_view` as read-only bridges to the configured shared Hermes skill store. `ms4_skill_view` forces `preprocess=False`, and the toolset never exposes `skill_manage`; this lets a cluster-served Depth model read approved skills while the trusted local Hermes worker retains the filesystem and mutation boundary.
 
 ## Hermes Auto-Update
 
@@ -1134,7 +1217,9 @@ GET  http://127.0.0.1:9180/api/v1/hermes/update/status    # current/last upgrade
 POST http://127.0.0.1:9180/api/v1/hermes/update           # body: {"target_version":"0.14.0"} or null for latest
 ```
 
-The web UI at `http://127.0.0.1:9180/` renders an "Update Hermes" banner above the chat the moment `current < latest`, with a "Pin version…" dialog that pulls the recent release list. Cluster-wide cluster-style polling is deliberately omitted because MS4 runs per-spirit, not per-cluster — the operator decides one Hermes install at a time.
+The web UI at `http://127.0.0.1:9180/` renders an "Update Hermes" banner above the chat only when a newer official tag carries signature bytes (`update_available`). A newer GitHub release whose annotated tag is unsigned sets `update_blocked_reason=official_tag_unsigned` and Retry/Pin do not offer it. Pin lists signed tags only. F4 still verifies the authorized signer before any checkout. Cluster-wide polling is omitted because MS4 runs per-spirit.
+
+`GET /api/v1/hermes/version` also returns `installed_relation` (`older`/`current`/`newer`/`unknown`) and `operator_state`. On startup and every version refresh, a failed last-update is superseded by a verified current/newer no-op when installed ≥ discovered latest. Installed < latest with an unsigned official tag is `operator_state=blocked` (`official_tag_unsigned`) as the primary banner; the prior failed job remains in `last_update` audit. The original failure remains in `progress` and `superseded_failure` when a current/newer no-op supersedes presentation; the UI follows `operator_state` rather than hiding a still-failed snapshot. Unknown/malformed versions fail closed. `POST /api/v1/hermes/update` with no target is a product-effect-free no-op when already current/newer; an explicit lower target is refused as a downgrade. Provenance, origin, signature, platform, arch, and anti-downgrade policy are unchanged.
 
 The installer detects how Hermes is installed and behaves accordingly, both inside MS4's contained `.venv`:
 

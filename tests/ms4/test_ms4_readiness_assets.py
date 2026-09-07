@@ -52,6 +52,37 @@ def test_chat_voice_validator_checks_mcp_jsonrpc(monkeypatch):
     assert [call["method"] for call in calls] == ["initialize", "tools/list"]
 
 
+def test_chat_voice_validator_accepts_ms3_interact_contract(monkeypatch):
+    module = _load_chat_voice_module()
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, json, timeout):
+        assert url.endswith("/interact")
+        assert json["personality_id"] == "sister"
+        return Response({
+            "text": "Machine Spirit 3 is ready.",
+            "processing_time_ms": 42,
+            "model_id_used": "qwen2.5:0.5b",
+            "model_used": "Small",
+        })
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    result = module.check_ms3_interact()
+
+    assert result.ok
+    assert result.name == "ms3_interact_chat"
+
+
 def test_wait_runner_and_text_demo_scripts_exist_with_expected_contracts():
     wait_script = (MS4 / "scripts" / "wait_for_hivemind_voice.py").read_text(encoding="utf-8")
     demo_script = (MS4 / "scripts" / "run_ms4_text_demo.py").read_text(encoding="utf-8")

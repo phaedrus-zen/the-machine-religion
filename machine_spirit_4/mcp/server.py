@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from machine_spirit_4.contained import require_contained_runtime
+from machine_spirit_4.scripts import runtime_common
 from machine_spirit_4.gateway.context import mcp_call
 from machine_spirit_4.gateway.hermes_runner import Ms4HermesRunner
 from .schemas import ToolInputError
@@ -181,8 +182,12 @@ class Ms4McpHandler(BaseHTTPRequestHandler):
 
 def build_runtime() -> Ms4McpRuntime:
     runner = Ms4HermesRunner(
-        hermes_dir=os.environ.get("MS4_HERMES_DIR", str(Path.home() / "Documents" / "hermes-agent")),
-        hivemind_url=os.environ.get("MS4_HIVEMIND_URL", "http://127.0.0.1:6089"),
+        hermes_dir=str(runtime_common.hermes_dir()),
+        hivemind_url=(
+            os.environ.get("MS4_HIVEMIND_URL")
+            or os.environ.get("MS4_HIVEMIND_HLI_URL")
+            or "http://127.0.0.1:6089"
+        ),
         ms3_url=os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080"),
         default_model=os.environ.get("MS4_DEFAULT_MODEL", "qwen3-coder-next:latest"),
     )

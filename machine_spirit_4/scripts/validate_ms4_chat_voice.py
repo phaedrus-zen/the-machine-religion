@@ -168,13 +168,42 @@ def check_hivemind_mcp_jsonrpc() -> CheckResult:
 
 
 def check_ms3_interact() -> CheckResult:
-    return _post_json(
-        "ms3_interact_chat",
-        f"{MS3_URL}/interact",
-        {"text": "Reply with exactly MS3_INTERACT_OK.", "personality_id": "sister"},
-        timeout=120,
-        contains="MS3_INTERACT_OK",
-    )
+    start = time.monotonic()
+    try:
+        response = requests.post(
+            f"{MS3_URL}/interact",
+            json={"text": "MS3 validation smoke: reply briefly that you are ready.", "personality_id": "sister"},
+            timeout=120,
+        )
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+        text = data.get("text") if isinstance(data, dict) else None
+        processing_ms = data.get("processing_time_ms") if isinstance(data, dict) else None
+        model_seen = bool(
+            isinstance(data, dict)
+            and (data.get("model_id_used") is not None or data.get("model_used") is not None)
+        )
+        ok = (
+            response.status_code == 200
+            and isinstance(text, str)
+            and bool(text.strip())
+            and processing_ms is not None
+            and model_seen
+        )
+        detail = json.dumps(
+            {
+                "text": text,
+                "processing_time_ms": processing_ms,
+                "model_id_used": data.get("model_id_used") if isinstance(data, dict) else None,
+                "model_used": data.get("model_used") if isinstance(data, dict) else None,
+            },
+            ensure_ascii=True,
+        )
+        return _result("ms3_interact_chat", ok, response.status_code, start, detail)
+    except Exception as exc:
+        return _result("ms3_interact_chat", False, None, start, repr(exc))
 
 
 def check_ms3_voice_status() -> CheckResult:

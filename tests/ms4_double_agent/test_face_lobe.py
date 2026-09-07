@@ -149,9 +149,78 @@ def test_context_block_surfaces_completed_job_result_text(board):
         blackboard=board,
     )
     assert block is not None
-    assert "recently completed Depth Lobe jobs" in block
+    assert "verified completed Depth Lobe jobs" in block
     assert "Today is Thursday, May 21, 2026" in block, \
         "completed job result text must be quoted in the context block so the Face Lobe can use it"
+
+
+def test_failed_job_without_result_is_not_rendered_as_completed_result(board):
+    env = _envelope(conv="conv-failed-empty", revision=1)
+    board.insert_job(env)
+    board.update_job_state(
+        env.job_id,
+        state="failed",
+        last_safe_user_status="Worker failed before producing an answer.",
+    )
+    board.bump_revision("conv-failed-empty", user_message_excerpt="status?")
+    block = build_face_lobe_context_block(
+        conversation_id="conv-failed-empty",
+        blackboard=board,
+    )
+    assert block is not None
+    assert "terminal Depth Lobe jobs without verified results" in block
+    assert "\n- verified completed Depth Lobe jobs" not in block
+    assert "result: Worker failed" not in block
+    assert "status: Worker failed before producing an answer." in block
+
+
+def test_failed_job_result_text_is_not_rendered_as_verified_result(board):
+    from machine_spirit_4.double_agent.schemas import JobResult
+
+    env = _envelope(conv="conv-failed-result", revision=1)
+    board.insert_job(env)
+    board.update_job_state(
+        env.job_id,
+        state="failed",
+        last_safe_user_status="Worker returned an incomplete answer.",
+    )
+    board.insert_result(JobResult(
+        job_id=env.job_id,
+        status="failed",
+        summary="Model returned empty content.",
+        text="partial draft that should not be treated as verified",
+        evidence=[],
+        actions_taken=[],
+        next_steps=[],
+        confidence="low",
+        conversation_revision_id=1,
+    ))
+    block = build_face_lobe_context_block(
+        conversation_id="conv-failed-result",
+        blackboard=board,
+    )
+    assert block is not None
+    assert "terminal Depth Lobe jobs without verified results" in block
+    assert "result_status=failed; status: Model returned empty content." in block
+    assert "result: partial draft" not in block
+
+
+def test_canceled_job_is_not_listed_under_verified_completed(board):
+    env = _envelope(conv="conv-canceled", revision=1)
+    board.insert_job(env)
+    board.update_job_state(
+        env.job_id,
+        state="canceled",
+        last_safe_user_status="Canceled by operator.",
+    )
+    block = build_face_lobe_context_block(
+        conversation_id="conv-canceled",
+        blackboard=board,
+    )
+    assert block is not None
+    assert "terminal Depth Lobe jobs without verified results" in block
+    assert "\n- verified completed Depth Lobe jobs" not in block
+    assert "status: Canceled by operator." in block
 
 
 def test_context_block_states_auto_delivery_and_no_speculation(board):

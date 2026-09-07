@@ -41,3 +41,60 @@ def tool_calling_factory():
         return {"text": "Did the read."}
 
     return _call
+
+
+def hivemind_tool_then_sleep_factory():
+    def _call(*, message, session_id, model, stream_callback, tool_start_callback, tool_complete_callback):
+        tool_start_callback("tc-hm", "hivemind_cluster_summary", {})
+        tool_complete_callback(
+            "tc-hm",
+            "hivemind_cluster_summary",
+            {},
+            '{"healthy":true,"cluster_statistics":{"total_nodes":4,"active_nodes":4}}',
+        )
+        while True:
+            time.sleep(0.2)
+            stream_callback("waiting")
+
+    return _call
+
+
+def hivemind_tool_then_hard_hang_factory():
+    def _call(*, message, session_id, model, stream_callback, tool_start_callback, tool_complete_callback):
+        tool_start_callback("tc-hm", "hivemind_cluster_summary", {})
+        tool_complete_callback(
+            "tc-hm",
+            "hivemind_cluster_summary",
+            {},
+            '{"healthy":true,"cluster_statistics":{"total_nodes":4,"active_nodes":4}}',
+        )
+        while True:
+            time.sleep(0.2)
+
+    return _call
+
+
+def read_file_tool_then_hard_hang_factory():
+    def _call(*, message, session_id, model, stream_callback, tool_start_callback, tool_complete_callback):
+        tool_start_callback("tc-file", "read_file", {"path": "secret.txt"})
+        tool_complete_callback("tc-file", "read_file", {"path": "secret.txt"}, "file contents")
+        while True:
+            time.sleep(0.2)
+
+    return _call
+
+
+def hivemind_tool_then_second_tool_hang_factory():
+    def _call(*, message, session_id, model, stream_callback, tool_start_callback, tool_complete_callback):
+        tool_start_callback("tc-hm", "hivemind_cluster_summary", {})
+        tool_complete_callback(
+            "tc-hm",
+            "hivemind_cluster_summary",
+            {},
+            '{"healthy":true,"cluster_statistics":{"total_nodes":4,"active_nodes":4}}',
+        )
+        tool_start_callback("tc-file", "read_file", {"path": "followup.txt"})
+        while True:
+            time.sleep(0.2)
+
+    return _call

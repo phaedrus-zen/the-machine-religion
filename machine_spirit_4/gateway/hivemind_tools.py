@@ -38,10 +38,20 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import ssl
+import threading
+import time
+import urllib.parse
 import uuid
 from typing import Any
 
-from .hivemind_state import HivemindStateError, post_mcp_envelope
+from .hivemind_state import (
+    HivemindStateError,
+    _build_request_headers,
+    _candidate_mcp_urls,
+    post_mcp_envelope,
+)
 
 # Identity signing for PsyKyo caller-trust gate. Optional: when the
 # shared secret env var is unset we silently omit the envelope and let
@@ -90,12 +100,270 @@ class HivemindToolError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _decode_chunked_body(data: bytes) -> bytes | None:
+    decoded = bytearray()
+    position = 0
+    while True:
+        line_end = data.find(b"\r\n", position)
+        if line_end < 0:
+            return None
+        try:
+            size = int(data[position:line_end].split(b";", 1)[0].strip(), 16)
+        except ValueError as exc:
+            raise HivemindStateError("HiveMind MCP returned invalid chunk framing") from exc
+        position = line_end + 2
+        if size == 0:
+            return bytes(decoded) if len(data) >= position + 2 else None
+        if len(data) < position + size + 2:
+            return None
+        decoded.extend(data[position:position + size])
+        position += size
+        if data[position:position + 2] != b"\r\n":
+            raise HivemindStateError("HiveMind MCP returned invalid chunk terminator")
+        position += 2
+
+
+def _resolve_addresses_cancellable(
+    host: str,
+    port: int,
+    *,
+    deadline: float,
+    cancel_event: threading.Event,
+) -> list[tuple[Any, ...]]:
+    done = threading.Event()
+    holder: dict[str, Any] = {}
+
+    def _resolve() -> None:
+        try:
+            holder["addresses"] = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            holder["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_resolve, name="ms4-dns-resolve", daemon=True).start()
+    while not done.wait(0.02):
+        if cancel_event.is_set():
+            raise HivemindStateError("HiveMind MCP call cancelled during DNS resolution")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("DNS resolution timed out")
+    if holder.get("error") is not None:
+        raise holder["error"]
+    return list(holder.get("addresses") or [])
+
+
+def _post_http_cancellable(
+    url: str,
+    body: bytes,
+    headers: dict[str, str],
+    *,
+    deadline: float,
+    cancel_event: threading.Event,
+) -> tuple[int, bytes]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HivemindStateError(f"invalid HiveMind MCP URL: {url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    wire_headers = dict(headers)
+    default_port = 443 if parsed.scheme == "https" else 80
+    wire_headers.setdefault(
+        "Host",
+        parsed.hostname if port == default_port else f"{parsed.hostname}:{port}",
+    )
+    wire_headers["Content-Length"] = str(len(body))
+    wire_headers["Connection"] = "close"
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        + "".join(f"{name}: {value}\r\n" for name, value in wire_headers.items())
+        + "\r\n"
+    ).encode("iso-8859-1") + body
+    transport: socket.socket | ssl.SSLSocket | None = None
+    try:
+        if cancel_event.is_set():
+            raise HivemindStateError("HiveMind MCP call cancelled")
+        addresses = _resolve_addresses_cancellable(
+            parsed.hostname,
+            port,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        connect_error: OSError | None = None
+        for family, socktype, proto, _canonname, sockaddr in addresses:
+            candidate = socket.socket(family, socktype, proto)
+            candidate.settimeout(min(0.2, max(0.05, deadline - time.monotonic())))
+            try:
+                candidate.connect(sockaddr)
+                transport = candidate
+                break
+            except OSError as exc:
+                connect_error = exc
+                candidate.close()
+        if transport is None:
+            raise connect_error or OSError("no addresses resolved for MCP transport")
+        transport.settimeout(0.05)
+        if parsed.scheme == "https":
+            transport = ssl.create_default_context().wrap_socket(
+                transport,
+                server_hostname=parsed.hostname,
+                do_handshake_on_connect=False,
+            )
+            while True:
+                if cancel_event.is_set():
+                    raise HivemindStateError("HiveMind MCP call cancelled")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("TLS handshake timed out")
+                try:
+                    transport.do_handshake()
+                    break
+                except (ssl.SSLWantReadError, ssl.SSLWantWriteError, socket.timeout):
+                    continue
+
+        outbound = memoryview(request)
+        while outbound:
+            if cancel_event.is_set():
+                raise HivemindStateError("HiveMind MCP call cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("request send timed out")
+            try:
+                sent = transport.send(outbound)
+            except socket.timeout:
+                continue
+            if sent <= 0:
+                raise OSError("MCP transport closed while sending")
+            outbound = outbound[sent:]
+
+        response = bytearray()
+        header_end = -1
+        status = 0
+        content_length: int | None = None
+        chunked = False
+        while True:
+            if cancel_event.is_set():
+                raise HivemindStateError("HiveMind MCP call cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("response read timed out")
+            try:
+                chunk = transport.recv(64 * 1024)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            response.extend(chunk)
+            if header_end < 0:
+                header_end = response.find(b"\r\n\r\n")
+                if header_end >= 0:
+                    lines = bytes(response[:header_end]).decode("iso-8859-1").split("\r\n")
+                    status_parts = lines[0].split(" ", 2)
+                    if len(status_parts) < 2 or not status_parts[1].isdigit():
+                        raise HivemindStateError("HiveMind MCP returned invalid HTTP status")
+                    status = int(status_parts[1])
+                    parsed_headers = {
+                        name.strip().lower(): value.strip()
+                        for line in lines[1:]
+                        for name, separator, value in [line.partition(":")]
+                        if separator
+                    }
+                    if parsed_headers.get("content-length", "").isdigit():
+                        content_length = int(parsed_headers["content-length"])
+                    chunked = "chunked" in parsed_headers.get("transfer-encoding", "").lower()
+            if header_end >= 0:
+                received_body = bytes(response[header_end + 4:])
+                if content_length is not None and len(received_body) >= content_length:
+                    break
+                if chunked and _decode_chunked_body(received_body) is not None:
+                    break
+        if header_end < 0:
+            raise HivemindStateError("HiveMind MCP returned no HTTP headers")
+        encoded_body = bytes(response[header_end + 4:])
+        if chunked:
+            response_body = _decode_chunked_body(encoded_body)
+            if response_body is None:
+                raise HivemindStateError("HiveMind MCP returned incomplete chunks")
+        elif content_length is not None:
+            if len(encoded_body) < content_length:
+                raise HivemindStateError("HiveMind MCP returned a truncated body")
+            response_body = encoded_body[:content_length]
+        else:
+            response_body = encoded_body
+        return status, response_body
+    finally:
+        if transport is not None:
+            try:
+                transport.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                transport.close()
+            except OSError:
+                pass
+
+
+def _post_mcp_envelope_cancellable(
+    hivemind_url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+    cancel_event: threading.Event,
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    headers = _build_request_headers()
+    deadline = time.monotonic() + max(0.05, timeout)
+    last_exc: Exception | None = None
+    for url in _candidate_mcp_urls(hivemind_url):
+        if cancel_event.is_set():
+            raise HivemindStateError("HiveMind MCP call cancelled")
+        try:
+            status, response_body = _post_http_cancellable(
+                url,
+                body,
+                headers,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+            if status >= 400:
+                detail = response_body.decode("utf-8", errors="replace")[:200]
+                raise HivemindStateError(
+                    f"HiveMind MCP at {url} -> {status}: {detail}"
+                )
+            envelope = json.loads(response_body.decode("utf-8", "replace"))
+            if not isinstance(envelope, dict):
+                raise HivemindStateError(f"HiveMind MCP at {url} returned non-object JSON")
+            return envelope
+        except (
+            OSError,
+            TimeoutError,
+            ssl.SSLError,
+            json.JSONDecodeError,
+            HivemindStateError,
+        ) as exc:
+            if cancel_event.is_set():
+                raise HivemindStateError("HiveMind MCP call cancelled") from exc
+            last_exc = (
+                exc
+                if isinstance(exc, HivemindStateError)
+                else HivemindStateError(f"HiveMind MCP at {url} failed: {exc}")
+            )
+            if time.monotonic() >= deadline:
+                break
+    if cancel_event.is_set():
+        raise HivemindStateError("HiveMind MCP call cancelled")
+    raise last_exc or HivemindStateError("HiveMind MCP call failed")
+
+
 def _call_tool(
     hivemind_url: str,
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     *,
-    timeout: int = 15,
+    timeout: float = 15,
+    cancel_event: threading.Event | None = None,
 ) -> Any:
     """Call a HiveMind MCP tool by name and return the unwrapped JSON
     payload.
@@ -137,7 +405,17 @@ def _call_tool(
         # polluting the tool's typed argument schema.
         payload["params"]["agent_identity"] = agent_identity
     try:
-        envelope = post_mcp_envelope(hivemind_url, payload, timeout=timeout)
+        if cancel_event is not None and cancel_event.is_set():
+            raise HivemindStateError("HiveMind MCP call cancelled before dispatch")
+        if cancel_event is None:
+            envelope = post_mcp_envelope(hivemind_url, payload, timeout=timeout)
+        else:
+            envelope = _post_mcp_envelope_cancellable(
+                hivemind_url,
+                payload,
+                timeout=timeout,
+                cancel_event=cancel_event,
+            )
     except HivemindStateError as exc:
         raise HivemindToolError(f"{tool_name!r}: transport failure: {exc}") from exc
     if not isinstance(envelope, dict):
@@ -647,9 +925,12 @@ def voice_identities_identify(
     audio_base64: str,
     top_k: int = 1,
     threshold: float | None = None,
+    timeout: float = 15,
+    cancel_event: threading.Event | None = None,
 ) -> Any:
     """``hivemind.voice_identities.identify@v1`` — match an audio sample to
-    enrolled identities. Returns ``{matches: [{identity_id, name, score}], ...}``.
+    enrolled identities. Returns HLI's flat canonical result:
+    ``{name, confidence, threshold, below_threshold, ...}``.
 
     Live contract props: ``audio_base64``/``audio_data``,
     ``return_embeddings``, ``sample_rate``, ``threshold``. ``top_k`` is
@@ -663,34 +944,31 @@ def voice_identities_identify(
         hivemind_url,
         "hivemind.voice_identities.identify@v1",
         args,
-        timeout=15,
+        timeout=timeout,
+        cancel_event=cancel_event,
     )
 
 
 def voice_identities_refine(
     hivemind_url: str,
     *,
-    identity_id: str,
-    audio_base64: str | None = None,
-    embedding: list[float] | None = None,
+    name: str,
+    embedding: list[float],
+    blend_alpha: float | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Any:
     """``hivemind.voice_identities.refine@v1`` — refine an existing
     identity. Live contract: ``{name, embedding}`` (req=['name','embedding']).
 
-    NOTE / KNOWN GAP: the live cluster refines by *embedding*, not by
-    raw audio — ``audio_base64`` is not a live ``refine`` property
-    (enroll accepts audio, refine does not). MS4 has no local embedding
-    pipeline yet, so refine-by-audio cannot complete against this
-    cluster contract. We translate ``identity_id`` → the live ``name``
-    key and forward an ``embedding`` when one is supplied; passing only
-    audio will surface the cluster's validation error (honest failure)."""
-    args: dict[str, Any] = {"name": identity_id}
-    if embedding is not None:
-        args["embedding"] = embedding
-    if audio_base64 is not None:
-        # Forwarded for forward-compat; current live refine ignores/
-        # rejects audio (see docstring gap note).
-        args["audio_base64"] = audio_base64
+    Enroll accepts audio; refine deliberately does not. Callers must provide
+    an embedding produced by the governed SD path rather than forwarding an
+    unsupported audio field and waiting for HLI to reject it.
+    """
+    args: dict[str, Any] = {"name": name, "embedding": embedding}
+    if blend_alpha is not None:
+        args["blend_alpha"] = blend_alpha
+    if metadata is not None:
+        args["metadata"] = metadata
     return _call_tool(
         hivemind_url,
         "hivemind.voice_identities.refine@v1",
@@ -860,20 +1138,19 @@ def models_catalog(hivemind_url: str) -> Any:
 def models_recommend(
     hivemind_url: str,
     *,
-    workload: str,
-    constraints: dict[str, Any] | None = None,
+    capability: str,
+    vram_budget_mb: int | None = None,
 ) -> Any:
     """``hivemind.models.recommend@v1`` — let HiveMind pick a model for a
-    workload description (e.g. ``"foreground_chat_small"``,
-    ``"depth_reasoning_large"``, ``"vision_describe"``).
+    capability such as ``"chat"``, ``"tts"``, or ``"image_gen"``.
 
-    Returns ``{recommended: [{model_id, score, reason}], ...}``. MS4's
-    model_picker tries this first and falls back to its hand-rolled
-    priority list when the recommendation is empty or fails.
+    The current contract returns ``capability``, ``recommended_model``, and
+    ``backend`` as scalar fields. MS4's model picker falls back to its catalog
+    priority list when the recommendation is malformed, non-chat, or fails.
     """
-    args: dict[str, Any] = {"workload": workload}
-    if constraints:
-        args["constraints"] = constraints
+    args: dict[str, Any] = {"capability": capability}
+    if vram_budget_mb is not None:
+        args["vram_budget_mb"] = vram_budget_mb
     return _call_tool(hivemind_url, "hivemind.models.recommend@v1", args, timeout=10)
 
 
@@ -1331,6 +1608,27 @@ def logos_candidates_promote(hivemind_url: str, *, candidate_id: str) -> Any:
 # ===========================================================================
 # Services lifecycle + jobs.cancel + math
 # ===========================================================================
+
+
+def cluster_summary(hivemind_url: str, *, include_gpu_details: bool = False) -> Any:
+    """``hivemind.cluster.summary@v1`` - cluster node, GPU, memory,
+    and activity summary. Read-only grounding staple for Oracle/Depth
+    answers about the current HiveMind substrate."""
+    return _call_tool(
+        hivemind_url,
+        "hivemind.cluster.summary@v1",
+        {"include_gpu_details": bool(include_gpu_details)},
+    )
+
+
+def hosts_list(hivemind_url: str, *, status_filter: str = "all") -> Any:
+    """``hivemind.hosts.list@v1`` - list cluster nodes with hardware,
+    status, and last-seen information."""
+    return _call_tool(
+        hivemind_url,
+        "hivemind.hosts.list@v1",
+        {"status_filter": status_filter or "all"},
+    )
 
 
 def services_list(hivemind_url: str, *, filter: str = "all") -> Any:

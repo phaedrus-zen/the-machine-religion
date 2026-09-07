@@ -15,14 +15,16 @@ We treat the HiveMind ``identify`` call as **best-effort**: it runs
 inside the voice loop on a tight ~1.5 s budget so it can't add
 perceptible latency. On any failure (timeout, low confidence, no
 match) the loop proceeds without a speaker name. The identity ID
-is also persisted on the FaceLobeChat session so the model can
-address the speaker by name once enough turns have been recognized.
+is emitted as a late voice event; session persistence is not yet
+wired, so this module does not claim recognition survives the turn.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import math
+import threading
 from typing import Any
 
 from . import hivemind_tools as tools
@@ -30,14 +32,6 @@ from .hivemind_tools import HivemindToolError
 
 
 log = logging.getLogger("ms4.gateway.voice_identity")
-
-
-# Default minimum score required to claim a "this speaker is X"
-# identification. HiveMind's identify call returns a score in
-# [0.0, 1.0]; 0.65 is a sane middle ground (too strict and every
-# turn is "unknown"; too loose and the UI flaps between identities
-# turn-over-turn). Tunable via MS4_VOICE_IDENTITY_MIN_SCORE.
-DEFAULT_MIN_SCORE = 0.65
 
 
 class VoiceIdentityError(RuntimeError):
@@ -91,17 +85,43 @@ def enroll(
         raise VoiceIdentityError(f"voice_identities.enroll failed: {exc}") from exc
 
 
-def refine(hivemind_url: str, *, identity_id: str, audio: bytes) -> dict[str, Any]:
-    """Append a new audio sample to an existing identity to improve
-    future recognition."""
-    if not identity_id:
-        raise ValueError("refine requires an identity_id")
-    if not audio:
-        raise ValueError("refine requires non-empty audio")
-    b64 = base64.b64encode(audio).decode("ascii")
+def refine(
+    hivemind_url: str,
+    *,
+    name: str,
+    embedding: list[float],
+    blend_alpha: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Blend a pre-computed voice embedding into an existing identity.
+
+    HLI's current refine contract is ``{name, embedding}``; unlike enroll,
+    it does not accept raw audio. Embedding extraction therefore remains the
+    caller's responsibility instead of pretending an audio upload can work.
+    """
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("refine requires a non-empty name")
+    if not isinstance(embedding, list) or not embedding:
+        raise ValueError("refine requires a non-empty embedding array; audio is not supported")
+    clean_embedding: list[float] = []
+    for value in embedding:
+        if isinstance(value, bool):
+            raise ValueError("refine embedding values must be finite numbers")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("refine embedding values must be finite numbers") from exc
+        if not math.isfinite(number):
+            raise ValueError("refine embedding values must be finite numbers")
+        clean_embedding.append(number)
     try:
         return tools.voice_identities_refine(
-            hivemind_url, identity_id=identity_id, audio_base64=b64
+            hivemind_url,
+            name=clean_name,
+            embedding=clean_embedding,
+            blend_alpha=blend_alpha,
+            metadata=metadata,
         )
     except HivemindToolError as exc:
         raise VoiceIdentityError(f"voice_identities.refine failed: {exc}") from exc
@@ -126,27 +146,33 @@ def identify_speaker_from_wav(
     audio: bytes,
     *,
     top_k: int = 1,
-    min_score: float = DEFAULT_MIN_SCORE,
-    timeout: int = 5,
+    timeout: float = 5,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort speaker identification from a captured WAV.
 
-    Returns ``{identity_id, name, score, accepted: True}`` when the
-    top match's score crosses ``min_score``, otherwise ``None`` (the
-    voice loop displays "unknown speaker" in that case rather than
-    guessing).
+    Returns a normalized accepted result when HLI's canonical flat response
+    has ``below_threshold=false`` and a name. HLI is the sole threshold owner;
+    TMR never re-scores or overrides that verdict. Unknown, below-threshold,
+    or malformed replies return ``None`` rather than guessing.
 
     Swallows every failure mode (transport, isError, malformed
     response) and returns ``None`` — we'd rather drop the speaker
     name than crash a working voice turn.
     """
-    if not audio:
+    if not audio or (cancel_event is not None and cancel_event.is_set()):
         return None
     try:
         b64 = base64.b64encode(audio).decode("ascii")
         raw = tools.voice_identities_identify(
-            hivemind_url, audio_base64=b64, top_k=top_k
+            hivemind_url,
+            audio_base64=b64,
+            top_k=top_k,
+            timeout=timeout,
+            cancel_event=cancel_event,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            return None
     except HivemindToolError as exc:
         log.info("speaker identify failed (no speaker label this turn): %s", exc)
         return None
@@ -156,21 +182,32 @@ def identify_speaker_from_wav(
 
     if not isinstance(raw, dict):
         return None
-    matches = raw.get("matches") or raw.get("results") or []
-    if not isinstance(matches, list) or not matches:
+    if raw.get("ok") is not True:
         return None
-    top = matches[0] if isinstance(matches[0], dict) else None
-    if not top:
+    below_threshold = raw.get("below_threshold")
+    name = raw.get("name")
+    if below_threshold is not False or not isinstance(name, str) or not name.strip():
         return None
-    score = float(top.get("score") or 0.0)
-    if score < min_score:
+    try:
+        confidence = float(raw["confidence"])
+        threshold = float(raw["threshold"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(confidence)
+        or not math.isfinite(threshold)
+        or not 0.0 <= confidence <= 1.0
+        or not 0.0 <= threshold <= 1.0
+    ):
         return None
     return {
-        "schema": "Ms4SpeakerIdentification.v1",
-        "identity_id": str(top.get("identity_id") or top.get("id") or ""),
-        "name": str(top.get("name") or ""),
-        "score": score,
+        "schema": "Ms4SpeakerIdentification.v2",
+        "name": name.strip(),
+        # ``score`` remains as a display compatibility alias; both values
+        # come directly from HLI's canonical ``confidence`` field.
+        "score": confidence,
+        "confidence": confidence,
+        "threshold": threshold,
+        "below_threshold": False,
         "accepted": True,
-        "min_score": min_score,
-        "top_k": top_k,
     }

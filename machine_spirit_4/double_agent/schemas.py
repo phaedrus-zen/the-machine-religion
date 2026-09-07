@@ -114,7 +114,11 @@ class ResourceRequest:
             "preferred_hardware": self.preferred_hardware,
             "fallback_allowed": bool(self.fallback_allowed),
             "model_override": self.model_override,
-            "enabled_toolsets": list(self.enabled_toolsets) if self.enabled_toolsets else None,
+            "enabled_toolsets": (
+                list(self.enabled_toolsets)
+                if self.enabled_toolsets is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -124,10 +128,14 @@ class ResourceRequest:
         enabled_toolsets = None
         if isinstance(ets_raw, list):
             # Keep only safe, short identifier-ish toolset names.
-            enabled_toolsets = [
+            filtered_toolsets = [
                 str(t) for t in ets_raw
                 if isinstance(t, str) and t and len(t) <= 64
-            ] or None
+            ]
+            # An explicit empty list is an authority boundary, not a missing
+            # preference. Preserve it; malformed non-empty lists still fall
+            # back to None instead of accidentally creating a deny-all policy.
+            enabled_toolsets = filtered_toolsets if filtered_toolsets or not ets_raw else None
         return cls(
             model_class=str(raw.get("model_class") or "deep_reasoning"),
             preferred_runtime=str(raw.get("preferred_runtime") or "local"),
@@ -173,6 +181,89 @@ class StatusPolicy:
 # ---------------------------------------------------------------------------
 
 
+PRIOR_CONTEXT_MAX_MESSAGES = 12
+PRIOR_CONTEXT_MAX_MESSAGE_CHARS = 1200
+PRIOR_CONTEXT_MAX_TOTAL_CHARS = 6000
+PRIOR_CONTEXT_VERIFIED_DEPTH_MAX_MESSAGE_CHARS = 12000
+PRIOR_CONTEXT_WITH_VERIFIED_DEPTH_MAX_TOTAL_CHARS = 16000
+_PRIOR_CONTEXT_ROLES = {"user", "assistant"}
+
+
+def _bounded_verified_depth_context(text: str, limit: int) -> str:
+    marker = "\n\n[...middle omitted from Depth follow-up context...]\n\n"
+    if len(text) <= limit:
+        return safety.coerce_safe_text(text, max_chars=max(1, limit)).strip()
+    available = max(2, limit - len(marker))
+    head_chars = max(1, int(available * 0.75))
+    tail_chars = max(1, available - head_chars)
+    bounded = f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
+    return safety.coerce_safe_text(bounded, max_chars=max(1, limit)).strip()
+
+
+def sanitize_prior_context(raw: Any) -> list[dict[str, str]]:
+    """Return a bounded user/assistant history slice for Depth jobs.
+
+    The Face Lobe stores OpenAI-format messages. Depth only needs prior
+    human/assistant turns, never system prompts, grounding blocks, tools,
+    or raw hidden state. Preserve the most recent valid messages while
+    enforcing per-message and total text ceilings.
+    """
+    if not isinstance(raw, list):
+        return []
+    kept_reversed: list[dict[str, str]] = []
+    total_chars = 0
+    normal_chars = 0
+    verified_depth_chars = 0
+    for item in reversed(raw):
+        if len(kept_reversed) >= PRIOR_CONTEXT_MAX_MESSAGES:
+            break
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in _PRIOR_CONTEXT_ROLES:
+            continue
+        raw_content = str(item.get("content") or "")
+        verified_depth = (
+            role == "assistant"
+            and raw_content.startswith("[Verified Depth Lobe result; job_id=da-")
+        )
+        if verified_depth:
+            content = _bounded_verified_depth_context(
+                raw_content,
+                PRIOR_CONTEXT_VERIFIED_DEPTH_MAX_MESSAGE_CHARS,
+            )
+        else:
+            content = safety.coerce_safe_text(
+                raw_content,
+                max_chars=PRIOR_CONTEXT_MAX_MESSAGE_CHARS,
+            ).strip()
+        if not content:
+            continue
+        remaining = min(
+            PRIOR_CONTEXT_WITH_VERIFIED_DEPTH_MAX_TOTAL_CHARS - total_chars,
+            (
+                PRIOR_CONTEXT_MAX_TOTAL_CHARS - normal_chars
+                if not verified_depth
+                else PRIOR_CONTEXT_VERIFIED_DEPTH_MAX_MESSAGE_CHARS - verified_depth_chars
+            ),
+        )
+        if remaining <= 0:
+            continue
+        if len(content) > remaining:
+            content = (
+                _bounded_verified_depth_context(content, remaining)
+                if verified_depth
+                else content[: max(0, remaining - 3)].rstrip() + "..."
+            )
+        kept_reversed.append({"role": role, "content": content})
+        total_chars += len(content)
+        if not verified_depth:
+            normal_chars += len(content)
+        else:
+            verified_depth_chars += len(content)
+    return list(reversed(kept_reversed))
+
+
 @dataclass
 class JobEnvelope:
     job_id: str
@@ -193,6 +284,7 @@ class JobEnvelope:
     updated_at: str = field(default_factory=_now_iso)
     finished_at: str | None = None
     request_user: str | None = None
+    prior_context: list[dict[str, str]] = field(default_factory=list)
 
     def validate(self) -> None:
         if not safety.is_safe_job_id(self.job_id):
@@ -213,6 +305,7 @@ class JobEnvelope:
         # Sanitize free text in place (idempotent).
         self.user_visible_goal = safety.coerce_user_visible_goal(self.user_visible_goal)
         self.internal_goal = safety.coerce_internal_goal(self.internal_goal)
+        self.prior_context = sanitize_prior_context(self.prior_context)
         if not self.user_visible_goal:
             raise SchemaError("user_visible_goal must be non-empty")
 
@@ -237,6 +330,7 @@ class JobEnvelope:
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
             "request_user": self.request_user,
+            "prior_context": sanitize_prior_context(self.prior_context),
         }
 
     @classmethod
@@ -262,6 +356,7 @@ class JobEnvelope:
             updated_at=str(raw.get("updated_at") or _now_iso()),
             finished_at=raw.get("finished_at"),
             request_user=(str(raw.get("request_user")) if raw.get("request_user") else None),
+            prior_context=sanitize_prior_context(raw.get("prior_context")),
         )
         env.validate()
         return env

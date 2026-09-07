@@ -119,17 +119,47 @@ def test_pick_reflex_unknown_intent_falls_back_to_thinking():
 
 def test_emit_smart_reflex_emits_reflex_event(monkeypatch):
     events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(voice, "classify_voice_intent", lambda *a, **k: ("question", "heuristic"))
+    seen: dict[str, float] = {}
+
+    def classify(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return "question", "heuristic"
+
+    monkeypatch.delenv("MS4_VOICE_REFLEX_CLASSIFIER_BUDGET_S", raising=False)
+    monkeypatch.setattr(voice, "classify_voice_intent", classify)
+    turn_started_at = voice.time.monotonic()
     voice.emit_smart_reflex(
         emit=lambda ev, payload: (events.append((ev, payload)), True)[1],
         hivemind_url="http://hive:6089", transcript="what is it?", session_id="s1",
+        turn_started_at=turn_started_at,
     )
+    assert seen["timeout"] == 0.0
     assert events
     ev, payload = events[0]
     assert ev == "reflex"
     assert payload["id"] in cr.reflex_ids_for_category(cr.CATEGORY_Q)
     assert payload["intent"] == "question"
     assert payload["category"] == cr.CATEGORY_Q
+    assert payload["classification_ms"] >= 0
+    assert payload["turn_ms"] >= 0
+
+
+def test_emit_smart_reflex_model_refinement_is_explicit_opt_in(monkeypatch):
+    seen: dict[str, float] = {}
+
+    def classify(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return "statement", "model"
+
+    monkeypatch.setenv("MS4_VOICE_REFLEX_CLASSIFIER_BUDGET_S", "0.25")
+    monkeypatch.setattr(voice, "classify_voice_intent", classify)
+    voice.emit_smart_reflex(
+        emit=lambda _ev, _payload: True,
+        hivemind_url="http://hive:6089",
+        transcript="the circuit is ready",
+        session_id="s-model-opt-in",
+    )
+    assert seen["timeout"] == 0.25
 
 
 def test_emit_smart_reflex_never_raises(monkeypatch):

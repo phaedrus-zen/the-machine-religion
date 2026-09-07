@@ -30,8 +30,6 @@ from machine_spirit_4.gateway import (
     vm_admin,
     voice_identity,
 )
-from machine_spirit_4.gateway.vm_admin import VmAdminError
-from machine_spirit_4.gateway.voice_identity import VoiceIdentityError
 
 
 # ---------------------------------------------------------------------------
@@ -256,33 +254,132 @@ def test_voice_identity_enroll_base64_encodes_and_returns(fake_mcp):
     assert args["audio_base64"] == base64.b64encode(b"WAV-DATA").decode("ascii")
 
 
-def test_identify_speaker_returns_none_below_threshold(fake_mcp):
+def test_voice_identity_refine_forwards_only_current_hli_embedding_contract(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.voice_identities.refine@v1",
+        {"ok": True, "name": "Alice", "refined": True},
+    )
+    result = voice_identity.refine(
+        hurl(fake_mcp),
+        name=" Alice ",
+        embedding=[0.1, 0.2, 0.3],
+        blend_alpha=0.1,
+        metadata={"source": "fixture"},
+    )
+    assert result["refined"] is True
+    args = fake_mcp.calls[-1]["body"]["params"]["arguments"]
+    assert args == {
+        "name": "Alice",
+        "embedding": [0.1, 0.2, 0.3],
+        "blend_alpha": 0.1,
+        "metadata": {"source": "fixture"},
+    }
+    assert "audio_base64" not in args
+
+
+def test_voice_identity_refine_rejects_missing_or_invalid_embedding():
+    with pytest.raises(ValueError, match="embedding array"):
+        voice_identity.refine("http://hive", name="Alice", embedding=[])
+    with pytest.raises(ValueError, match="finite numbers"):
+        voice_identity.refine("http://hive", name="Alice", embedding=[float("nan")])
+
+
+def test_identify_speaker_honors_hli_below_threshold(fake_mcp):
     fake_mcp.set_response(
         "hivemind.voice_identities.identify@v1",
-        {"matches": [{"identity_id": "x", "name": "Bob", "score": 0.30}]},
+        {
+            "ok": True,
+            "name": None,
+            "confidence": 0.30,
+            "threshold": 0.75,
+            "below_threshold": True,
+        },
     )
-    result = voice_identity.identify_speaker_from_wav(
-        hurl(fake_mcp), audio=b"WAV", min_score=0.65
-    )
+    result = voice_identity.identify_speaker_from_wav(hurl(fake_mcp), audio=b"WAV")
     assert result is None
 
 
-def test_identify_speaker_returns_match_above_threshold(fake_mcp):
+def test_identify_speaker_consumes_hli_flat_accepted_result(fake_mcp):
     fake_mcp.set_response(
         "hivemind.voice_identities.identify@v1",
-        {"matches": [{"identity_id": "id-1", "name": "Alice", "score": 0.85}]},
+        {
+            "ok": True,
+            "name": "Alice",
+            "confidence": 0.85,
+            "threshold": 0.75,
+            "below_threshold": False,
+        },
     )
-    result = voice_identity.identify_speaker_from_wav(
-        hurl(fake_mcp), audio=b"WAV", min_score=0.65
-    )
+    result = voice_identity.identify_speaker_from_wav(hurl(fake_mcp), audio=b"WAV")
     assert result is not None
     assert result["accepted"] is True
     assert result["name"] == "Alice"
     assert result["score"] == 0.85
+    assert result["confidence"] == 0.85
+    assert result["threshold"] == 0.75
+    assert result["below_threshold"] is False
+    assert "identity_id" not in result
+    assert "min_score" not in result
+
+
+def test_identify_speaker_does_not_apply_a_second_local_threshold(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.voice_identities.identify@v1",
+        {
+            "ok": True,
+            "name": "FixtureSpeaker",
+            "confidence": 0.60,
+            "threshold": 0.55,
+            "below_threshold": False,
+        },
+    )
+    result = voice_identity.identify_speaker_from_wav(hurl(fake_mcp), audio=b"WAV")
+    assert result is not None
+    assert result["name"] == "FixtureSpeaker"
+    assert result["accepted"] is True
+
+
+def test_identify_speaker_rejects_obsolete_matches_shape(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.voice_identities.identify@v1",
+        {"matches": [{"identity_id": "legacy", "name": "Legacy", "score": 0.99}]},
+    )
+    assert voice_identity.identify_speaker_from_wav(hurl(fake_mcp), audio=b"WAV") is None
 
 
 def test_identify_speaker_fail_soft_on_empty_audio(fake_mcp):
     assert voice_identity.identify_speaker_from_wav(hurl(fake_mcp), audio=b"") is None
+
+
+def test_identify_speaker_forwards_timeout_and_cancellation(monkeypatch):
+    observed: dict[str, object] = {}
+    cancel_event = threading.Event()
+
+    def fake_identify(_url, *, audio_base64, top_k, timeout, cancel_event):
+        observed.update({
+            "audio_base64": audio_base64,
+            "top_k": top_k,
+            "timeout": timeout,
+            "cancel_event": cancel_event,
+        })
+        return {
+            "ok": True,
+            "name": None,
+            "confidence": 0.0,
+            "threshold": 0.75,
+            "below_threshold": True,
+        }
+
+    monkeypatch.setattr(voice_identity.tools, "voice_identities_identify", fake_identify)
+    assert voice_identity.identify_speaker_from_wav(
+        "http://hive",
+        b"WAV",
+        timeout=0.25,
+        cancel_event=cancel_event,
+    ) is None
+    assert observed["timeout"] == 0.25
+    assert observed["cancel_event"] is cancel_event
+    assert observed["audio_base64"] == base64.b64encode(b"WAV").decode("ascii")
 
 
 # ===========================================================================
@@ -434,6 +531,52 @@ def test_route_voice_identities_list(fake_mcp):
     assert status == 200
     assert body["schema"] == "Ms4VoiceIdentitiesSnapshot.v1"
     assert body["identities"][0]["name"] == "Alice"
+
+
+def test_route_voice_identity_refine_requires_embedding_not_audio(fake_mcp):
+    runner = _DummyRunner(hurl(fake_mcp))
+    handler = _make_handler(
+        runner,
+        "POST",
+        "/hivemind/voice_identities/Alice/refine",
+        body=b'{"audio_base64":"V0FW"}',
+    )
+    assert handler._dispatch_voice_identity_action("Alice", "refine") is True
+    status, body = _read_response(handler)
+    assert status == 400
+    assert "embedding array required" in body["error"]
+    assert fake_mcp.calls == []
+
+
+def test_route_voice_identity_refine_forwards_embedding(monkeypatch, fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.voice_identities.refine@v1",
+        {"ok": True, "name": "Alice", "refined": True},
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(srv_module, "append_event", lambda name, payload: events.append((name, payload)))
+    runner = _DummyRunner(hurl(fake_mcp))
+    handler = _make_handler(
+        runner,
+        "POST",
+        "/hivemind/voice_identities/Alice/refine",
+        body=b'{"embedding":[0.1,0.2,0.3],"blend_alpha":0.1,"metadata":{"source":"fixture"}}',
+    )
+    assert handler._dispatch_voice_identity_action("Alice", "refine") is True
+    status, body = _read_response(handler)
+    assert status == 200
+    assert body["refined"] is True
+    args = fake_mcp.calls[-1]["body"]["params"]["arguments"]
+    assert args == {
+        "name": "Alice",
+        "embedding": [0.1, 0.2, 0.3],
+        "blend_alpha": 0.1,
+        "metadata": {"source": "fixture"},
+    }
+    assert events == [(
+        "hivemind_voice_identity_refine",
+        {"name": "Alice", "embedding_dims": 3},
+    )]
 
 
 def test_route_approval_request_validates_required_fields(fake_mcp):

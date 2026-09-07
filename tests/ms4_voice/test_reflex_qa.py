@@ -1,12 +1,13 @@
 """Round-trip QA for generated canned speech.
 
-Render -> transcribe back -> fuzzy + tiny-LLM judge -> if bad, re-render
-with an LLM-rephrased equivalent. Everything is fail-OPEN: if ASR or the
-LLM are unavailable, QA accepts the render rather than rejecting it.
+Render to an isolated candidate -> transcribe back with real ASR evidence ->
+require semantic acceptance -> atomically promote. Missing or ambiguous
+evidence holds the candidate and preserves the last-known-good render.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import wave
 
@@ -33,6 +34,25 @@ def tmp_reflex_dir(tmp_path, monkeypatch):
 
 def _raise(*a, **k):
     raise RuntimeError("unavailable")
+
+
+def _asr(text: str, **raw_extra):
+    """Production-shaped ASR evidence: outer text plus the raw service body."""
+    return {
+        "text": text,
+        "model": "whisper-1",
+        "raw": {"text": text, **raw_extra},
+    }
+
+
+def _judge(monkeypatch, answer: str = "yes"):
+    import machine_spirit_4.gateway.hivemind_tools as ht
+
+    monkeypatch.setattr(
+        ht,
+        "inference_chat",
+        lambda *a, **k: {"choices": [{"message": {"content": answer}}]},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +95,10 @@ def test_validate_rejects_too_long(monkeypatch):
 
 
 def test_validate_ok_duration_passes_to_asr(monkeypatch):
-    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "On it"})
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("On it"))
+    _judge(monkeypatch)
     v = cr.validate_reflex_audio("On it.", _wav_of_secs(1.0), "http://hive")
-    assert v["valid"] is True and v["reason"] == "match"
+    assert v["valid"] is True and v["reason"] == "semantic_accept"
 
 
 # ---------------------------------------------------------------------------
@@ -86,31 +107,72 @@ def test_validate_ok_duration_passes_to_asr(monkeypatch):
 
 
 def test_validate_clean_match(monkeypatch):
-    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "On it"})
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("On it"))
+    _judge(monkeypatch)
     v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
-    assert v["valid"] is True and v["reason"] == "match"
+    assert v["valid"] is True and v["reason"] == "semantic_accept"
 
 
 def test_validate_garble_rejected(monkeypatch):
-    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "on it " * 10})
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("on it " * 10))
     import machine_spirit_4.gateway.hivemind_tools as ht
     monkeypatch.setattr(ht, "inference_chat", _raise)  # no LLM -> trust the fuzzy bad verdict
     v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
     assert v["valid"] is False
 
 
-def test_validate_asr_unavailable_fails_open(monkeypatch):
+def test_validate_asr_unavailable_holds(monkeypatch):
     monkeypatch.setattr(cr, "transcribe", _raise)
     v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
-    assert v["valid"] is True and v["reason"] == "asr_unavailable"
+    assert v["valid"] is False
+    assert v["reason"] == "asr_unavailable"
+    assert v.get("disposition") == "hold"
 
 
-def test_validate_llm_judge_yes(monkeypatch):
-    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "honor"})  # ambiguous fuzzy
-    import machine_spirit_4.gateway.hivemind_tools as ht
-    monkeypatch.setattr(ht, "inference_chat", lambda *a, **k: {"choices": [{"message": {"content": "yes"}}]})
+def test_validate_rejects_text_without_real_asr_evidence(monkeypatch):
+    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "On it"})
+    _judge(monkeypatch)
     v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
-    assert v["valid"] is True and v["reason"] == "llm"
+    assert v["valid"] is False
+    assert v["reason"] == "asr_evidence_unavailable"
+
+
+def test_validate_rejects_transcript_hint_as_fabricated_evidence(monkeypatch):
+    monkeypatch.setattr(
+        cr,
+        "transcribe",
+        lambda **k: _asr("On it", transcript_hint="On it", source="request_hint"),
+    )
+    _judge(monkeypatch)
+    v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
+    assert v["valid"] is False
+    assert v["reason"] == "asr_evidence_ambiguous"
+
+
+def test_validate_ambiguous_transcript_holds_even_if_judge_would_accept(monkeypatch):
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("honor"))
+    _judge(monkeypatch)
+    v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
+    assert v["valid"] is False
+    assert v["reason"] == "transcript_ambiguous"
+
+
+def test_validate_absent_semantic_judge_holds(monkeypatch):
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("On it"))
+    import machine_spirit_4.gateway.hivemind_tools as ht
+
+    monkeypatch.setattr(ht, "inference_chat", _raise)
+    v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
+    assert v["valid"] is False
+    assert v["reason"] == "semantic_judge_unavailable"
+
+
+def test_validate_semantic_rejection_holds(monkeypatch):
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("On it"))
+    _judge(monkeypatch, "no")
+    v = cr.validate_reflex_audio("On it.", b"WAV", "http://hive")
+    assert v["valid"] is False
+    assert v["reason"] == "semantic_rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -146,38 +208,44 @@ def test_generate_reflex_rephrases_a_garbled_phrase(tmp_reflex_dir, monkeypatch)
 
     def fake_transcribe(**k):
         said = k["audio"].decode("utf-8")
-        return {"text": "on it " * 10} if said == original else {"text": said}
+        return _asr("on it " * 10) if said == original else _asr(said)
 
     monkeypatch.setattr(cr, "transcribe", fake_transcribe)
-    import machine_spirit_4.gateway.hivemind_tools as ht
-    monkeypatch.setattr(ht, "inference_chat", _raise)  # judge unavailable -> trust fuzzy
+    _judge(monkeypatch)
     monkeypatch.setattr(cr, "rephrase_reflex_text", lambda original_, url, avoid=(): rephrased)
 
     info = cr.generate_reflex(hivemind_url="http://hive", reflex_id=rid)
+    assert info.get("status") == "promoted"
+    assert info.get("promoted") is True
     assert info["validated"] is True
     assert info["effective_text"] == rephrased
     # sidecar written + audio written
-    assert cr._read_meta(cr.DEFAULT_REFLEX_VOICE, rid)["effective_text"] == rephrased
-    assert cr.reflex_path(cr.DEFAULT_REFLEX_VOICE, rid).exists()
+    meta = cr._read_meta(cr.DEFAULT_REFLEX_VOICE, rid)
+    audio = cr.reflex_path(cr.DEFAULT_REFLEX_VOICE, rid).read_bytes()
+    assert meta["effective_text"] == rephrased
+    assert meta["audio_sha256"] == hashlib.sha256(audio).hexdigest()
+    assert cr.read_reflex(reflex_id=rid) == audio
 
 
-def test_generate_reflex_flags_when_all_attempts_fail(tmp_reflex_dir, monkeypatch):
+def test_generate_reflex_retry_exhaustion_holds_without_promotion(tmp_reflex_dir, monkeypatch):
     rid = "stmt_mhm"
-    original = cr.get_reflex(rid).text
     monkeypatch.setattr(cr, "synthesize", lambda **k: {"audio_bytes": k["text"].encode("utf-8")})
-    monkeypatch.setattr(cr, "transcribe", lambda **k: {"text": "blah " * 12})  # always garble
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("blah " * 12))  # always garble
     import machine_spirit_4.gateway.hivemind_tools as ht
     monkeypatch.setattr(ht, "inference_chat", _raise)
     monkeypatch.setattr(cr, "rephrase_reflex_text", lambda o, u, avoid=(): f"variant {len(list(avoid))}")
     monkeypatch.setenv("MS4_REFLEX_QA_RETRIES", "2")
 
     info = cr.generate_reflex(hivemind_url="http://hive", reflex_id=rid)
+    assert info.get("status") == "hold"
+    assert info.get("promoted") is False
+    assert info.get("hold_reason") == "retry_exhausted"
     assert info["validated"] is False
-    # On total failure we fall back to the FIRST (original-text) render.
-    assert info["effective_text"] == original
+    assert not cr.reflex_path(cr.DEFAULT_REFLEX_VOICE, rid).exists()
+    assert cr._read_meta(cr.DEFAULT_REFLEX_VOICE, rid) is None
 
 
-def test_generate_reflex_qa_off_skips_validation(tmp_reflex_dir, monkeypatch):
+def test_generate_reflex_qa_off_holds_without_promotion(tmp_reflex_dir, monkeypatch):
     monkeypatch.setenv("MS4_REFLEX_QA", "0")
     calls = {"asr": 0}
 
@@ -188,5 +256,124 @@ def test_generate_reflex_qa_off_skips_validation(tmp_reflex_dir, monkeypatch):
     monkeypatch.setattr(cr, "synthesize", lambda **k: {"audio_bytes": b"AUDIO"})
     monkeypatch.setattr(cr, "transcribe", counting_transcribe)
     info = cr.generate_reflex(hivemind_url="http://hive", reflex_id="conf_okay")
-    assert info["validated"] is None      # QA off -> unknown
-    assert calls["asr"] == 0              # never transcribed
+    assert info.get("status") == "hold"
+    assert info.get("hold_reason") == "qa_disabled"
+    assert info.get("promoted") is False
+    assert calls["asr"] == 0
+    assert not cr.reflex_path(cr.DEFAULT_REFLEX_VOICE, "conf_okay").exists()
+
+
+def test_successful_generation_validates_candidate_before_promotion(tmp_reflex_dir, monkeypatch):
+    rid = "conf_okay"
+    audio = b"candidate-audio"
+    final_path = cr.reflex_path(cr.DEFAULT_REFLEX_VOICE, rid)
+    monkeypatch.setattr(cr, "synthesize", lambda **k: {"audio_bytes": audio})
+    monkeypatch.setattr(cr, "transcribe", lambda **k: _asr("Okay"))
+    _judge(monkeypatch)
+    real_validate = cr.validate_reflex_audio
+
+    def validate_while_candidate_isolated(intended, candidate_audio, hivemind_url):
+        candidates = [
+            path for path in final_path.parent.glob("*.wav")
+            if "candidate" in path.name
+        ]
+        assert len(candidates) == 1
+        assert candidates[0].read_bytes() == audio
+        assert not final_path.exists()
+        return real_validate(intended, candidate_audio, hivemind_url)
+
+    monkeypatch.setattr(cr, "validate_reflex_audio", validate_while_candidate_isolated)
+    info = cr.generate_reflex(
+        hivemind_url="http://hive",
+        reflex_id=rid,
+        retries=0,
+    )
+
+    assert info.get("status") == "promoted"
+    assert final_path.read_bytes() == audio
+    assert not list(final_path.parent.glob("*candidate*"))
+
+
+def test_failed_regeneration_preserves_last_known_good_pair(tmp_reflex_dir, monkeypatch):
+    rid = "conf_done"
+    voice = cr.DEFAULT_REFLEX_VOICE
+    path = cr.reflex_path(voice, rid)
+    path.parent.mkdir(parents=True)
+    good_audio = b"last-known-good"
+    path.write_bytes(good_audio)
+    good_meta = {
+        "schema": "Ms4ReflexMeta.v1",
+        "id": rid,
+        "validated": True,
+        "qa_version": cr._QA_VERSION,
+        "audio_sha256": hashlib.sha256(good_audio).hexdigest(),
+    }
+    cr._write_meta(voice, rid, good_meta)
+    before_meta = cr._meta_path(voice, rid).read_bytes()
+    monkeypatch.setattr(cr, "synthesize", lambda **k: {"audio_bytes": b"bad-candidate"})
+
+    def unavailable_while_good_pair_stays_live(**kwargs):
+        assert path.read_bytes() == good_audio
+        assert cr._meta_path(voice, rid).read_bytes() == before_meta
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr(cr, "transcribe", unavailable_while_good_pair_stays_live)
+
+    info = cr.generate_reflex(
+        hivemind_url="http://hive",
+        reflex_id=rid,
+        retries=0,
+    )
+
+    assert info.get("status") == "hold"
+    assert info.get("hold_reason") == "asr_unavailable"
+    assert path.read_bytes() == good_audio
+    assert cr._meta_path(voice, rid).read_bytes() == before_meta
+    assert cr.read_reflex(reflex_id=rid, voice=voice) == good_audio
+    assert not list(path.parent.glob("*candidate*"))
+
+
+def test_stale_revalidation_cannot_clobber_concurrent_promotion(tmp_reflex_dir, monkeypatch):
+    rid = "conf_okay"
+    voice = cr.DEFAULT_REFLEX_VOICE
+    reflex = cr.get_reflex(rid)
+    path = cr.reflex_path(voice, rid)
+    path.parent.mkdir(parents=True)
+    old_audio = b"unbound-old-audio"
+    new_audio = b"concurrently-promoted-audio"
+    path.write_bytes(old_audio)
+    monkeypatch.setattr(cr, "REFLEXES", (reflex,))
+
+    def validate_then_promote(intended, audio, hivemind_url):
+        assert audio == old_audio
+        candidate = cr._write_candidate_audio(path, new_audio)
+        cr._promote_candidate(
+            candidate_path=candidate,
+            voice=voice,
+            reflex_id=rid,
+            meta={
+                "schema": "Ms4ReflexMeta.v1",
+                "id": rid,
+                "validated": True,
+                "qa_version": cr._QA_VERSION,
+                "audio_sha256": hashlib.sha256(new_audio).hexdigest(),
+            },
+        )
+        return {
+            "valid": True,
+            "heard": intended,
+            "reason": "semantic_accept",
+            "disposition": "accept",
+        }
+
+    monkeypatch.setattr(cr, "validate_reflex_audio", validate_then_promote)
+    out = cr.generate_all(
+        hivemind_url="http://hive",
+        voice=voice,
+        force=False,
+        qa=True,
+    )
+
+    assert cr.read_reflex(reflex_id=rid, voice=voice) == new_audio
+    assert out["revalidated"] == []
+    assert out["skipped"] == [rid]

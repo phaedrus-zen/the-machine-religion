@@ -9,7 +9,12 @@ hermes:
     name: HiveMind Local
     provider_id: custom:hivemind-local
     base_url: http://127.0.0.1:6089/v1
-    model: qwen2.5-coder:32b
+    # Low-memory/latency fallback. Managed startup defaults MS4_FACE_PROFILE=auto:
+    # it may select installed/reachable qwen3.6:35b only when the serving node's
+    # carrier telemetry proves at least 32 GiB VRAM. Set the profile to latency
+    # for this model unconditionally, or quality to request the same gated 35B
+    # preference explicitly. Neither profile pulls a model.
+    model: nemotron-3-nano:4b
     api_key: local-not-needed
     api_mode: chat_completions
 
@@ -19,6 +24,8 @@ hivemind:
   carrier_sync_url: http://127.0.0.1:6130
 
 ms3:
+  # The managed sidecar is loopback-only by default. Set MS3_HOST=0.0.0.0
+  # explicitly only for an authenticated/isolated lab LAN deployment.
   sidecar_url: http://127.0.0.1:9080
   default_spirit_id: sister
   expected_glyph: ║

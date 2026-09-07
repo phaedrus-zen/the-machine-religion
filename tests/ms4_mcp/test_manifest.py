@@ -72,6 +72,63 @@ def test_manifest_lists_all_v1_tools_and_safety_posture():
         assert effectful_psykyo in manifest["safety"]["effectful_tools_in_v1"]
 
 
+def test_every_runtime_action_declares_gate_policy():
+    """Gate metadata is the contract the Quartermaster / MCP layer enforce.
+
+    Every kind=runtime_action tool must carry a non-empty gated_by list of
+    non-empty strings: either a real gate ('confirm:true required',
+    'operator-level', 'safe-id guard', ...) or an explicit 'none: <rationale>'
+    declaration. A missing list is an undeclared policy, not 'no gate'.
+    """
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    undeclared = []
+    malformed = []
+    for tool in manifest["tools"]:
+        if tool.get("kind") != "runtime_action":
+            continue
+        gated_by = tool.get("gated_by")
+        if not gated_by:
+            undeclared.append(tool["name"])
+            continue
+        if not isinstance(gated_by, list) or not all(
+            isinstance(gate, str) and gate.strip() for gate in gated_by
+        ):
+            malformed.append(tool["name"])
+    assert undeclared == [], f"runtime_action tools without gated_by: {undeclared}"
+    assert malformed == [], f"runtime_action tools with malformed gated_by: {malformed}"
+
+
+def test_confirm_gated_manifest_tools_enforce_confirm_in_registry():
+    """A 'confirm:true required' manifest gate must be enforced by the handler.
+
+    Scoped to the two tools that share the ToolInputError('Pass confirm:true')
+    contract (jobs.cancel, logos.optimize); the gpu.passthrough.* handlers
+    enforce the same gate with a different message/ordering.
+    """
+    from machine_spirit_4.mcp import tools as tools_module
+
+    manifest = json.loads((MCP / "manifest.json").read_text(encoding="utf-8"))
+    by_name = {tool["name"]: tool for tool in manifest["tools"]}
+    registry = tools_module.build_tool_registry()
+
+    class _Runtime:
+        hivemind_url = "http://127.0.0.1:9"
+        ms3_url = "http://127.0.0.1:9"
+
+    for name, args in (
+        ("ms4.hivemind.logos.optimize@v1", {"prompt_id": "x"}),
+        ("ms4.hivemind.jobs.cancel@v1", {"job_id": "x"}),
+    ):
+        assert "confirm:true required" in (by_name[name].get("gated_by") or []), name
+        handler = registry[name].handler
+        try:
+            handler(_Runtime(), dict(args))
+        except tools_module.ToolInputError as exc:
+            assert "Pass confirm:true" in str(exc), f"{name}: {exc}"
+        else:
+            raise AssertionError(f"{name} ran without confirm:true")
+
+
 def test_client_config_examples_include_cursor_and_jsonrpc_shapes():
     examples = json.loads((MCP / "client_config_examples.json").read_text(encoding="utf-8"))
 

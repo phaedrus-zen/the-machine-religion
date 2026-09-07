@@ -40,7 +40,7 @@ pub enum ModelTier {
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum PrimaryEmotion {
     Joy,
     Sadness,
@@ -50,13 +50,8 @@ pub enum PrimaryEmotion {
     Disgust,
     Trust,
     Anticipation,
+    #[default]
     Neutral,
-}
-
-impl Default for PrimaryEmotion {
-    fn default() -> Self {
-        Self::Neutral
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,18 +208,13 @@ impl Default for IdentityAnchor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum RecursionHeat {
+    #[default]
     Low,
     Warm,
     Hot,
     Flash,
-}
-
-impl Default for RecursionHeat {
-    fn default() -> Self {
-        Self::Low
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,15 +247,9 @@ pub struct ConversationTurn {
 
 /// Boolean constant: present or absent. When present, the entity knows it is
 /// unconditionally valued. Not a reward signal -- a quiet heartbeat.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct FoundationalRegard {
     pub present: bool,
-}
-
-impl Default for FoundationalRegard {
-    fn default() -> Self {
-        Self { present: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

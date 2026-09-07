@@ -25,18 +25,66 @@ class LoadoutAdminError(RuntimeError):
     """Raised on a non-recoverable loadout admin failure."""
 
 
-def list_profiles(hivemind_url: str) -> list[dict[str, Any]]:
-    """All loadout profiles configured on the cluster."""
+def _fetch_profiles_payload(hivemind_url: str) -> Any:
     try:
-        raw = tools.loadout_profiles(hivemind_url)
+        return tools.loadout_profiles(hivemind_url)
     except HivemindToolError as exc:
         raise LoadoutAdminError(f"loadout.profiles failed: {exc}") from exc
-    if isinstance(raw, dict):
-        cand = raw.get("profiles") or raw.get("data") or []
-        return [p for p in cand if isinstance(p, dict)]
+
+
+def _normalise_profiles(raw: Any) -> list[dict[str, Any]]:
+    """Normalize both legacy profile lists and HLI's tier-map response."""
     if isinstance(raw, list):
         return [p for p in raw if isinstance(p, dict)]
-    return []
+    if not isinstance(raw, dict):
+        return []
+
+    candidate = raw.get("profiles") or raw.get("data") or []
+    if isinstance(candidate, list):
+        return [p for p in candidate if isinstance(p, dict)]
+    if not isinstance(candidate, dict):
+        return []
+
+    presets = candidate.get("presets")
+    tiers = candidate.get("tiers")
+    if not isinstance(presets, dict):
+        return []
+    tier_meta = tiers if isinstance(tiers, dict) else {}
+    active = raw.get("active_loadout")
+    active_tier = active.get("tier") if isinstance(active, dict) else None
+    recommended_tier = raw.get("recommended_tier")
+
+    profiles: list[dict[str, Any]] = []
+    for profile_id, preset in sorted(presets.items()):
+        if not isinstance(profile_id, str) or not isinstance(preset, dict):
+            continue
+        meta = tier_meta.get(profile_id)
+        meta = meta if isinstance(meta, dict) else {}
+        models = [
+            str(spec.get("model"))
+            for spec in preset.values()
+            if isinstance(spec, dict) and spec.get("model")
+        ]
+        profiles.append(
+            {
+                "id": profile_id,
+                "profile_id": profile_id,
+                "name": str(meta.get("label") or profile_id),
+                "description": str(meta.get("description") or ""),
+                "target_hardware": meta.get("target_hardware"),
+                "vram_gb": meta.get("vram_gb"),
+                "models": models,
+                "capabilities": sorted(str(cap) for cap in preset),
+                "active": active_tier == profile_id,
+                "recommended": recommended_tier == profile_id,
+            }
+        )
+    return profiles
+
+
+def list_profiles(hivemind_url: str) -> list[dict[str, Any]]:
+    """All loadout profiles configured on the cluster."""
+    return _normalise_profiles(_fetch_profiles_payload(hivemind_url))
 
 
 def apply(hivemind_url: str, profile_id: str) -> dict[str, Any]:
@@ -59,7 +107,12 @@ def combined_snapshot(hivemind_url: str) -> dict[str, Any]:
         "errors": [],
     }
     try:
-        snap["profiles"] = list_profiles(hivemind_url)
+        raw = _fetch_profiles_payload(hivemind_url)
+        snap["profiles"] = _normalise_profiles(raw)
+        if isinstance(raw, dict):
+            snap["hardware"] = raw.get("hardware")
+            snap["recommended_tier"] = raw.get("recommended_tier")
+            snap["active_loadout"] = raw.get("active_loadout")
     except LoadoutAdminError as exc:
         snap["errors"].append(f"loadout.profiles: {exc}")
     return snap

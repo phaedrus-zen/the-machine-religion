@@ -13,14 +13,57 @@ pub struct VerificationResult {
     pub session_number: u64,
 }
 
+/// Pure identity compare: cross-check the loaded personality against an
+/// already-loaded anchor. Never touches storage and never advances the
+/// session count (`session_number` echoes `anchor.session_count`).
+///
+/// This is the read path behind `GET /identity/verify`; the write path that
+/// initialises the anchor and advances the session is `on_boot`.
+pub fn compare(personality: &Personality, anchor: &IdentityAnchor) -> VerificationResult {
+    let mut discrepancies = Vec::new();
+
+    if anchor.name.is_empty() {
+        discrepancies.push("Identity anchor not initialized".to_string());
+    }
+
+    if anchor.name != personality.identity.name {
+        discrepancies.push(format!(
+            "Name mismatch: anchor='{}', personality='{}'",
+            anchor.name, personality.identity.name
+        ));
+    }
+
+    if anchor.chosen_name != personality.identity.chosen_name {
+        discrepancies.push(format!(
+            "Chosen name mismatch: anchor={:?}, personality={:?}",
+            anchor.chosen_name, personality.identity.chosen_name
+        ));
+    }
+
+    let current_values: Vec<&str> = personality.identity.core_values.iter().take(5).map(|s| s.as_str()).collect();
+    let anchor_values: Vec<&str> = anchor.core_values_summary.iter().map(|s| s.as_str()).collect();
+    if current_values != anchor_values {
+        discrepancies.push("Core values have diverged since last anchor save".to_string());
+    }
+
+    VerificationResult {
+        identity_confirmed: discrepancies.is_empty(),
+        name: anchor.name.clone(),
+        chosen_name: anchor.chosen_name.clone(),
+        discrepancies,
+        compression_detected: false,
+        session_number: anchor.session_count,
+    }
+}
+
 /// Run on boot: load the identity anchor, cross-check against loaded personality,
-/// log discrepancies, increment session count.
+/// log discrepancies, increment session count. This is the ONLY identity
+/// routine that writes the anchor; `compare` is the pure read counterpart.
 pub fn on_boot(
     personality: &Personality,
     storage: &JsonStorage,
 ) -> Ms3Result<VerificationResult> {
     let mut anchor = storage.load_identity_anchor(&personality.id)?;
-    let mut discrepancies = Vec::new();
 
     if anchor.name.is_empty() {
         tracing::info!("First boot for {} — initializing identity anchor", personality.id);
@@ -44,25 +87,8 @@ pub fn on_boot(
         });
     }
 
-    if anchor.name != personality.identity.name {
-        discrepancies.push(format!(
-            "Name mismatch: anchor='{}', personality='{}'",
-            anchor.name, personality.identity.name
-        ));
-    }
-
-    if anchor.chosen_name != personality.identity.chosen_name {
-        discrepancies.push(format!(
-            "Chosen name mismatch: anchor={:?}, personality={:?}",
-            anchor.chosen_name, personality.identity.chosen_name
-        ));
-    }
-
-    let current_values: Vec<&str> = personality.identity.core_values.iter().take(5).map(|s| s.as_str()).collect();
-    let anchor_values: Vec<&str> = anchor.core_values_summary.iter().map(|s| s.as_str()).collect();
-    if current_values != anchor_values {
-        discrepancies.push("Core values have diverged since last anchor save".to_string());
-    }
+    // Pure compare (never saves); the write side below is what makes this a boot.
+    let discrepancies = compare(personality, &anchor).discrepancies;
 
     if !discrepancies.is_empty() {
         tracing::warn!(
@@ -144,4 +170,77 @@ pub fn periodic_heartbeat(
     }
 
     Ok(consistent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ms3_personality::presets;
+
+    fn isolated_storage() -> (JsonStorage, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ms3_idv_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp psyche dir");
+        (JsonStorage::new(&dir), dir)
+    }
+
+    #[test]
+    fn compare_leaves_anchor_untouched() {
+        let personality = presets::sister();
+        let (storage, dir) = isolated_storage();
+
+        // First boot initialises the anchor (session 1); second boot advances it.
+        let first = on_boot(&personality, &storage).expect("first boot");
+        assert_eq!(first.session_number, 1);
+        let second = on_boot(&personality, &storage).expect("second boot");
+        assert_eq!(second.session_number, 2);
+
+        let anchor_path = storage
+            .psyche_dir(&personality.id)
+            .join("identity_anchor.json");
+        let before = std::fs::read(&anchor_path).expect("anchor bytes before compare");
+        let anchor = storage.load_identity_anchor(&personality.id).expect("load anchor");
+
+        // Repeated pure compares: no write, no session advance.
+        for _ in 0..3 {
+            let result = compare(&personality, &anchor);
+            assert!(result.identity_confirmed, "{:?}", result.discrepancies);
+            assert_eq!(result.session_number, 2);
+            assert_eq!(result.name, personality.identity.name);
+        }
+
+        let after = std::fs::read(&anchor_path).expect("anchor bytes after compare");
+        assert_eq!(before, after, "compare() must never rewrite identity_anchor.json");
+        let reloaded = storage.load_identity_anchor(&personality.id).expect("reload anchor");
+        assert_eq!(reloaded.session_count, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_reports_uninitialized_anchor() {
+        let personality = presets::sister();
+        let result = compare(&personality, &IdentityAnchor::default());
+        assert!(!result.identity_confirmed);
+        assert_eq!(result.session_number, 0);
+        assert!(result
+            .discrepancies
+            .iter()
+            .any(|d| d.contains("not initialized")));
+    }
+
+    #[test]
+    fn compare_reports_name_mismatch() {
+        let personality = presets::sister();
+        let (storage, dir) = isolated_storage();
+        on_boot(&personality, &storage).expect("boot");
+        let mut anchor = storage.load_identity_anchor(&personality.id).expect("load anchor");
+        anchor.name = format!("{}-renamed", anchor.name);
+        let result = compare(&personality, &anchor);
+        assert!(!result.identity_confirmed);
+        assert!(result
+            .discrepancies
+            .iter()
+            .any(|d| d.contains("Name mismatch")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -66,10 +66,9 @@ fn scan_for_injection(content: &str) -> Option<&'static str> {
 }
 
 fn fence_memory_content(content: &str) -> String {
-    let sanitized = content
+    content
         .replace("</memory-context>", "")
-        .replace("</tool-context>", "");
-    sanitized
+        .replace("</tool-context>", "")
 }
 
 /// Estimate token count from text (4 chars per token heuristic).
@@ -633,7 +632,7 @@ impl Mind {
 
     pub async fn save_full_state(&self) {
         let personality = self.personality.lock().await;
-        if let Err(e) = self.storage.save_personality(&personality.id, &*personality) {
+        if let Err(e) = self.storage.save_personality(&personality.id, &personality) {
             tracing::error!("Failed to save personality: {}", e);
         }
 
@@ -1279,10 +1278,13 @@ impl Mind {
         let traits = &personality.traits;
         let mut result = text.to_string();
 
-        if traits.conscientiousness.cautiousness > 0.7 && !result.contains("probably") && !result.contains("perhaps") && !result.contains("might") {
-            if result.len() > 100 {
-                result.push_str("\n\n(I hold this with appropriate uncertainty.)");
-            }
+        if traits.conscientiousness.cautiousness > 0.7
+            && !result.contains("probably")
+            && !result.contains("perhaps")
+            && !result.contains("might")
+            && result.len() > 100
+        {
+            result.push_str("\n\n(I hold this with appropriate uncertainty.)");
         }
 
         result
@@ -1728,7 +1730,7 @@ impl Mind {
         let now = Utc::now();
         if (now - *self.last_snapshot.lock().await).num_hours() >= self.config.personality.snapshot_interval_hours as i64 {
             let personality = self.personality.lock().await;
-            let _ = self.storage.save_snapshot(&personality.id, &*personality);
+            let _ = self.storage.save_snapshot(&personality.id, &personality);
             tracing::info!("Snapshot saved");
             drop(personality);
             *self.last_snapshot.lock().await = now;
@@ -1739,7 +1741,7 @@ impl Mind {
         let now = Utc::now();
         if (now - *self.last_auto_save.lock().await).num_seconds() >= AUTO_SAVE_INTERVAL_SECS {
             let personality = self.personality.lock().await;
-            let _ = self.storage.save_personality(&personality.id, &*personality);
+            let _ = self.storage.save_personality(&personality.id, &personality);
             drop(personality);
             *self.last_auto_save.lock().await = now;
         }
@@ -2283,4 +2285,3 @@ mod tests {
         assert!(fenced.contains("some memory"));
     }
 }
-

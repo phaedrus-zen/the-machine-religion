@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Where Is Everything
 
-**Last updated:** 2026-05-21
+**Last updated:** 2026-08-18
 
 ---
 
@@ -14,6 +14,10 @@
 | **6133** | blackboard_service (HiveMind extension, lobe runtime — proposed) | Yes | HiveMind extension config |
 | **9180** | MS4 Gateway (chat, voice status, desktop control, Hermes auto-update REST, Double Agent REST + Face Lobe wiring) | Yes | `MS4_GATEWAY_PORT` env var |
 | **9181** | MS4 MCP Server (`ms4.hermes.*@v1`, `ms4.double_agent.*@v1`, etc. — 27 tools total) | Yes | `MS4_MCP_PORT` env var |
+
+MS3 port `9080` binds to `127.0.0.1` by default. `MS3_HOST=0.0.0.0`
+is an explicit lab-LAN opt-in and must be paired with network isolation or an
+authenticated reverse proxy.
 
 ## API Endpoints (37 routes)
 
@@ -47,7 +51,7 @@
 | 26 | GET | `/mcp` | `mcp_info()` | MCP server info |
 | 27 | GET | `/validate` | `validate()` | Run 8 health checks across all subsystems |
 | 28 | GET | `/events` | `get_events()` | Query recent consciousness events (since, limit params) |
-| 29 | GET | `/identity/verify` | `verify_identity()` | Run identity verification against anchor |
+| 29 | GET | `/identity/verify` | `verify_identity()` | Pure identity compare against the stored anchor (read-only: never saves, never advances the session count; `on_boot` runs only at boot and in the POST `allow_initialize` branch) |
 | 30 | POST | `/identity/verify` | `verify_identity_post()` | MS4/Hermes identity sidecar contract: verify requested spirit id against active anchor |
 | 31 | POST | `/identity/heartbeat` | `identity_heartbeat()` | MS4/Hermes identity heartbeat for continuity checks |
 | 32 | POST | `/ethics/evaluate` | `evaluate_ethics()` | MS4/Hermes Great Lense action-intent gate using `ActionIntent.v1` |
@@ -275,7 +279,7 @@
 | `HIVEMIND_GATEWAY_URL` | `http://localhost:6089` | HLI Gateway URL |
 | `APP_REGISTRY_URL` | `http://localhost:6110` | App Registry URL (non-blocking registration on startup) |
 | `MS3_PORT` | `9080` | HTTP server port |
-| `MS3_HOST` | `0.0.0.0` | Bind address |
+| `MS3_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` is an explicit secured lab-LAN override |
 | `RUST_LOG` | `info` | Log level |
 | `MS3_TICK_MS` | `100` | Consciousness tick interval (ms) |
 | `MS4_HERMES_DIR` | `~/Documents/hermes-agent` | Hermes checkout used by the MS4 overlay and optional editable install |
@@ -296,7 +300,7 @@
 | `MS4_DA_CONTINUATION_TIMEOUT` | `2.5` | HTTP timeout (s) for a continuation-classifier call. On timeout the classifier returns "unsure" and the runner falls back to phrase-only behavior. Only consulted when `MS4_DA_AUTOSTALE=1`. |
 | `MS4_DA_AUTOSTALE` | `0` (off) | When off (default, May 30 2026), a new user turn never auto-stales in-flight Depth Lobe jobs — deep jobs run to completion and the UI delivers each result automatically when done; only an explicit Cancel stops a job. Set `1` to restore the legacy continuation-aware revision staling. |
 | `MS4_VOICE_FORCE_AUTO` | `0` (off) | May 31 2026: by default voice OBEYS the UI's selected Face Lobe model (the `model`/`model_id` on the voice turn); empty selection = fast auto-picker. Set `1` to force the fast auto-picker for voice regardless of the dropdown (reverts the pre-May-31 behavior). Replaces the old `MS4_VOICE_ALLOW_MODEL_OVERRIDE`. The Face dropdown sends `model_id`; the Depth dropdown sends `depth_model_id` (obeyed for any deep job the turn dispatches). |
-| `MS4_VOICE_BREVITY` | `1` (on) | May 31 2026: voice turns ask the Face Lobe for a spoken-style reply — at most 2-3 short sentences, summarize instead of reading out lists/inventories/IDs/code, no markdown. Stops a verbose model (e.g. o4-mini) from generating a 1000+ token essay that takes 60s+ to synthesize. Set `0` to let voice replies run as long as text chat. Implemented as `voice_mode=True` -> `runner.chat` -> the `_VOICE_BREVITY_DIRECTIVE` appended to the Face Lobe `extra_system` (`hermes_runner.py`); applies to text-chat turns only when explicitly requested (text chat never sets it). |
+| `MS4_VOICE_BREVITY` | `0` (off) | Voice uses the complete conversational-answer contract by default. Set `1` to opt into the legacy shortened spoken mode when reduced synthesis time is more important than complete detail. Independent of that opt-in, substantive referential follow-ups are held before TTS/history, reject generic deferral or underlength candidates, and receive one grounded corrective generation before failing closed. |
 | `MS4_VOICE_MIN_CHUNK_WORDS` | `6` | May 31 2026: after the first (fast) chunk, the `SentenceChunker` coalesces short sentences/lines up to this many words so a chatty/list-heavy reply doesn't fire a flurry of tiny TTS calls (each adds a round-trip and widens the in-order reordering window that produces large `held_for_inorder` times). The FIRST chunk still ships ASAP (`MS4_VOICE_FIRST_CHUNK_MIN_WORDS`) so first-audio latency is unchanged. Set `1` to restore per-sentence chunking. Capped at `MS4_VOICE_MAX_CHUNK_WORDS`. |
 | `MS4_GROUNDING_FETCH_BUDGET_S` | `8` (floor `1`) | Jun 1 2026: max wall-clock seconds a chat/voice turn WAITS for a live grounding fetch (cluster inventory / active jobs / tools list) before proceeding. A cold inventory grounding makes two sequential HiveMind MCP calls (30s default each = up to 60s) and used to block the chat from starting on a "what's in my cluster?" turn. `_grounding_with_cache` (`context.py`) now runs the fetch on a daemon thread and waits at most this budget; the fetch still finishes in the background and warms the cache for next time, but the current turn proceeds with a stale cached value (if any) or an honest "lookup unavailable" grounding. Inventory `mcp_call`s also use a tight 6s per-call timeout (vs the 30s default). |
 | `MS4_VOICE_SMART_REFLEX` | `1` (on) | Jun 1 2026: after you finish speaking, a tiny model classifies the utterance's intent/sentiment and the UI plays a fitting, VARIED canned acknowledgment (the "buying time" cue) during the dead air while the reply generates. Runs on a daemon thread concurrent with the Face Lobe reply (`voice.py` `emit_smart_reflex` -> `reflex` SSE event). Set `0` to disable. |

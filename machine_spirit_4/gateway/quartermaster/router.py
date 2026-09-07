@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -142,6 +143,38 @@ def _decision_allows(decision: dict[str, Any]) -> bool:
         return False
     resolution = str(decision.get("resolution", "")).lower()
     return resolution in {"allow", "allowed", "approved"}
+
+
+def _inline_scope_block_reason(query: str) -> str | None:
+    """Return why one inline tool cannot satisfy the whole request.
+
+    Inline execution is an optimization with a deliberately narrow contract:
+    exactly one zero-argument read and a narration of that result. Compound
+    requests and conversation-reference deliverables need the Depth loop so a
+    top-ranked tool cannot silently erase the remaining requirements.
+    """
+    normalized = " ".join(str(query or "").lower().split())
+    if not normalized:
+        return None
+    if re.search(
+        r"\b(first|previous|prior|earlier|last)\s+(?:conversation\s+)?(?:turn|message|response|answer|marker)\b",
+        normalized,
+    ):
+        return "request includes a conversation-context deliverable"
+    if re.search(r"\b(?:both|plus|also|then|after that|as well as)\b", normalized):
+        return "request contains multiple deliverables"
+    if normalized.count(" tool") > 1:
+        return "request names multiple tool operations"
+    if ";" in normalized or "\n" in str(query or ""):
+        return "request contains multiple clauses"
+    if " and " in normalized:
+        verbs = re.findall(
+            r"\b(?:use|run|call|check|get|list|show|report|return|compare|summarize|verify)\b",
+            normalized,
+        )
+        if len(verbs) >= 2:
+            return "request contains multiple actions"
+    return None
 
 
 def _ethics_timeout() -> float:
@@ -263,6 +296,18 @@ class ToolRouter:
                     verdict=VERDICT_NONE,
                     query=query,
                     reason=resolution.fallback_reason or "no tool resolved",
+                    resolution=resolution,
+                )
+            )
+
+        scope_block_reason = _inline_scope_block_reason(query)
+        if scope_block_reason is not None:
+            return self._finalize(
+                ToolRouteDecision(
+                    schema="Ms4ToolRouteDecision.v1",
+                    verdict=VERDICT_DEPTH,
+                    query=query,
+                    reason=scope_block_reason,
                     resolution=resolution,
                 )
             )

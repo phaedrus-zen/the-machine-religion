@@ -25,6 +25,7 @@ from machine_spirit_4.double_agent.continuation import (
     CLASSIFIER_CONSULT_MAX_LEN,
     _extract_text,
     _parse_verdict,
+    make_llm_continuation_classifier,
     phrase_is_continuation,
 )
 
@@ -365,3 +366,55 @@ def test_extract_text_text_field():
     assert _extract_text("CONTINUE") == "CONTINUE"
     assert _extract_text({"weird": 1}) == ""
     assert _extract_text(None) == ""
+
+
+def test_hivemind_classifier_uses_current_recommendation_contract(monkeypatch):
+    from machine_spirit_4.gateway import hivemind_tools
+
+    observed = {}
+
+    def recommend(url, **kwargs):
+        observed["recommend"] = {"url": url, "kwargs": kwargs}
+        return {
+            "capability": "chat",
+            "quality": "balanced",
+            "recommended_model": "opaque-continuation-chat",
+            "backend": "ollama",
+        }
+
+    def inference(url, **kwargs):
+        observed["inference"] = {"url": url, "kwargs": kwargs}
+        return {"choices": [{"message": {"content": "CONTINUE"}}]}
+
+    monkeypatch.setattr(hivemind_tools, "models_recommend", recommend)
+    monkeypatch.setattr(hivemind_tools, "inference_chat", inference)
+    classifier = make_llm_continuation_classifier("http://hive")
+
+    assert classifier("go for it") is True
+    assert observed["recommend"] == {
+        "url": "http://hive",
+        "kwargs": {"capability": "chat"},
+    }
+    assert observed["inference"]["kwargs"]["model"] == "opaque-continuation-chat"
+
+
+def test_hivemind_classifier_rejects_non_chat_recommendation(monkeypatch):
+    from machine_spirit_4.gateway import hivemind_tools
+
+    monkeypatch.setattr(
+        hivemind_tools,
+        "models_recommend",
+        lambda *_args, **_kwargs: {
+            "capability": "tts",
+            "recommended_model": "opaque-non-chat",
+            "backend": "tts_gim",
+        },
+    )
+    monkeypatch.setattr(
+        hivemind_tools,
+        "inference_chat",
+        lambda *_args, **_kwargs: pytest.fail("non-chat recommendation must be rejected"),
+    )
+    classifier = make_llm_continuation_classifier("http://hive")
+
+    assert classifier("go for it") is None

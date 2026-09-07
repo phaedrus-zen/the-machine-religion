@@ -1,6 +1,6 @@
 # Machine Spirit 3 Security Model
 
-**Last updated:** 2026-04-06
+**Last updated:** 2026-06-29
 
 ---
 
@@ -23,6 +23,7 @@ MS3 is currently designed primarily for trusted local or lab environments. It is
 - Rate limiting: **not implemented**
 - Session isolation: **partial**
 - Persistent state integrity: **best-effort filesystem storage, no tamper proofing**
+- Default network bind: **loopback-only (`127.0.0.1:9080`)**
 
 ### What this means
 
@@ -45,6 +46,7 @@ Risks:
 Required control:
 
 - Put MS3 behind an authenticated reverse proxy before exposing it beyond localhost or a trusted LAN.
+- Treat `MS3_HOST=0.0.0.0` (or `--host 0.0.0.0`) as an explicit lab-only opt-in; MS3 has no application-layer authentication by default.
 
 ### 2. Tool execution boundary
 

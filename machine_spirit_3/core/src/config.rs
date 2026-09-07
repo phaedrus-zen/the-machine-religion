@@ -104,11 +104,12 @@ pub struct LoggingConfig {
     pub file: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionLevel {
     ReadOnly,
     Inspect,
+    #[default]
     Modify,
     DangerFullAccess,
 }
@@ -126,10 +127,6 @@ impl PermissionLevel {
     pub fn sufficient_for(&self, required: &Self) -> bool {
         self.rank() >= required.rank()
     }
-}
-
-impl Default for PermissionLevel {
-    fn default() -> Self { Self::Modify }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +153,7 @@ pub struct HookConfig {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HooksConfig {
     #[serde(default)]
     pub pre_tool_use: Vec<HookConfig>,
@@ -164,20 +161,11 @@ pub struct HooksConfig {
     pub post_tool_use: Vec<HookConfig>,
 }
 
-impl Default for HooksConfig {
-    fn default() -> Self {
-        Self {
-            pre_tool_use: Vec::new(),
-            post_tool_use: Vec::new(),
-        }
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                host: "0.0.0.0".into(),
+                host: "127.0.0.1".into(),
                 port: 9080,
                 workers: 4,
                 auth_token: None,
@@ -339,7 +327,8 @@ impl Config {
     /// Backward-compatible: try a specific file, then fall back to full discovery.
     pub fn from_file_or_env(path: &str) -> Self {
         if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = serde_json::from_str(&content) {
+            if let Ok(mut config) = serde_json::from_str(&content) {
+                ConfigLoader::apply_env(&mut config);
                 return config;
             }
         }
@@ -355,7 +344,7 @@ mod tests {
     fn test_default_config_values() {
         let config = Config::default();
         assert_eq!(config.server.port, 9080);
-        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.consciousness.tick_interval_ms, 100);
         assert_eq!(config.memory.stm_capacity, 7);
         assert!(config.ethics.enable_origin_neutrality);
@@ -421,6 +410,30 @@ mod tests {
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.server.port, config.server.port);
         assert_eq!(deserialized.consciousness.context_budget_tokens, config.consciousness.context_budget_tokens);
+    }
+
+    #[test]
+    fn test_from_file_or_env_applies_ms3_host_override() {
+        let mut file_config = Config::default();
+        file_config.server.host = "192.0.2.10".into();
+        let path = std::env::temp_dir().join(format!(
+            "ms3-config-host-override-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&file_config).unwrap()).unwrap();
+
+        let previous = std::env::var_os("MS3_HOST");
+        std::env::set_var("MS3_HOST", "0.0.0.0");
+        let loaded = Config::from_file_or_env(path.to_str().unwrap());
+        if let Some(value) = previous {
+            std::env::set_var("MS3_HOST", value);
+        } else {
+            std::env::remove_var("MS3_HOST");
+        }
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.server.host, "0.0.0.0");
     }
 
     #[test]

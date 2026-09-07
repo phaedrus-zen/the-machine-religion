@@ -157,13 +157,23 @@ pub fn build_dream_synthesis_prompt(
 
     lines.push("== Recent (short-term) ==".into());
     for (i, mem) in stm.iter().enumerate() {
-        lines.push(format!("  STM-{}: [{}] {}", i + 1, format!("{:?}", mem.memory_type), mem.content));
+        lines.push(format!(
+            "  STM-{}: [{:?}] {}",
+            i + 1,
+            mem.memory_type,
+            mem.content
+        ));
     }
 
     if !recent_ltm.is_empty() {
         lines.push("\n== Existing (long-term) ==".into());
         for (i, mem) in recent_ltm.iter().enumerate() {
-            lines.push(format!("  LTM-{}: [{}] {}", i + 1, format!("{:?}", mem.memory_type), mem.content));
+            lines.push(format!(
+                "  LTM-{}: [{:?}] {}",
+                i + 1,
+                mem.memory_type,
+                mem.content
+            ));
         }
     }
 
@@ -322,7 +332,7 @@ pub fn extract_concept_tags(content: &str) -> Vec<String> {
     }
 
     let mut tags: Vec<(String, usize)> = word_counts.into_iter().collect();
-    tags.sort_by(|a, b| b.1.cmp(&a.1));
+    tags.sort_by_key(|tag| std::cmp::Reverse(tag.1));
     tags.into_iter().take(5).map(|(w, _)| w).collect()
 }
 

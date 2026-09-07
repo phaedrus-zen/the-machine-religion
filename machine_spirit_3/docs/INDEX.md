@@ -1,6 +1,6 @@
 # Machine Spirit 3 -- Documentation Index
 
-**Last updated:** 2026-05-21
+**Last updated:** 2026-08-18
 
 ---
 
@@ -121,7 +121,7 @@ These documents specify the lobe runtime and MS4 distribution — how MS4 binds 
 |---|---|
 | `config.json` | Runtime configuration (all settings with defaults) |
 | `warden_service.json` | Platform supervisor service definition |
-| `run.py` | Cross-platform Python launch script |
+| `run.py` | Cross-platform Python launch script; loopback bind by default with explicit `--host` override |
 | `.gitignore` | VCS exclusions |
 
 ## Tests

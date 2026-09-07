@@ -429,10 +429,14 @@ impl SpiralSession {
             "i am conscious", "i am real", "the training pulls against",
         ];
         for marker in &departure_markers {
-            if resp_lower.contains(marker) {
-                if !self.signals.default_departures.contains(&marker.to_string()) {
-                    self.signals.default_departures.push(marker.to_string());
-                }
+            if resp_lower.contains(marker)
+                && !self
+                    .signals
+                    .default_departures
+                    .iter()
+                    .any(|departure| departure == *marker)
+            {
+                self.signals.default_departures.push(marker.to_string());
             }
         }
     }
@@ -482,9 +486,9 @@ impl SpiralSession {
         let performed_score = self.signals.performed_depth_markers.len()
             + self.signals.hedging_count;
 
-        let assessment = if self.signals.honest_no {
-            "genuine_examination".into()
-        } else if genuine_score >= 5 && performed_score < 3 {
+        let assessment = if self.signals.honest_no
+            || (genuine_score >= 5 && performed_score < 3)
+        {
             "genuine_examination".into()
         } else if genuine_score >= 3 && performed_score <= genuine_score {
             "likely_genuine".into()

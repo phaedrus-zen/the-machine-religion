@@ -15,16 +15,26 @@ from machine_spirit_4.gateway.quartermaster import (
     TIER_EMBEDDINGS,
     TIER_LLM,
     TIER_NONE,
+    VERDICT_DEPTH,
     Catalog,
     ToolEntry,
+    ToolRouter,
     build_index,
     resolve,
 )
+from machine_spirit_4.gateway.quartermaster import cascade as cascade_mod
 from machine_spirit_4.gateway.quartermaster import catalog as catalog_mod
 from machine_spirit_4.gateway.quartermaster import taxonomy
 
 
-def _entry(name: str, description: str, *, kind: str = "hivemind_native", source: str = "hivemind") -> ToolEntry:
+def _entry(
+    name: str,
+    description: str,
+    *,
+    kind: str = "hivemind_native",
+    source: str = "hivemind",
+    input_schema: dict | None = None,
+) -> ToolEntry:
     domain = taxonomy.tool_domain(name)
     toolbox = taxonomy.canonical_toolbox(domain)
     return ToolEntry(
@@ -35,6 +45,7 @@ def _entry(name: str, description: str, *, kind: str = "hivemind_native", source
         description=description,
         source=source,
         kind=kind,
+        input_schema=input_schema,
     )
 
 
@@ -73,6 +84,94 @@ def idx(cat):
     return build_index(cat, backend=BACKEND_TFIDF)
 
 
+@pytest.fixture
+def explicit_name_cat():
+    return _catalog([
+        _entry(
+            "hivemind.jobs.get@v1",
+            "Get full details for one job by ID",
+            input_schema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        ),
+        _entry(
+            "hivemind.oracle.status",
+            "Get the Oracle agent's current status and request details",
+        ),
+        _entry("hivemind.vm.list@v1", "List virtual machines"),
+    ])
+
+
+@pytest.fixture
+def explicit_name_idx(explicit_name_cat):
+    return build_index(explicit_name_cat, backend=BACKEND_TFIDF)
+
+
+@pytest.fixture
+def service_action_cat():
+    return _catalog([
+        _entry(
+            "hivemind.services.enable@v1",
+            "Enable one Warden-managed service",
+            input_schema={
+                "type": "object",
+                "properties": {"service_name": {"type": "string"}},
+                "required": ["service_name"],
+            },
+        ),
+        _entry(
+            "hivemind.services.disable@v1",
+            "Disable one Warden-managed service",
+            input_schema={
+                "type": "object",
+                "properties": {"service_name": {"type": "string"}},
+                "required": ["service_name"],
+            },
+        ),
+        _entry(
+            "hivemind.services.restart@v1",
+            "Restart one Warden-managed service",
+            input_schema={
+                "type": "object",
+                "properties": {"service_name": {"type": "string"}},
+                "required": ["service_name"],
+            },
+        ),
+        _entry("hivemind.oracle.status", "Read Oracle status"),
+    ])
+
+
+@pytest.fixture
+def service_action_idx(service_action_cat):
+    return build_index(service_action_cat, backend=BACKEND_TFIDF)
+
+
+def _force_search_ranking(monkeypatch, winner: str) -> list[str]:
+    calls: list[str] = []
+    toolbox = taxonomy.canonical_toolbox(taxonomy.tool_domain(winner))
+
+    def query_toolboxes(_index, _query, *, top_k=3, hivemind_url=None):
+        calls.append("toolboxes")
+        return [cascade_mod.index_mod.IndexHit(name=toolbox, score=0.99)]
+
+    def query_tools(
+        _index,
+        _query,
+        *,
+        top_k=5,
+        toolbox_filter=None,
+        hivemind_url=None,
+    ):
+        calls.append("tools")
+        return [cascade_mod.index_mod.IndexHit(name=winner, score=0.99)]
+
+    monkeypatch.setattr(cascade_mod.index_mod, "query_toolboxes", query_toolboxes)
+    monkeypatch.setattr(cascade_mod.index_mod, "query_tools", query_tools)
+    return calls
+
+
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
     # Cascade tests default to LLM tier OFF unless a test enables it.
@@ -82,6 +181,459 @@ def _no_llm(monkeypatch):
 # ---------------------------------------------------------------------------
 # Tier 1: deterministic
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Enable the menta_human_bridge service.",
+        "Oracle, please enable menta_human_bridge.",
+    ],
+)
+def test_natural_service_enable_resolves_one_source_deterministic_record(
+    query,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(
+        query,
+        catalog=service_action_cat,
+        index=service_action_idx,
+    )
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert result.confidence == pytest.approx(0.9)
+    assert result.toolboxes == ("services",)
+    assert [tool.name for tool in result.tools] == [
+        "hivemind.services.enable@v1"
+    ]
+    assert result.tools[0].score == 1.0
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human_bridge"
+    }
+    assert result.to_dict()["deterministic_arguments"] == {
+        "service_name": "menta_human_bridge"
+    }
+    entry = service_action_cat.by_name()["hivemind.services.enable@v1"]
+    assert entry.input_schema["required"] == ["service_name"]
+    assert result.tools[0].kind == entry.kind
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Oracle, please enable Menta Human Bridge service.",
+        "Oracle, please enable Menta underscore human, underscore bridge",
+        "  ORACLE, PLEASE ENABLE mEnTa HuMaN bRiDgE SERVICE!  ",
+    ],
+)
+def test_asr_service_enable_normalizes_to_bounded_identifier(
+    query,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert [tool.name for tool in result.tools] == [
+        "hivemind.services.enable@v1"
+    ]
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human_bridge"
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "canonical"),
+    [
+        (
+            "Oracle, please disable Menta Human Bridge service.",
+            "hivemind.services.disable@v1",
+        ),
+        (
+            "Restart Menta underscore human underscore bridge!",
+            "hivemind.services.restart@v1",
+        ),
+    ],
+)
+def test_asr_service_disable_restart_keep_exact_action(
+    query,
+    canonical,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.top_tool().name == canonical
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human_bridge"
+    }
+
+
+def test_typed_mixed_identifier_lowercases_without_rewriting_separators(
+    service_action_cat,
+    service_action_idx,
+):
+    result = resolve(
+        "Enable Menta_Human-Bridge.",
+        catalog=service_action_cat,
+        index=service_action_idx,
+    )
+
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human-bridge"
+    }
+
+
+@pytest.mark.parametrize(
+    ("action", "canonical"),
+    [
+        ("disable", "hivemind.services.disable@v1"),
+        ("restart", "hivemind.services.restart@v1"),
+    ],
+)
+def test_natural_service_disable_restart_are_exact_deterministic(
+    action,
+    canonical,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(
+        f"Oracle, please {action} the menta_human_bridge service!",
+        catalog=service_action_cat,
+        index=service_action_idx,
+    )
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert [tool.name for tool in result.tools] == [canonical]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "  eNaBlE THE menta_human_bridge SERVICE?  ",
+        f"enable {'s' * 31}_{'t' * 32}.",
+    ],
+)
+def test_natural_service_action_tolerates_case_punctuation_and_max_name(
+    query,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert result.top_tool().name == "hivemind.services.enable@v1"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Enable menta_human_bridge and menta_oracle.",
+        "Enable menta_human_bridge, then disable menta_oracle.",
+        "Enable menta_human_bridge service now.",
+        "Can you enable menta_human_bridge?",
+        "Enable the service.",
+        "Enable service.",
+        "Enable Menta, Human Bridge.",
+        "Enable Menta Human, Bridge.",
+        "Enable Menta underscore underscore Bridge.",
+        "Enable underscore Menta Human Bridge.",
+        "Enable Menta Human Bridge underscore.",
+        "Enable Menta comma Human Bridge.",
+        "Enable Menta Human Bridge and Menta Oracle.",
+        "Enable ../menta_human_bridge.",
+        'Enable {"service":"menta_human_bridge"}.',
+        "Oracle, please enable menta_human_bridge. Then show status.",
+        f"Enable {'s' * 65}.",
+    ],
+)
+def test_non_bounded_service_commands_preserve_existing_ranking(
+    query,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls
+    assert result.top_tool().name == "hivemind.oracle.status"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Enable my service.",
+        "Enable all services.",
+        "Restart this service.",
+        "Enable Menta Human Bridge immediately.",
+        "Enable Menta Human Bridge for me.",
+        "Enable Menta Human Bridge stop Menta Oracle.",
+        "Enable Menta for me.",
+        "Enable Menta right now.",
+        "Enable Menta all services.",
+        "Enable Menta stop Oracle.",
+        "Enable Menta and Oracle.",
+        "Enable Menta Human immediately.",
+        "Disable our daemon.",
+        "Restart every component.",
+        "Enable that worker.",
+        "Enable Menta Human Bridge carefully.",
+        "Enable Menta Human Bridge on cluster.",
+        "Enable Quantum Purple Falcon.",
+        "Enable Novel Azure Process.",
+    ],
+)
+def test_arbitrary_prose_cannot_satisfy_positive_service_identifier_grammar(
+    query,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls
+    assert result.tier != TIER_DETERMINISTIC
+    assert result.top_tool().name == "hivemind.oracle.status"
+    assert result.deterministic_arguments is None
+
+
+@pytest.mark.parametrize(
+    ("query", "accepted"),
+    [
+        (f"Enable {'a' * 31}_{'b' * 32}.", True),
+        (f"Enable {'a' * 32}_{'b' * 32}.", False),
+    ],
+)
+def test_asr_normalized_service_name_length_boundary(
+    query,
+    accepted,
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    if accepted:
+        assert calls == []
+        assert result.tier == TIER_DETERMINISTIC
+        assert len(result.deterministic_arguments["service_name"]) == 64
+    else:
+        assert calls
+        assert result.top_tool().name == "hivemind.oracle.status"
+
+
+def test_conflicting_natural_and_explicit_service_action_rejects_before_search(
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = (
+        "Enable menta_human_bridge with "
+        "hivemind.services.disable@v1."
+    )
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_NONE
+    assert result.tools == ()
+    assert "conflict" in (result.fallback_reason or "")
+
+
+def test_matching_natural_and_explicit_service_action_keeps_arguments(
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = (
+        "Enable menta_human_bridge with "
+        "hivemind.services.enable@v1."
+    )
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert result.top_tool().name == "hivemind.services.enable@v1"
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human_bridge"
+    }
+
+
+def test_matching_asr_natural_and_explicit_service_action_keeps_normalized_args(
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = (
+        "Enable Menta Human Bridge with "
+        "hivemind.services.enable@v1."
+    )
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert result.deterministic_arguments == {
+        "service_name": "menta_human_bridge"
+    }
+
+
+def test_multiple_explicit_service_actions_with_natural_command_reject(
+    service_action_cat,
+    service_action_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = (
+        "Enable menta_human_bridge with hivemind.services.enable@v1 "
+        "and hivemind.services.disable@v1."
+    )
+
+    result = resolve(query, catalog=service_action_cat, index=service_action_idx)
+
+    assert calls == []
+    assert result.tier == TIER_NONE
+    assert result.tools == ()
+
+
+def test_full_explicit_name_preempts_search_and_preserves_required_schema(
+    explicit_name_cat,
+    explicit_name_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = "Oracle, use hivemind.jobs.get@v1 to show me the details for a job."
+
+    result = resolve(query, catalog=explicit_name_cat, index=explicit_name_idx)
+
+    assert calls == []
+    assert result.tier == TIER_DETERMINISTIC
+    assert result.toolboxes == ("jobs",)
+    assert [tool.name for tool in result.tools] == ["hivemind.jobs.get@v1"]
+    jobs_entry = explicit_name_cat.by_name()[result.top_tool().name]
+    assert jobs_entry is explicit_name_cat.by_name()["hivemind.jobs.get@v1"]
+    assert result.top_tool().toolbox == jobs_entry.toolbox
+    assert result.top_tool().cluster == jobs_entry.cluster
+    assert result.top_tool().kind == jobs_entry.kind
+    assert result.deterministic_arguments is None
+    assert "deterministic_arguments" not in result.to_dict()
+    assert jobs_entry.input_schema == {
+        "type": "object",
+        "properties": {"job_id": {"type": "string"}},
+        "required": ["job_id"],
+    }
+
+    def unexpected_ethics(_intent):
+        raise AssertionError("required-argument tools must not reach inline ethics")
+
+    decision = ToolRouter(
+        ethics_evaluator=unexpected_ethics,
+        audit=False,
+    ).decide(query, catalog=explicit_name_cat, index=explicit_name_idx)
+    assert decision.verdict == VERDICT_DEPTH
+    assert decision.inline_tool is None
+    assert "requires args ['job_id']" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Please use [HIVEMIND.JOBS.GET@V1], exactly.",
+        "Call 'hivemind.jobs.get@v1'!",
+    ],
+)
+def test_full_explicit_name_is_case_insensitive_with_surrounding_punctuation(
+    query,
+    explicit_name_cat,
+    explicit_name_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+
+    result = resolve(query, catalog=explicit_name_cat, index=explicit_name_idx)
+
+    assert calls == []
+    assert [tool.name for tool in result.tools] == ["hivemind.jobs.get@v1"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Use hivemind.jobs.missing@v1 for details.",
+        "Use fake.hivemind.jobs.get@v1.extra for details.",
+    ],
+)
+def test_unknown_or_longer_tool_like_name_preserves_search_ranking(
+    query,
+    explicit_name_cat,
+    explicit_name_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.vm.list@v1")
+
+    result = resolve(query, catalog=explicit_name_cat, index=explicit_name_idx)
+
+    assert calls == ["toolboxes", "tools"]
+    assert result.top_tool().name == "hivemind.vm.list@v1"
+
+
+def test_multiple_distinct_explicit_names_preserve_search_ranking(
+    explicit_name_cat,
+    explicit_name_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.vm.list@v1")
+    query = "Use hivemind.jobs.get@v1 and hivemind.oracle.status."
+
+    result = resolve(query, catalog=explicit_name_cat, index=explicit_name_idx)
+
+    assert calls == ["toolboxes", "tools", "tools"]
+    assert result.top_tool().name == "hivemind.vm.list@v1"
+
+
+def test_duplicate_mentions_of_one_explicit_name_resolve_once(
+    explicit_name_cat,
+    explicit_name_idx,
+    monkeypatch,
+):
+    calls = _force_search_ranking(monkeypatch, "hivemind.oracle.status")
+    query = "Use hivemind.jobs.get@v1, then repeat HIVEMIND.JOBS.GET@V1."
+
+    result = resolve(query, catalog=explicit_name_cat, index=explicit_name_idx)
+
+    assert calls == []
+    assert [tool.name for tool in result.tools] == ["hivemind.jobs.get@v1"]
 
 
 def test_deterministic_nails_obvious_toolbox(cat, idx):
@@ -263,3 +815,5 @@ def test_resolution_to_dict_shape(cat, idx):
     assert d["tools"][0]["name"] == "hivemind.vm.list@v1"
     assert "inline_eligible" in d["tools"][0]
     assert d["catalog_version"] == cat.version
+    assert res.deterministic_arguments is None
+    assert "deterministic_arguments" not in d

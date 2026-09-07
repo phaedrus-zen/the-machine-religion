@@ -44,11 +44,13 @@ the gateway or hit ``POST /reflexes/regenerate`` to render it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import random
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -62,6 +64,7 @@ from .voice import (
 
 
 log = logging.getLogger("ms4.gateway.canned_reflexes")
+_REFLEX_IO_LOCK = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
@@ -303,14 +306,12 @@ def generate_reflex(
     qa: bool | None = None,
     retries: int | None = None,
 ) -> dict[str, Any]:
-    """Synthesize one reflex via HiveMind TTS and persist the WAV bytes.
+    """Synthesize one reflex and promote it only after fail-closed QA.
 
-    With QA on (``MS4_REFLEX_QA``, default), the render is transcribed
-    back and judged; a bad render is re-rendered with an LLM-rephrased,
-    TTS-stable equivalent (up to ``retries`` times). Writes a sidecar
-    ``<id>.meta.json`` with the effective text + verdict + heard-back
-    transcript. Returns ``{id, voice, path, size_bytes, validated,
-    effective_text, heard}``.
+    Every render is first written to a same-directory candidate. Real ASR
+    evidence and an affirmative semantic judge are both required before the
+    candidate WAV and its hash-bound sidecar replace the live pair. HOLD leaves
+    any last-known-good pair untouched.
     """
     reflex = _REFLEX_BY_ID.get(reflex_id)
     if reflex is None:
@@ -321,6 +322,9 @@ def generate_reflex(
     qa = _reflex_qa_enabled() if qa is None else qa
     retries = _reflex_qa_retries() if retries is None else retries
     original = reflex.text
+    safe_voice = _safe_voice(use_voice)
+    path = reflex_path(safe_voice, reflex_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     def _synth(text: str) -> bytes:
         return synthesize(
@@ -329,57 +333,103 @@ def generate_reflex(
         )["audio_bytes"]
 
     qa_attempts: list[dict[str, Any]] = []
-    fallback: tuple[bytes, str, str] | None = None  # first render: (audio, text, heard)
-    chosen: tuple[bytes, str, bool | None, str] | None = None  # (audio, text, validated, heard)
     text = original
-    max_attempts = (retries + 1) if qa else 1
+    max_attempts = (max(0, retries) + 1) if qa else 1
+    hold_reason = "qa_disabled" if not qa else "retry_exhausted"
+    last_heard = ""
+    last_candidate_size = 0
+
     for attempt in range(max_attempts):
         audio = _synth(text)
-        if not qa:
-            chosen = (audio, text, None, "")
-            break
-        v = validate_reflex_audio(original, audio, hivemind_url)
-        qa_attempts.append({"text": text, "valid": v["valid"], "heard": v["heard"][:120], "reason": v["reason"]})
-        if fallback is None:
-            fallback = (audio, text, v["heard"])
-        if v["valid"]:
-            # asr_unavailable == couldn't actually check -> accept the render
-            # but record validated=None (unknown), not True.
-            validated = None if v["reason"] == "asr_unavailable" else True
-            chosen = (audio, text, validated, v["heard"])
-            break
-        # Re-render with a rephrased, TTS-stable equivalent (if attempts remain).
-        text = rephrase_reflex_text(original, hivemind_url, avoid=[a["text"] for a in qa_attempts])
-    if chosen is None:
-        # All attempts failed QA -> serve the first render, flagged invalid.
-        a, t, h = fallback if fallback is not None else (_synth(original), original, "")
-        chosen = (a, t, False, h)
+        last_candidate_size = len(audio)
+        candidate_path = _write_candidate_audio(path, audio)
+        try:
+            candidate_audio = candidate_path.read_bytes()
+            if not qa:
+                qa_attempts.append({
+                    "text": text,
+                    "valid": False,
+                    "heard": "",
+                    "reason": "qa_disabled",
+                })
+                break
 
-    audio_bytes, eff_text, validated, heard = chosen
-    path = reflex_path(use_voice, reflex_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(audio_bytes)
-    _write_meta(use_voice, reflex_id, {
-        "schema": "Ms4ReflexMeta.v1",
-        "id": reflex_id,
-        "original_text": original,
-        "effective_text": eff_text,
-        "validated": validated,
-        "heard": heard,
-        "qa_attempts": qa_attempts,
-        "qa_version": _QA_VERSION,
-        "rendered_at": int(time.time()),
-    })
+            verdict = validate_reflex_audio(original, candidate_audio, hivemind_url)
+            last_heard = str(verdict.get("heard") or "")
+            reason = str(verdict.get("reason") or "qa_inconclusive")
+            qa_attempts.append({
+                "text": text,
+                "valid": verdict.get("valid") is True,
+                "heard": last_heard[:120],
+                "reason": reason,
+            })
+            if verdict.get("valid") is True:
+                meta = {
+                    "schema": "Ms4ReflexMeta.v1",
+                    "id": reflex_id,
+                    "original_text": original,
+                    "effective_text": text,
+                    "validated": True,
+                    "heard": last_heard,
+                    "qa_attempts": qa_attempts,
+                    "qa_version": _QA_VERSION,
+                    "audio_sha256": _audio_sha256(candidate_audio),
+                    "rendered_at": int(time.time()),
+                }
+                _promote_candidate(
+                    candidate_path=candidate_path,
+                    voice=safe_voice,
+                    reflex_id=reflex_id,
+                    meta=meta,
+                )
+                return {
+                    "id": reflex_id,
+                    "voice": safe_voice,
+                    "model": use_model,
+                    "format": use_format,
+                    "path": str(path),
+                    "size_bytes": len(candidate_audio),
+                    "validated": True,
+                    "effective_text": text,
+                    "heard": last_heard,
+                    "status": "promoted",
+                    "promoted": True,
+                    "hold_reason": None,
+                    "qa_attempts": qa_attempts,
+                }
+
+            hold_reason = reason
+            if reason in _QA_TERMINAL_HOLD_REASONS:
+                break
+            if attempt + 1 >= max_attempts:
+                hold_reason = "retry_exhausted"
+                break
+            text = rephrase_reflex_text(
+                original,
+                hivemind_url,
+                avoid=[item["text"] for item in qa_attempts],
+            )
+        finally:
+            candidate_path.unlink(missing_ok=True)
+
+    live = _read_reflex_bundle(safe_voice, reflex_id)
+    live_audio = live[0] if live is not None else None
     return {
         "id": reflex_id,
-        "voice": _safe_voice(use_voice),
+        "voice": safe_voice,
         "model": use_model,
         "format": use_format,
         "path": str(path),
-        "size_bytes": len(audio_bytes),
-        "validated": validated,
-        "effective_text": eff_text,
-        "heard": heard,
+        "size_bytes": len(live_audio) if live_audio is not None else 0,
+        "validated": False,
+        "effective_text": text,
+        "heard": last_heard,
+        "status": "hold",
+        "promoted": False,
+        "hold_reason": hold_reason,
+        "candidate_size_bytes": last_candidate_size,
+        "qa_attempts": qa_attempts,
+        "last_known_good_preserved": live is not None,
     }
 
 
@@ -403,45 +453,86 @@ def generate_all(
     use_voice = voice or DEFAULT_REFLEX_VOICE
     qa = _reflex_qa_enabled() if qa is None else qa
     generated: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = []
     skipped: list[str] = []
     revalidated: list[str] = []
     failed: dict[str, str] = {}
     for reflex in REFLEXES:
         path = reflex_path(use_voice, reflex.id)
         if path.exists() and not force:
-            meta = _read_meta(use_voice, reflex.id)
-            # Already rendered. Skip if QA is off, or it passed QA under the
-            # CURRENT validator version (a newer/stricter validator forces a
-            # re-check of previously-"validated" reflexes).
-            already_ok = bool(meta and meta.get("validated") is True
-                              and meta.get("qa_version") == _QA_VERSION)
-            if not qa or already_ok:
+            # A cache hit is usable only when the current sidecar validates and
+            # hashes to these exact bytes.
+            if _read_reflex_bundle(use_voice, reflex.id) is not None:
                 skipped.append(reflex.id)
                 continue
-            # QA on but not yet validated: validate the EXISTING render
-            # first (cheap) rather than re-render a good one that just
-            # lacks a sidecar. Only re-render if it actually fails.
-            try:
-                v = validate_reflex_audio(reflex.text, path.read_bytes(), hivemind_url)
-                if v["reason"] == "asr_unavailable":
-                    # Can't check right now -> leave as-is (no meta), retry
-                    # on a later pass when ASR is up. Don't re-render blindly.
-                    skipped.append(reflex.id)
-                    continue
-                if v["valid"]:
-                    _write_meta(use_voice, reflex.id, {
-                        "schema": "Ms4ReflexMeta.v1", "id": reflex.id,
-                        "original_text": reflex.text, "effective_text": reflex.text,
-                        "validated": True, "heard": v["heard"], "qa_attempts": [],
-                        "qa_version": _QA_VERSION, "rendered_at": int(time.time()),
+            if qa:
+                # Validate an existing unbound/stale render before spending a
+                # TTS call. Inconclusive evidence is HOLD, not permission to
+                # replace it or bless it.
+                try:
+                    with _REFLEX_IO_LOCK:
+                        existing_audio = path.read_bytes()
+                    verdict = validate_reflex_audio(reflex.text, existing_audio, hivemind_url)
+                    reason = str(verdict.get("reason") or "qa_inconclusive")
+                    if verdict.get("valid") is True:
+                        meta = {
+                            "schema": "Ms4ReflexMeta.v1",
+                            "id": reflex.id,
+                            "original_text": reflex.text,
+                            "effective_text": reflex.text,
+                            "validated": True,
+                            "heard": verdict.get("heard") or "",
+                            "qa_attempts": [],
+                            "qa_version": _QA_VERSION,
+                            "audio_sha256": _audio_sha256(existing_audio),
+                            "rendered_at": int(time.time()),
+                        }
+                        if _bind_existing_audio(
+                            voice=use_voice,
+                            reflex_id=reflex.id,
+                            expected_audio=existing_audio,
+                            meta=meta,
+                        ):
+                            revalidated.append(reflex.id)
+                            skipped.append(reflex.id)
+                        elif _read_reflex_bundle(use_voice, reflex.id) is not None:
+                            # Another generator promoted a complete valid pair
+                            # while ASR was checking the prior bytes.
+                            skipped.append(reflex.id)
+                        else:
+                            held.append({
+                                "id": reflex.id,
+                                "voice": _safe_voice(use_voice),
+                                "status": "hold",
+                                "promoted": False,
+                                "hold_reason": "concurrent_audio_change",
+                            })
+                        continue
+                    if reason in _QA_TERMINAL_HOLD_REASONS:
+                        held.append({
+                            "id": reflex.id,
+                            "voice": _safe_voice(use_voice),
+                            "status": "hold",
+                            "promoted": False,
+                            "hold_reason": reason,
+                        })
+                        continue
+                    log.info(
+                        "reflex %r existing render failed QA (%s; heard=%r) -> regenerating",
+                        reflex.id,
+                        reason,
+                        str(verdict.get("heard") or "")[:40],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.info("reflex %r existing validation errored; holding: %s", reflex.id, exc)
+                    held.append({
+                        "id": reflex.id,
+                        "voice": _safe_voice(use_voice),
+                        "status": "hold",
+                        "promoted": False,
+                        "hold_reason": "validation_error",
                     })
-                    revalidated.append(reflex.id)
-                    skipped.append(reflex.id)
                     continue
-                log.info("reflex %r existing render FAILED QA (%s; heard=%r) -> regenerating",
-                         reflex.id, v["reason"], v["heard"][:40])
-            except Exception as exc:  # noqa: BLE001
-                log.info("reflex %r existing validate errored (%s) -> regenerating", reflex.id, exc)
         try:
             info = generate_reflex(
                 hivemind_url=hivemind_url,
@@ -452,7 +543,10 @@ def generate_all(
                 timeout=timeout,
                 qa=qa,
             )
-            generated.append(info)
+            if info.get("promoted") is True:
+                generated.append(info)
+            else:
+                held.append(info)
         except Exception as exc:
             log.warning("reflex %r generation failed: %s", reflex.id, exc)
             failed[reflex.id] = str(exc)[:240]
@@ -463,6 +557,7 @@ def generate_all(
         "force": force,
         "qa": qa,
         "generated": generated,
+        "held": held,
         "skipped": skipped,
         "revalidated": revalidated,
         "failed": failed,
@@ -511,12 +606,10 @@ def generate_all_async(
 # ---------------------------------------------------------------------------
 # QA: round-trip validation of generated canned speech
 #
-# Render -> transcribe back with Whisper ASR -> a fast fuzzy check + a tiny
-# LLM judge decide whether the audio cleanly says the intended phrase. Bad
-# renders (e.g. ultra-short phrases the TTS garbles into a babbling tail)
-# are caught and re-rendered with an LLM-rephrased, TTS-stable equivalent.
-# Fail-OPEN: if ASR/LLM are unavailable we accept the render rather than
-# reject (QA must never make things worse).
+# Render candidate -> require real Whisper ASR evidence -> require a tiny-LLM
+# semantic acceptance. Deterministically bad renders may be retried with a
+# TTS-stable equivalent. Missing or ambiguous evidence is HOLD and can never
+# promote.
 # ---------------------------------------------------------------------------
 
 
@@ -537,10 +630,17 @@ def _reflex_qa_model() -> str:
 
 
 # Bump when the validator logic changes so already-"validated" reflexes get
-# re-checked on the next pass (the early version was too lenient).
-_QA_VERSION = 2
+# re-checked on the next pass (the earlier versions were fail-open).
+_QA_VERSION = 3
 
 _QA_PUNCT_RE = re.compile(r"[^a-z0-9' ]+")
+_QA_TERMINAL_HOLD_REASONS = frozenset({
+    "asr_unavailable",
+    "asr_evidence_unavailable",
+    "asr_evidence_ambiguous",
+    "transcript_ambiguous",
+    "semantic_judge_unavailable",
+})
 
 # Audio duration helpers live in voice.py now (shared with the runtime
 # gate); these aliases keep the QA code readable.
@@ -616,9 +716,9 @@ def _qa_llm_judge(intended: str, heard: str, hivemind_url: str) -> bool | None:
             model=_reflex_qa_model(), max_tokens=3, temperature=0.0, timeout=4.0,
         )
         ans = _chat_text(resp).strip().lower()
-        if ans.startswith("y"):
+        if ans == "yes":
             return True
-        if ans.startswith("n"):
+        if ans == "no":
             return False
         return None
     except Exception as exc:  # noqa: BLE001
@@ -626,42 +726,95 @@ def _qa_llm_judge(intended: str, heard: str, hivemind_url: str) -> bool | None:
         return None
 
 
+def _asr_has_untrusted_hint(value: Any) -> bool:
+    """Reject transcript hints or fabricated fixtures masquerading as ASR."""
+    markers = ("hint", "fabricat", "synthetic", "mock")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if any(marker in key_text for marker in markers) and item not in (None, False, ""):
+                return True
+            if key_text in {"source", "origin", "evidence_source"}:
+                item_text = str(item).lower()
+                if any(marker in item_text for marker in markers):
+                    return True
+            if _asr_has_untrusted_hint(item):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_asr_has_untrusted_hint(item) for item in value)
+    return False
+
+
+def _real_asr_text(asr: Any) -> tuple[str, str | None]:
+    """Extract text only from the raw ASR response retained by voice.transcribe."""
+    if not isinstance(asr, dict):
+        return "", "asr_evidence_unavailable"
+    raw = asr.get("raw")
+    if not isinstance(raw, dict):
+        return "", "asr_evidence_unavailable"
+    if _asr_has_untrusted_hint(raw):
+        return "", "asr_evidence_ambiguous"
+    outer = asr.get("text")
+    raw_text = raw.get("text") or raw.get("transcription")
+    if not isinstance(outer, str) or not isinstance(raw_text, str):
+        return "", "asr_evidence_unavailable"
+    outer = outer.strip()
+    raw_text = raw_text.strip()
+    if not outer or not raw_text:
+        return "", "transcript_ambiguous"
+    if outer != raw_text:
+        return "", "asr_evidence_ambiguous"
+    return outer, None
+
+
+def _qa_result(valid: bool, heard: str, reason: str) -> dict[str, Any]:
+    return {
+        "valid": valid,
+        "heard": heard,
+        "reason": reason,
+        "disposition": "accept" if valid else "hold",
+    }
+
+
 def validate_reflex_audio(intended_text: str, audio_bytes: bytes, hivemind_url: str) -> dict[str, Any]:
-    """Round-trip QA for one rendered reflex. Returns
-    ``{valid, heard, reason}``. Fail-OPEN (valid=True) when ASR is
-    unavailable so QA can't reject what it couldn't actually check.
+    """Round-trip QA for one candidate, failing closed on uncertainty.
 
     Order of evidence (strongest first):
     1. Duration gate (model-free) — a clip much longer than the phrase
        warrants is a babble tail; reject outright.
-    2. ASR round-trip + repetition/blow-up-aware fuzzy.
-    3. Tiny-LLM judge only for the genuinely-ambiguous middle.
+    2. Real ASR round-trip evidence (not a hint or caller-fabricated text).
+    3. Deterministic transcript sanity; ambiguity is HOLD.
+    4. Mandatory tiny-LLM semantic acceptance.
     """
     # 1. Duration sanity — catches the oversized babble renders directly.
     dur = _wav_duration_secs(audio_bytes)
     expected_max = _expected_max_secs(intended_text)
     if dur is not None and dur > expected_max:
-        return {"valid": False, "heard": "", "reason": f"too_long_{dur:.1f}s_max_{expected_max:.1f}s"}
+        return _qa_result(False, "", f"too_long_{dur:.1f}s_max_{expected_max:.1f}s")
     # 2. ASR round-trip.
     try:
         asr = transcribe(hivemind_url=hivemind_url, audio=audio_bytes, filename="reflex_qa.wav", model=None)
-        heard = (asr.get("text") or "").strip()
     except Exception as exc:  # noqa: BLE001
-        log.info("reflex QA ASR unavailable (accepting render): %s", exc)
-        return {"valid": True, "heard": "", "reason": "asr_unavailable"}
+        log.info("reflex QA ASR unavailable (holding candidate): %s", exc)
+        return _qa_result(False, "", "asr_unavailable")
+    heard, evidence_error = _real_asr_text(asr)
+    if evidence_error is not None:
+        return _qa_result(False, heard, evidence_error)
+
     fuzzy = _qa_fuzzy(intended_text, heard)
-    if fuzzy is True:
-        return {"valid": True, "heard": heard, "reason": "match"}
     if fuzzy is False:
-        # Deterministically bad (repetition / blow-up / empty). Don't let an
-        # unreliable tiny LLM rescue a clearly-garbled render.
-        return {"valid": False, "heard": heard, "reason": "fuzzy_bad"}
-    # 3. Ambiguous -> tiny-LLM judge; if unavailable, give the benefit of the
-    #    doubt (the duration gate already rejected the egregious cases).
+        return _qa_result(False, heard, "fuzzy_bad")
+    if fuzzy is None:
+        return _qa_result(False, heard, "transcript_ambiguous")
+
+    # A clean transcript is necessary but not sufficient: semantic acceptance
+    # must be an explicit yes from the judge.
     judged = _qa_llm_judge(intended_text, heard, hivemind_url)
     if judged is None:
-        return {"valid": True, "heard": heard, "reason": "fuzzy_unsure"}
-    return {"valid": judged, "heard": heard, "reason": "llm"}
+        return _qa_result(False, heard, "semantic_judge_unavailable")
+    if judged is False:
+        return _qa_result(False, heard, "semantic_rejected")
+    return _qa_result(True, heard, "semantic_accept")
 
 
 _MANUAL_REPHRASE = {
@@ -707,23 +860,174 @@ def _meta_path(voice: str, reflex_id: str) -> Path:
     return reflex_path(voice, reflex_id).with_suffix(".meta.json")
 
 
+def _audio_sha256(audio: bytes) -> str:
+    return hashlib.sha256(audio).hexdigest()
+
+
+def _write_temp_bytes(
+    *,
+    directory: Path,
+    prefix: str,
+    suffix: str,
+    data: bytes,
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=str(directory),
+        prefix=prefix,
+        suffix=suffix,
+        delete=False,
+    ) as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _write_candidate_audio(final_path: Path, audio: bytes) -> Path:
+    return _write_temp_bytes(
+        directory=final_path.parent,
+        prefix=f".{final_path.stem}.",
+        suffix=".candidate.wav",
+        data=audio,
+    )
+
+
+def _replace_bytes(path: Path, data: bytes, *, suffix: str) -> None:
+    temp_path = _write_temp_bytes(
+        directory=path.parent,
+        prefix=f".{path.name}.",
+        suffix=suffix,
+        data=data,
+    )
+    try:
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _write_meta(voice: str, reflex_id: str, meta: dict[str, Any]) -> None:
-    try:
-        p = _meta_path(voice, reflex_id)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001
-        log.info("reflex meta write failed for %s: %s", reflex_id, exc)
+    payload = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+    with _REFLEX_IO_LOCK:
+        _replace_bytes(_meta_path(voice, reflex_id), payload, suffix=".meta.tmp")
 
 
-def _read_meta(voice: str, reflex_id: str) -> dict[str, Any] | None:
+def _bind_existing_audio(
+    *,
+    voice: str,
+    reflex_id: str,
+    expected_audio: bytes,
+    meta: dict[str, Any],
+) -> bool:
+    """Atomically bind metadata only if the validated WAV is still current."""
+    if not _meta_matches_audio(meta, expected_audio, reflex_id):
+        raise ValueError("reflex metadata does not match validated audio")
+    path = reflex_path(voice, reflex_id)
+    payload = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+    with _REFLEX_IO_LOCK:
+        try:
+            current_audio = path.read_bytes()
+        except (FileNotFoundError, OSError):
+            return False
+        if current_audio != expected_audio:
+            return False
+        _replace_bytes(_meta_path(voice, reflex_id), payload, suffix=".meta.tmp")
+        return True
+
+
+def _read_meta_unlocked(voice: str, reflex_id: str) -> dict[str, Any] | None:
     try:
-        p = _meta_path(voice, reflex_id)
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+        path = _meta_path(voice, reflex_id)
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def _read_meta(voice: str, reflex_id: str) -> dict[str, Any] | None:
+    with _REFLEX_IO_LOCK:
+        return _read_meta_unlocked(voice, reflex_id)
+
+
+def _meta_matches_audio(meta: Any, audio: bytes, reflex_id: str) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    digest = meta.get("audio_sha256")
+    return bool(
+        meta.get("schema") == "Ms4ReflexMeta.v1"
+        and meta.get("id") == reflex_id
+        and meta.get("validated") is True
+        and meta.get("qa_version") == _QA_VERSION
+        and isinstance(digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", digest)
+        and digest == _audio_sha256(audio)
+    )
+
+
+def _read_reflex_bundle(
+    voice: str,
+    reflex_id: str,
+) -> tuple[bytes, dict[str, Any]] | None:
+    path = reflex_path(voice, reflex_id)
+    with _REFLEX_IO_LOCK:
+        meta = _read_meta_unlocked(voice, reflex_id)
+        try:
+            audio = path.read_bytes()
+        except (FileNotFoundError, OSError):
+            return None
+        if not _meta_matches_audio(meta, audio, reflex_id):
+            return None
+        return audio, meta
+
+
+def _promote_candidate(
+    *,
+    candidate_path: Path,
+    voice: str,
+    reflex_id: str,
+    meta: dict[str, Any],
+) -> None:
+    """Promote a validated pair with same-directory replaces under one lock.
+
+    The lock is shared by all gateway readers. If either replace fails, the
+    previous bytes are restored before readers can proceed.
+    """
+    final_path = reflex_path(voice, reflex_id)
+    meta_path = _meta_path(voice, reflex_id)
+    if candidate_path.parent.resolve() != final_path.parent.resolve():
+        raise ValueError("reflex candidate must share the live file directory")
+    candidate_audio = candidate_path.read_bytes()
+    if not _meta_matches_audio(meta, candidate_audio, reflex_id):
+        raise ValueError("reflex candidate metadata does not match candidate audio")
+    meta_candidate = _write_temp_bytes(
+        directory=meta_path.parent,
+        prefix=f".{meta_path.name}.",
+        suffix=".candidate.meta.json",
+        data=json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    try:
+        with _REFLEX_IO_LOCK:
+            old_audio = final_path.read_bytes() if final_path.exists() else None
+            old_meta = meta_path.read_bytes() if meta_path.exists() else None
+            try:
+                os.replace(candidate_path, final_path)
+                os.replace(meta_candidate, meta_path)
+            except Exception:
+                if old_audio is None:
+                    final_path.unlink(missing_ok=True)
+                else:
+                    _replace_bytes(final_path, old_audio, suffix=".rollback.wav")
+                if old_meta is None:
+                    meta_path.unlink(missing_ok=True)
+                else:
+                    _replace_bytes(meta_path, old_meta, suffix=".rollback.meta.json")
+                raise
+    finally:
+        candidate_path.unlink(missing_ok=True)
+        meta_candidate.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -732,15 +1036,11 @@ def _read_meta(voice: str, reflex_id: str) -> dict[str, Any] | None:
 
 
 def read_reflex(*, reflex_id: str, voice: str | None = None) -> bytes | None:
-    """Return the cached WAV bytes for a reflex, or ``None`` if it
-    hasn't been generated yet. Raises :class:`ReflexUnknown` for an
-    unknown id so the gateway can map to 400 vs 404 correctly."""
+    """Return only a current, validated, hash-bound cached WAV."""
     if not _REFLEX_BY_ID.get(reflex_id):
         raise ReflexUnknown(f"unknown reflex id: {reflex_id!r}")
-    path = reflex_path(voice or DEFAULT_REFLEX_VOICE, reflex_id)
-    if not path.exists():
-        return None
-    return path.read_bytes()
+    bundle = _read_reflex_bundle(voice or DEFAULT_REFLEX_VOICE, reflex_id)
+    return bundle[0] if bundle is not None else None
 
 
 def list_reflexes(*, voice: str | None = None) -> dict[str, Any]:
@@ -750,13 +1050,14 @@ def list_reflexes(*, voice: str | None = None) -> dict[str, Any]:
     available = 0
     total_bytes = 0
     for reflex in REFLEXES:
-        path = reflex_path(use_voice, reflex.id)
-        exists = path.exists()
-        size = path.stat().st_size if exists else 0
-        if exists:
+        bundle = _read_reflex_bundle(use_voice, reflex.id)
+        audio = bundle[0] if bundle is not None else None
+        meta = bundle[1] if bundle is not None else {}
+        available_on_disk = audio is not None
+        size = len(audio) if audio is not None else 0
+        if available_on_disk:
             available += 1
             total_bytes += size
-        meta = _read_meta(use_voice, reflex.id) or {}
         entries.append({
             "id": reflex.id,
             "text": reflex.text,
@@ -764,7 +1065,7 @@ def list_reflexes(*, voice: str | None = None) -> dict[str, Any]:
             "description": reflex.description,
             "voice": use_voice,
             "url": f"/reflexes/{use_voice}/{reflex.id}.wav",
-            "available": exists,
+            "available": available_on_disk,
             "size_bytes": size,
             # QA fields (None until validated): whether the audio passed the
             # round-trip check, what the ASR heard, and the effective spoken

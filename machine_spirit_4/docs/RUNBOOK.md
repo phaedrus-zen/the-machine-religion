@@ -28,10 +28,22 @@ python machine_spirit_4/scripts/start_ms4.py
 
 It starts or verifies:
 
-- MS3 sidecar on `9080`
+- MS3 sidecar on loopback `127.0.0.1:9080`
 - MS4 gateway on `9180`, using `machine_spirit_4/.venv`
 - MS4 MCP on `9181`, using `machine_spirit_4/.venv`
 - fusion and MCP validators unless `--skip-validation` is set
+
+The managed MS3 sidecar is loopback-only by default. To expose it on an
+isolated lab LAN, opt in explicitly for that launch:
+
+```text
+python machine_spirit_4/scripts/start_ms4.py --ms3-host 0.0.0.0
+```
+
+The equivalent persistent environment override is `MS3_HOST=0.0.0.0`.
+MS3 does not provide application-layer authentication by default, so do not
+use wildcard binding on an untrusted network; place it behind an authenticated
+reverse proxy when remote access is required.
 
 Audit log:
 
@@ -212,12 +224,17 @@ Do not connect these examples to hardware. They are contract fixtures for consen
 
 ## Voice Chat (Push-to-Talk MVP)
 
-The mic button on `http://127.0.0.1:9180/` records audio, transcribes it via HiveMind ASR, runs it through the Face Lobe, and plays back the TTS reply. Fail-closed: if MS3 `/voice/status` reports voice not ready, the route returns 503 immediately. Routes:
+The mic button on `http://127.0.0.1:9180/` records audio, transcribes it via HiveMind ASR, runs it through the Face Lobe, and plays back the TTS reply. Fail-closed: if MS3 `/voice/status` reports voice not ready, the route returns 503 immediately.
+
+Treat these as separate truth: Oracle chat readiness (`GET /hivemind/oracle/readiness`), voice input/ASR (`GET /voice/status`, `GET /voice/services`), ASR transcript, reasoning result, nonempty TTS bytes, playback/delivery receipt, persisted recent-turn rows, and visible UI status. Input-ready is never output-delivered. ASR unprovisioned degrades `voice_input` only; it does not flip Oracle chat readiness to degraded when the chat plane is ready.
+
+Routes:
 
 ```text
 POST /voice/transcribe        # multipart file= or raw audio/* body -> {"text": ...}
 POST /voice/synthesize        # JSON {text, model, voice, response_format} -> audio bytes
 POST /voice/turn              # chained: audio -> ASR -> chat -> TTS -> JSON
+GET  /voice/recent-turns?limit=5   # one-generation reverse scan + ring; equal-size/larger rewrite is generation_changed; last-good is bound to a bounded metadata/content generation token; Settings UI proven-empty requires complete===true && !incomplete && non-error source
 ```
 
 Override knobs (env vars; defaults safe for HiveMind's OpenAI-compatible audio endpoints):
@@ -234,7 +251,7 @@ Continuous mode and full-duplex (partial ASR, barge-in, speaker diarization) are
 
 ## Face Lobe Model
 
-Hardware-aware. Override with `MS4_FOREGROUND_MODEL`; otherwise MS4 picks the highest-priority small instruct model that's already loaded in HiveMind's `/v1/models` catalog (priority order documented in `machine_spirit_4/double_agent/model_picker.py::FOREGROUND_PRIORITY_PATTERNS`). Final fallback is `qwen2.5:0.5b`. Every chat response includes a `face_lobe_model` block so you can see what was actually used.
+Cluster-aware. Override with `MS4_FOREGROUND_MODEL`; otherwise MS4 picks the highest-priority small instruct model that's already loaded and reachable through HiveMind's cluster-wide `/v1/models` catalog (priority order documented in `machine_spirit_4/double_agent/model_picker.py::FOREGROUND_PRIORITY_PATTERNS`). Final gated fallback is `MS4_DEFAULT_MODEL` (built-in `nemotron-3-nano:4b`). Every chat response includes a `face_lobe_model` block so you can see what was actually used.
 
 ## Double Agent
 
@@ -297,7 +314,8 @@ machine_spirit_4/runtime/double_agent.sqlite3
 Operational notes:
 
 * **Auto-routing is on by default.** Every chat turn passes through `double_agent.router.route()`. Heuristic-only by default (no extra model call); set `MS4_ROUTER_LLM_CLASSIFY=1` to enable the LLM classifier for ambiguous cases. Override per-turn with `/deep <msg>` or `/direct <msg>`.
-* **Depth Lobe model picker** mirrors the foreground picker but for big coder models. Override with `MS4_DEPTH_MODEL`; otherwise MS4 auto-picks the highest-priority loaded coder/reasoning model from HiveMind. Falls back to `MS4_DEFAULT_MODEL`.
+* **Depth Lobe model picker** is cluster-scoped and quality-gated. Override deliberately with `MS4_DEPTH_MODEL`; otherwise MS4 selects a loaded/reachable >=35B total-parameter coder/reasoning model from HiveMind, with `qwen3.6:35b` as the preferred quality target. If no quality candidate is ready, MS4 uses gated `MS4_DEPTH_FALLBACK_MODEL` (built-in `nemotron-3-nano:30b`) as a clearly labeled `degraded_fast_tool_fallback`; the fallback has a separate 30B safety floor and does not satisfy the 35B quality gate. Gemma 31B remains explicit/manual only after bounded live jobs exceeded the latency gate without reaching a tool call. A 16 GiB node is an eligible fleet tier, not the quality floor or a Face+Depth co-residency requirement. For cold-state diagnosis, compare `GET /settings`: `preferred_cluster_target`/`quality_target_model` and `minimum_target_total_parameters_b=35` are durable policy; `automatic_selection` is current effective state and includes `policy_tier`; fallback fields expose the degraded tier and its 30B floor. Trust HLI `/v1/models`: `installed + reachable` means the cluster can warm-route idle-unloaded Qwen even if provider-local `/api/tags` omits it; only absent, merely `available`, or unreachable state demotes it.
+* **Shared skills stay read-only in bounded Depth jobs.** The TMR-owned `mcp-hivemind` plugin toolset includes `ms4_skills_list` and `ms4_skill_view`, backed by the configured Hermes skill store. The view wrapper disables preprocessing and the toolset does not expose `skill_manage`, so `can_mutate_world=false` jobs can read a skill without gaining create/edit/install/delete authority. The model may be served by any eligible HiveMind peer; only the trusted MS4/Hermes worker touches the skill store.
 * **Cancel actually kills the worker.** Each job runs as a child Python process (`double_agent/_worker_entry.py`); `cancel` sends `SIGTERM` / `CTRL_BREAK_EVENT` and force-kills after the grace period (`cancel_grace_seconds`, default 5s). A long blocking Hermes model call no longer ignores cancel.
 * If the gateway crashes mid-job, the next gateway boot flips dangling `queued`/`running` jobs to `failed`. The operator should re-trigger.
 * Background workers cannot emit raw model tokens as events. If you see anything other than the 12 allowlisted event types in the events stream, file it as a bug — the schema layer is supposed to reject it before it lands in SQLite.
@@ -308,9 +326,10 @@ Operational notes:
 
 MS4 has an in-app Hermes upgrade flow modeled on HiveMind's Ollama updater. Operators do not need to leave the MS4 UI:
 
-1. Open `http://127.0.0.1:9180/` — when Hermes is behind the latest release, a yellow "Update Hermes" banner appears above the chat with the current → latest jump.
-2. Click "Update Hermes" to install the latest published release, or "Pin version…" to choose a specific release from the dropdown.
-3. The banner switches to a phase indicator (queued → fetching_remote → checking_out → syncing_plugin → pip_installing → validating → done). A green success banner shows for 5 minutes after a clean run; a red error banner persists with the failure reason.
+1. Open `http://127.0.0.1:9180/` — the yellow "Update Hermes" banner appears only when a newer official tag carries signature bytes. An unsigned published latest is labeled and not offered.
+2. Click "Update Hermes" to install the latest signed release, or "Pin version…" to choose a signed release. Unsigned official tags are listed as not offered.
+3. The banner switches to a phase indicator (queued → fetching_remote → checking_out → syncing_plugin → pip_installing → validating → done). A green success banner shows for 5 minutes after a clean run; a red error banner persists with the failure reason **only while the failure remains actionable**.
+4. On every gateway startup and `GET /api/v1/hermes/version` refresh, MS4 reconciles semantic versions into durable terminal state: `installed_relation` is `older` / `current` / `newer` / `unknown`. Installed ≥ latest is a verified current/newer no-op that supersedes a stale `failed` presentation without deleting `progress` or `superseded_failure` audit. Installed < latest with a signed newer tag stays failed/actionable. Installed < latest with an unsigned official latest is `operator_state=blocked` (`official_tag_unsigned`) as the primary banner; the prior failed job remains in `last_update` audit. Malformed or missing versions fail closed (`unknown`) and keep the failure. A real update still requires origin/signature/platform/arch/anti-downgrade provenance. Pinning a lower version is refused as a downgrade.
 
 Same surface from the command line:
 

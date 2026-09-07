@@ -29,12 +29,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import signal
 import sys
 import threading
-import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Allow the subprocess to be invoked without setting PYTHONPATH manually.
 # `machine_spirit_4` is two parents up from this file.
@@ -51,6 +56,190 @@ from machine_spirit_4.double_agent.worker import (  # noqa: E402
     DoubleAgentWorker,
     build_real_chat_runner,
 )
+
+
+def _depth_hivemind_url() -> str:
+    return (
+        os.environ.get("MS4_HIVEMIND_URL")
+        or os.environ.get("MS4_HIVEMIND_HLI_URL")
+        or "http://127.0.0.1:6089"
+    )
+
+
+def _depth_ms3_url() -> str:
+    return os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080")
+
+
+def _depth_mcp_url(hivemind_url: str) -> str:
+    from machine_spirit_4.gateway.hivemind_state import mcp_base_url
+
+    base = mcp_base_url(hivemind_url).rstrip("/")
+    if not base.endswith("/mcp"):
+        base = f"{base}/mcp"
+    return base
+
+
+def _build_depth_preflight_urls() -> dict[str, str]:
+    hivemind_url = _depth_hivemind_url().rstrip("/")
+    return {
+        "hivemind_url": hivemind_url,
+        "hivemind_mcp_url": _depth_mcp_url(hivemind_url),
+        "ms3_url": _depth_ms3_url().rstrip("/"),
+    }
+
+
+def _redact_env_sources() -> dict[str, bool]:
+    return {
+        "MS4_HIVEMIND_URL": bool(os.environ.get("MS4_HIVEMIND_URL")),
+        "MS4_HIVEMIND_HLI_URL": bool(os.environ.get("MS4_HIVEMIND_HLI_URL")),
+        "MS4_HIVEMIND_MCP_URL": bool(os.environ.get("MS4_HIVEMIND_MCP_URL")),
+        "MS4_MS3_URL": bool(os.environ.get("MS4_MS3_URL")),
+        "MS4_HIVEMIND_API_KEY": bool(os.environ.get("MS4_HIVEMIND_API_KEY")),
+    }
+
+
+def _http_probe(
+    *,
+    name: str,
+    url: str,
+    method: str = "GET",
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    probe: dict[str, Any] = {
+        "name": name,
+        "url": url,
+        "method": method,
+        "ok": False,
+        "reachable": False,
+        "status": None,
+        "error_type": None,
+        "error": None,
+    }
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers or {"Accept": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(4096)
+            probe["reachable"] = True
+            probe["status"] = resp.status
+            probe["ok"] = 200 <= int(resp.status) < 400
+            if raw:
+                probe["body_prefix"] = raw.decode("utf-8", "replace")[:240]
+    except urllib.error.HTTPError as exc:
+        # 401/404/405 still proves the depth worker can reach the namespace.
+        probe["reachable"] = True
+        probe["status"] = exc.code
+        probe["error_type"] = type(exc).__name__
+        probe["error"] = str(exc)[:240]
+        probe["ok"] = 400 <= int(exc.code) < 500
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        probe["error_type"] = type(exc).__name__
+        probe["error"] = str(exc)[:240]
+    return probe
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.strip("[]").lower()
+    return host in {"localhost", "::1"} or host.startswith("127.")
+
+
+def _depth_preflight_diagnostics(
+    *,
+    urls: dict[str, str],
+    probes: list[dict[str, Any]],
+    os_name: str | None = None,
+) -> list[dict[str, Any]]:
+    worker_os_name = os.name if os_name is None else os_name
+    loopback_urls = sorted(
+        name for name, url in urls.items() if _is_loopback_url(str(url))
+    )
+    unreachable = sorted(
+        str(probe.get("name"))
+        for probe in probes
+        if not bool(probe.get("reachable"))
+    )
+    if worker_os_name == "nt" or not loopback_urls or not unreachable:
+        return []
+    return [
+        {
+            "code": "posix_loopback_namespace_unreachable",
+            "severity": "warning",
+            "summary": (
+                "This POSIX Depth worker is using loopback URLs that are "
+                "unreachable from its namespace. 127.0.0.1 points at the "
+                "worker namespace, not necessarily the Windows host."
+            ),
+            "loopback_urls": loopback_urls,
+            "unreachable_probes": unreachable,
+            "operator_action": (
+                "Inject host-routable values for MS4_HIVEMIND_URL, "
+                "MS4_HIVEMIND_MCP_URL, and MS4_MS3_URL, then rerun "
+                "_worker_entry.py --preflight --json."
+            ),
+        }
+    ]
+
+
+def run_depth_worker_preflight(*, timeout: float = 3.0) -> dict[str, Any]:
+    """Return a redacted reachability report from the worker namespace.
+
+    This is intentionally separate from normal job execution. Operators can run
+    ``_worker_entry.py --preflight --json`` with the same environment the depth
+    lobe receives to prove whether that child process can see HiveMind/MS3/MCP.
+    """
+    urls = _build_depth_preflight_urls()
+    cwd = Path.cwd()
+    report: dict[str, Any] = {
+        "schema": "Ms4DepthWorkerPreflight.v1",
+        "ok": False,
+        "runtime": {
+            "cwd": str(cwd),
+            "cwd_exists": cwd.exists(),
+            "executable": sys.executable,
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "os_name": os.name,
+        },
+        "env_configured": _redact_env_sources(),
+        "urls": urls,
+        "probes": [],
+    }
+
+    hli_health = f"{urls['hivemind_url']}/health"
+    ms3_health = f"{urls['ms3_url']}/health"
+    mcp_payload = json.dumps(
+        {"jsonrpc": "2.0", "id": "ms4-depth-worker-preflight", "method": "tools/list"}
+    ).encode("utf-8")
+    mcp_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    try:
+        from machine_spirit_4.gateway.hivemind_state import hivemind_auth_headers
+
+        mcp_headers.update(hivemind_auth_headers())
+    except Exception:
+        pass
+
+    report["probes"] = [
+        _http_probe(name="hivemind_hli_health", url=hli_health, timeout=timeout),
+        _http_probe(name="hivemind_mcp_tools_list", url=urls["hivemind_mcp_url"], method="POST", body=mcp_payload, headers=mcp_headers, timeout=timeout),
+        _http_probe(name="ms3_health", url=ms3_health, timeout=timeout),
+    ]
+    report["diagnostics"] = _depth_preflight_diagnostics(
+        urls=urls,
+        probes=report["probes"],
+        os_name=os.name,
+    )
+    report["ok"] = all(bool(probe.get("reachable")) for probe in report["probes"])
+    return report
 
 
 def _read_envelope_payload() -> dict:
@@ -106,14 +295,14 @@ def _build_runner_or_die(envelope: JobEnvelope, blackboard: Blackboard):
     try:
         from machine_spirit_4.gateway.hermes_runner import Ms4HermesRunner
 
-        hermes_dir = os.environ.get(
-            "MS4_HERMES_DIR", str(Path.home() / "Documents" / "hermes-agent")
-        )
-        hivemind_url = os.environ.get("MS4_HIVEMIND_URL", "http://127.0.0.1:6089")
-        ms3_url = os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080")
-        default_model = os.environ.get(
-            "MS4_DEFAULT_MODEL", "qwen3-coder-next:latest"
-        )
+        from machine_spirit_4.scripts import runtime_common
+
+        hermes_dir = str(runtime_common.hermes_dir())
+        hivemind_url = _depth_hivemind_url()
+        ms3_url = _depth_ms3_url()
+        from machine_spirit_4.double_agent.depth_picker import depth_fallback_model
+
+        default_model = depth_fallback_model()
         runner = Ms4HermesRunner(
             hermes_dir=hermes_dir,
             hivemind_url=hivemind_url,
@@ -143,7 +332,7 @@ def _build_runner_or_die(envelope: JobEnvelope, blackboard: Blackboard):
             blackboard.update_job_state(
                 envelope.job_id,
                 state="failed",
-                finished_at=str(time.time()),
+                finished_at=datetime.now(timezone.utc).isoformat(),
                 last_safe_user_status=f"Worker failed to start: {type(exc).__name__}",
             )
         except Exception:
@@ -192,7 +381,7 @@ def _resolve_depth_model_for_envelope(envelope: JobEnvelope) -> None:
         from machine_spirit_4.double_agent.depth_picker import choose_depth_model
 
         choice = choose_depth_model(
-            hivemind_url=os.environ.get("MS4_HIVEMIND_URL", "http://127.0.0.1:6089"),
+            hivemind_url=_depth_hivemind_url(),
             model_class=rr.model_class,
         )
         rr.model_override = choice.model_id
@@ -202,9 +391,28 @@ def _resolve_depth_model_for_envelope(envelope: JobEnvelope) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Double Agent worker subprocess")
-    parser.add_argument("--db", required=True, help="Path to the Double Agent SQLite blackboard.")
-    parser.add_argument("--job-id", required=True, help="Job id; used for sanity check against envelope.")
+    parser.add_argument("--preflight", action="store_true", help="Run a redacted depth-worker namespace reachability preflight and exit.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON for --preflight.")
+    parser.add_argument("--timeout", type=float, default=3.0, help="Per-probe timeout for --preflight.")
+    parser.add_argument("--db", help="Path to the Double Agent SQLite blackboard.")
+    parser.add_argument("--job-id", help="Job id; used for sanity check against envelope.")
     args = parser.parse_args()
+
+    if args.preflight:
+        report = run_depth_worker_preflight(timeout=args.timeout)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            for probe in report["probes"]:
+                status = probe.get("status")
+                reachable = "reachable" if probe.get("reachable") else "unreachable"
+                suffix = f" status={status}" if status is not None else ""
+                error = f" error={probe.get('error')}" if probe.get("error") else ""
+                print(f"{probe['name']}: {reachable}{suffix}{error}")
+        return 0 if report["ok"] else 1
+
+    if not args.db or not args.job_id:
+        parser.error("--db and --job-id are required unless --preflight is used")
 
     if not safety.is_safe_job_id(args.job_id):
         raise SystemExit(f"Double Agent worker subprocess: refused unsafe job_id={args.job_id!r}")

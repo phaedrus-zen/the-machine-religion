@@ -21,9 +21,15 @@ from machine_spirit_4.double_agent.schemas import ResourceRequest
 
 
 @pytest.mark.parametrize("query,expected", [
-    ("generate an image of a cat", ["image_tools"]),
-    ("search the web for python news", ["web_tools"]),
-    ("browse to the stripe homepage and click pricing", ["browser_tools", "web_tools"]),
+    ("generate an image of a cat", None),
+    ("search the web for python news", None),
+    ("browse to the stripe homepage and click pricing", None),
+    ("what gpus are available right now", None),
+    ("list the cluster nodes", None),
+    ("are there active jobs?", None),
+    ("what HiveMind MCP tools are available?", None),
+    ("call hivemind_exact_read for hivemind.app.get@v1", ["mcp-hivemind-exact-read"]),
+    ("call hivemind_exact_gated for hivemind.services.enable@v1", ["mcp-hivemind-exact-gated"]),
 ])
 def test_narrow_intents_map_to_toolsets(query, expected):
     assert hermes_toolsets_for_query(query) == expected
@@ -35,11 +41,13 @@ def test_narrow_intents_map_to_toolsets(query, expected):
     "research competitors and implement a clone",  # broadening: and / implement-ish
     "install the package and build it",            # broadening: install/build
     "do everything needed to ship this",           # broadening: everything
+    "debug HiveMind and patch the gateway",        # HiveMind mention but broad code work
+    "list the cluster nodes and then deploy a fix", # HiveMind mention but effectful chain
     "",                                            # empty
     "what is the meaning of recursion",            # no clean mapping
 ])
 def test_broadening_or_unclear_returns_none(query):
-    # None = full catalog (escape hatch) — never starve open-ended work.
+    # None = no mapping / not admitted — never full-catalog authority.
     assert hermes_toolsets_for_query(query) is None
 
 
@@ -66,6 +74,12 @@ def test_resource_request_default_none():
     assert rr.enabled_toolsets is None
     assert rr.to_dict()["enabled_toolsets"] is None
     assert ResourceRequest.from_dict({}).enabled_toolsets is None
+
+
+def test_resource_request_explicit_empty_is_not_defaulted_to_none():
+    rr = ResourceRequest(enabled_toolsets=[])
+    assert rr.to_dict()["enabled_toolsets"] == []
+    assert ResourceRequest.from_dict(rr.to_dict()).enabled_toolsets == []
 
 
 def test_resource_request_sanitizes_bad_toolsets():
@@ -130,6 +144,23 @@ def test_new_background_agent_omits_toolsets_when_none(tmp_path, monkeypatch):
     assert "enabled_toolsets" not in agent.kwargs
 
 
+def test_new_background_agent_preserves_explicit_empty_toolsets(
+    tmp_path, monkeypatch
+):
+    runner = _runner(tmp_path)
+    monkeypatch.setattr(runner, "ensure_hermes_path", lambda: None)
+    monkeypatch.setattr(runner, "require_plugin", lambda: None)
+    agent = runner.new_background_agent(
+        session_id="da-no-tools",
+        model="m",
+        tool_start_callback=lambda *_: None,
+        tool_complete_callback=lambda *_: None,
+        enabled_toolsets=[],
+    )
+    assert agent.kwargs.get("enabled_toolsets") == []
+    assert agent.kwargs.get("disabled_toolsets") == ["kanban"]
+
+
 # ---------------------------------------------------------------------------
 # Worker forwards envelope toolsets only when set
 # ---------------------------------------------------------------------------
@@ -163,3 +194,33 @@ def test_worker_forwards_enabled_toolsets_when_set(tmp_path):
         enabled_toolsets=["image_tools"],
     )
     assert captured.get("enabled_toolsets") == ["image_tools"]
+
+
+def test_worker_forwards_explicit_empty_toolsets(tmp_path):
+    from machine_spirit_4.double_agent.worker import build_real_chat_runner
+
+    captured = {}
+
+    class _Runner:
+        default_model = "m"
+
+        def new_background_agent(self, **kwargs):
+            captured.update(kwargs)
+
+            class _Agent:
+                def run_conversation(self, message, **_k):
+                    return {"final_response": "ok", "completed": True}
+
+            return _Agent()
+
+    call = build_real_chat_runner(_Runner())
+    call(
+        message="go",
+        session_id="da-no-tools",
+        model="m",
+        stream_callback=None,
+        tool_start_callback=lambda *_: None,
+        tool_complete_callback=lambda *_: None,
+        enabled_toolsets=[],
+    )
+    assert captured.get("enabled_toolsets") == []

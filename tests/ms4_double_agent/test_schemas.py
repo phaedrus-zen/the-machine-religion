@@ -21,6 +21,7 @@ from machine_spirit_4.double_agent import (
     StatusPolicy,
 )
 from machine_spirit_4.double_agent import safety
+from machine_spirit_4.double_agent.schemas import sanitize_prior_context
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,87 @@ def test_envelope_round_trip_json():
     assert restored.job_id == env.job_id
     assert restored.user_visible_goal == env.user_visible_goal
     assert restored.authority.can_mutate_world is False
+
+
+def test_envelope_prior_context_round_trip_filters_and_clamps():
+    raw_context = [
+        {"role": "system", "content": "hidden grounding must not cross"},
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "tool", "content": "tool payload"},
+        {"role": "user", "content": "x" * 1500},
+        {"role": "assistant", "content": "ok\x00done"},
+    ]
+    env = JobEnvelope(**_good_envelope_kwargs(prior_context=raw_context))
+    env.validate()
+    assert [m["role"] for m in env.prior_context] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert env.prior_context[0]["content"] == "first question"
+    assert len(env.prior_context[2]["content"]) <= 1200
+    assert env.prior_context[3]["content"] == "okdone"
+
+    restored = JobEnvelope.from_dict(env.to_dict())
+    assert restored.prior_context == env.prior_context
+
+
+def test_sanitize_prior_context_keeps_recent_tail_under_total_limit():
+    raw = [
+        {"role": "user", "content": f"old {i} " + ("x" * 700)}
+        for i in range(20)
+    ]
+    sanitized = sanitize_prior_context(raw)
+    assert len(sanitized) <= 12
+    assert sum(len(m["content"]) for m in sanitized) <= 6000
+    assert sanitized[-1]["content"].startswith("old 19")
+
+
+def test_verified_depth_context_preserves_later_tradeoff_and_conclusion():
+    job_id = "da-11111111-1111-4111-8111-111111111111"
+    answer = (
+        f"[Verified Depth Lobe result; job_id={job_id}]\n\n"
+        + ("opening analysis " * 160)
+        + "SECOND_TRADEOFF_CRITICAL "
+        + ("supporting detail " * 160)
+        + "CONCLUSION_TOKEN"
+    )
+
+    sanitized = sanitize_prior_context(
+        [{"role": "assistant", "content": answer}]
+    )
+
+    assert len(sanitized) == 1
+    assert len(sanitized[0]["content"]) > 1200
+    assert "SECOND_TRADEOFF_CRITICAL" in sanitized[0]["content"]
+    assert "CONCLUSION_TOKEN" in sanitized[0]["content"]
+    assert len(sanitized[0]["content"]) <= 12000
+
+
+def test_long_verified_depth_context_does_not_evict_earlier_normal_facts():
+    job_id = "da-22222222-2222-4222-8222-222222222222"
+    raw = [
+        {"role": "user", "content": "Remember ALPHA means stale routing and the window is 12 minutes."},
+        {"role": "assistant", "content": "READY"},
+        {
+            "role": "assistant",
+            "content": (
+                f"[Verified Depth Lobe result; job_id={job_id}]\n\n"
+                + ("complete analysis " * 1200)
+                + "FINAL_DEPTH_CONCLUSION"
+            ),
+        },
+    ]
+
+    sanitized = sanitize_prior_context(raw)
+    combined = "\n".join(item["content"] for item in sanitized)
+
+    assert "ALPHA means stale routing" in combined
+    assert "12 minutes" in combined
+    assert "FINAL_DEPTH_CONCLUSION" in combined
+    assert sum(len(item["content"]) for item in sanitized) <= 16000
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +299,17 @@ def test_resource_request_defaults_disallow_fallback():
     r = ResourceRequest()
     assert r.fallback_allowed is False
     assert r.to_dict()["fallback_allowed"] is False
+
+
+def test_resource_request_preserves_mcp_hivemind_toolset():
+    r = ResourceRequest(enabled_toolsets=["mcp-hivemind"])
+    assert r.to_dict()["enabled_toolsets"] == ["mcp-hivemind"]
+    restored = ResourceRequest.from_dict(r.to_dict())
+    assert restored.enabled_toolsets == ["mcp-hivemind"]
+
+
+def test_resource_request_preserves_explicit_empty_toolsets():
+    request = ResourceRequest(enabled_toolsets=[])
+    assert request.to_dict()["enabled_toolsets"] == []
+    restored = ResourceRequest.from_dict(request.to_dict())
+    assert restored.enabled_toolsets == []

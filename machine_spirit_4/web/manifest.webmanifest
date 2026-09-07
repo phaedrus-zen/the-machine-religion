@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "HiveMind Oracle",
+  "short_name": "Oracle",
+  "description": "Private always-available voice front door for the HiveMind Oracle.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090912",
+  "theme_color": "#8cf000",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/static/oracle-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

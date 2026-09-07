@@ -8,3 +8,25 @@ hooks:
   - pre_tool_call
   - transform_llm_output
   - post_llm_call
+provides_tools:
+  - toolset: mcp-hivemind
+    names:
+      - ms4_skills_list
+      - ms4_skill_view
+      - hivemind_time_now
+      - hivemind_models_list
+      - hivemind_capability_matrix
+      - hivemind_vm_list
+      - hivemind_gpu_availability
+      - hivemind_cluster_summary
+      - hivemind_hosts_list
+      - hivemind_active_jobs
+      - hivemind_cluster_load
+      - hivemind_service_health
+      - hivemind_state_snapshot
+  - toolset: mcp-hivemind-exact-read
+    names:
+      - hivemind_exact_read
+  - toolset: mcp-hivemind-exact-gated
+    names:
+      - hivemind_exact_gated

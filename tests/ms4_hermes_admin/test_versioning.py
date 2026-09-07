@@ -152,6 +152,188 @@ def test_latest_version_prefers_wheel_version_from_release_name(monkeypatch):
     assert versioning.update_available("0.13.0", latest.version) is True
 
 
+def test_version_info_does_not_advertise_unsigned_newer_release(monkeypatch):
+    """GitHub can publish a newer wheel while the official tag stays unsigned.
+
+    Oracle Retry/Pin must not treat that as an authorized update. Presence of
+    signature bytes on the official annotated tag object is required before
+    ``update_available`` becomes true; F4 still verifies the signer later.
+    """
+    versioning._clear_caches_for_test()
+    monkeypatch.setattr(
+        versioning,
+        "install_mode",
+        lambda: {
+            "mode": "editable",
+            "version": "0.20.0",
+            "directory": None,
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        "machine_spirit_4.hermes_admin.state.last_update",
+        lambda refresh=True: None,
+    )
+
+    def fake_get(url, timeout=8):
+        if url == versioning.LATEST_RELEASE_URL:
+            return {
+                "tag_name": "v2026.8.18",
+                "name": "Hermes Agent v0.20.4 (2026.8.18)",
+                "published_at": "2026-08-18T07:26:46Z",
+                "html_url": "https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.18",
+            }
+        if url.endswith("/git/refs/tags/v2026.8.18"):
+            return {
+                "object": {
+                    "sha": "9f13bbbf8423427e159c78066356ca0e27ca6b74",
+                    "type": "tag",
+                }
+            }
+        if url.endswith("/git/tags/9f13bbbf8423427e159c78066356ca0e27ca6b74"):
+            return {
+                "tag": "v2026.8.18",
+                "message": "Hermes Agent v0.20.4 (2026.8.18)\n\nRollup patch.\n",
+                "object": {
+                    "sha": "e624e9fde561e1add9388384012b295fde669ade",
+                    "type": "commit",
+                },
+                "verification": {
+                    "verified": False,
+                    "reason": "unsigned",
+                    "signature": None,
+                },
+            }
+        return None
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    info = versioning.version_info(force_refresh_latest=True)
+    assert info["latest"] == "0.20.4"
+    assert info["latest_tag"] == "v2026.8.18"
+    assert info["latest_signature_state"] == "unsigned"
+    assert info["update_available"] is False
+    assert info["update_blocked_reason"] == "official_tag_unsigned"
+
+
+def test_version_info_advertises_newer_release_only_when_tag_has_signature_bytes(
+    monkeypatch,
+):
+    versioning._clear_caches_for_test()
+    monkeypatch.setattr(
+        versioning,
+        "install_mode",
+        lambda: {
+            "mode": "editable",
+            "version": "0.20.0",
+            "directory": None,
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        "machine_spirit_4.hermes_admin.state.last_update",
+        lambda refresh=True: None,
+    )
+
+    def fake_get(url, timeout=8):
+        if url == versioning.LATEST_RELEASE_URL:
+            return {
+                "tag_name": "v2026.8.3",
+                "name": "Hermes Agent v0.20.1 (2026.8.3)",
+                "published_at": "2026-08-03T16:57:52Z",
+                "html_url": "https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.3",
+            }
+        if url.endswith("/git/refs/tags/v2026.8.3"):
+            return {
+                "object": {
+                    "sha": "7de39e700d2c329e15d32eb0b96e2f7cdd9fbdb2",
+                    "type": "tag",
+                }
+            }
+        if url.endswith("/git/tags/7de39e700d2c329e15d32eb0b96e2f7cdd9fbdb2"):
+            return {
+                "tag": "v2026.8.3",
+                "message": (
+                    "Hermes Agent v0.20.1 (2026.8.3)\n"
+                    "-----BEGIN SSH SIGNATURE-----\n"
+                    "U1NIU0lH\n"
+                    "-----END SSH SIGNATURE-----\n"
+                ),
+                "object": {
+                    "sha": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb",
+                    "type": "commit",
+                },
+                "verification": {
+                    "verified": True,
+                    "reason": "valid",
+                    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n",
+                },
+            }
+        return None
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    info = versioning.version_info(force_refresh_latest=True)
+    assert info["latest"] == "0.20.1"
+    assert info["latest_signature_state"] == "signed"
+    assert info["update_available"] is True
+    assert info["update_blocked_reason"] is None
+
+
+def test_recent_releases_marks_unsigned_official_tags(monkeypatch):
+    versioning._clear_caches_for_test()
+
+    def fake_get(url, timeout=8):
+        if url == versioning.RECENT_RELEASES_URL:
+            return [
+                {
+                    "tag_name": "v2026.8.18",
+                    "name": "Hermes Agent v0.20.4 (2026.8.18)",
+                    "published_at": "2026-08-18T07:26:46Z",
+                    "prerelease": False,
+                    "html_url": "https://example/0.20.4",
+                },
+                {
+                    "tag_name": "v2026.8.3",
+                    "name": "Hermes Agent v0.20.0 (2026.8.3)",
+                    "published_at": "2026-08-03T16:57:52Z",
+                    "prerelease": False,
+                    "html_url": "https://example/0.20.0",
+                },
+            ]
+        if url.endswith("/git/refs/tags/v2026.8.18"):
+            return {
+                "object": {
+                    "sha": "9f13bbbf8423427e159c78066356ca0e27ca6b74",
+                    "type": "tag",
+                }
+            }
+        if url.endswith("/git/tags/9f13bbbf8423427e159c78066356ca0e27ca6b74"):
+            return {
+                "tag": "v2026.8.18",
+                "message": "Hermes Agent v0.20.4 (2026.8.18)\n",
+                "object": {"sha": "e624e9fde561e1add9388384012b295fde669ade", "type": "commit"},
+            }
+        if url.endswith("/git/refs/tags/v2026.8.3"):
+            return {
+                "object": {
+                    "sha": "7de39e700d2c329e15d32eb0b96e2f7cdd9fbdb2",
+                    "type": "tag",
+                }
+            }
+        if url.endswith("/git/tags/7de39e700d2c329e15d32eb0b96e2f7cdd9fbdb2"):
+            return {
+                "tag": "v2026.8.3",
+                "message": "Hermes Agent v0.20.0 (2026.8.3)\n-----BEGIN SSH SIGNATURE-----\nU1NI\n-----END SSH SIGNATURE-----\n",
+                "object": {"sha": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb", "type": "commit"},
+            }
+        return None
+
+    monkeypatch.setattr(versioning, "_http_get_json", fake_get)
+    releases = versioning.recent_releases(force_refresh=True)
+    by_version = {item.version: item for item in releases}
+    assert by_version["0.20.4"].signature_state == "unsigned"
+    assert by_version["0.20.0"].signature_state == "signed"
+
+
 def test_resolve_git_tag_pairs_wheel_version_to_real_tag(monkeypatch):
     """`pip install` wants `0.14.0`; `git checkout` wants `v2026.5.16`.
     `resolve_git_tag` must look up the real tag from the recent release

@@ -18,10 +18,12 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,8 @@ GITHUB_REPO = "NousResearch/hermes-agent"
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RECENT_RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=20"
 PYPI_LATEST_URL = "https://pypi.org/pypi/hermes-agent/json"
+GIT_TAG_REF_URL = f"https://api.github.com/repos/{GITHUB_REPO}/git/refs/tags/{{tag}}"
+GIT_TAG_OBJECT_URL = f"https://api.github.com/repos/{GITHUB_REPO}/git/tags/{{sha}}"
 
 USER_AGENT = "MS4-HermesAdmin/1.0"
 HTTP_TIMEOUT = 8
@@ -51,6 +55,11 @@ _SAFE_VERSION_RE = re.compile(r"^[0-9A-Za-z._\-]{1,32}$")
 # like `Hermes Agent v0.14.0 (v2026.5.16)`; extract the leading wheel
 # version from there.
 _RELEASE_NAME_VERSION_RE = re.compile(r"v?(\d+\.\d+\.\d+(?:-[\w.\-]+)?)")
+_TAG_OBJECT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_SIGNATURE_MARKERS = (
+    "-----BEGIN SSH SIGNATURE-----",
+    "-----BEGIN PGP SIGNATURE-----",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,7 @@ class RecentRelease:
     prerelease: bool
     tag_name: str
     html_url: str
+    signature_state: str = "unknown"
 
 
 @dataclass
@@ -76,6 +86,7 @@ class _Cache:
     latest: CachedLatest | None = None
     recent: list[RecentRelease] = field(default_factory=list)
     recent_fetched_at: float = 0.0
+    tag_signatures: dict[str, tuple[str, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -102,11 +113,160 @@ def parse_semver(value: str | None) -> tuple[int, int, int] | None:
 
 def update_available(current: str | None, latest: str | None) -> bool:
     """Strict ``current < latest``. Anything ambiguous returns False."""
-    c = parse_semver(current)
-    l = parse_semver(latest)
-    if c is None or l is None:
+    # F8: explicit names (was ambiguous ``c``/``l``; ``l`` tripped ruff E741).
+    current_parsed = parse_semver(current)
+    latest_parsed = parse_semver(latest)
+    if current_parsed is None or latest_parsed is None:
         return False
-    return c < l
+    return current_parsed < latest_parsed
+
+
+def installed_relation(current: str | None, latest: str | None) -> str:
+    """Compare installed vs discovered latest: older, current, newer, or unknown.
+
+    Fail-closed: missing or unparseable versions return ``unknown`` so a stale
+    failure is never auto-cleared on garbage version strings.
+    """
+    current_parsed = parse_semver(current)
+    latest_parsed = parse_semver(latest)
+    if current_parsed is None or latest_parsed is None:
+        return "unknown"
+    if current_parsed < latest_parsed:
+        return "older"
+    if current_parsed == latest_parsed:
+        return "current"
+    return "newer"
+
+
+def compute_operator_state(
+    *,
+    update_in_progress: bool,
+    last_status: str | None,
+    relation: str,
+    update_available_flag: bool,
+    blocked_reason: str | None,
+) -> str:
+    """Durable operator-facing state for UI/banner. Never inferred from CSS.
+
+    Ordering: running, then current/newer no-op, then unsigned/blocked latest,
+    then an actionable signed failure, then a signed update offer.
+    """
+    if update_in_progress:
+        return "running"
+    if relation in {"current", "newer"}:
+        return relation
+    if blocked_reason:
+        return "blocked"
+    if last_status == "failed":
+        return "failed"
+    if update_available_flag:
+        return "update_available"
+    if relation == "older":
+        return "older"
+    return "unknown"
+
+
+def reconcile_durable_terminal_state(
+    *,
+    current_version: str | None = None,
+    latest: str | None = None,
+    relation: str | None = None,
+    request_user: str | None = None,
+) -> None:
+    """Reconcile persisted last-update presentation on startup/version refresh."""
+    from .state import reconcile_stale_failure_for_current_or_newer, update_in_progress
+
+    if update_in_progress():
+        return
+    if current_version is None or latest is None or relation is None:
+        mode = install_mode()
+        current_version = mode.get("version") if mode.get("mode") != "missing" else None
+        cached = latest_version()
+        latest = cached.version if cached else None
+        relation = installed_relation(
+            current_version if isinstance(current_version, str) else None,
+            latest,
+        )
+    if (
+        relation in {"current", "newer"}
+        and isinstance(current_version, str)
+        and isinstance(latest, str)
+    ):
+        reconcile_stale_failure_for_current_or_newer(
+            current_version=current_version,
+            latest_version=latest,
+            relation=relation,
+            request_user=request_user,
+        )
+
+
+def _text_has_signature_payload(value: str | None) -> bool:
+    text = value or ""
+    return any(marker in text for marker in _SIGNATURE_MARKERS)
+
+
+def _signature_state_from_tag_object(payload: dict[str, Any]) -> str:
+    """Classify an official annotated-tag object by signature *bytes*.
+
+    This inspects the tag object itself. GitHub ``verification.verified``
+    is never treated as authenticity. ``signed`` here only means a
+    signature payload is present; F4 still verifies the authorized signer.
+    """
+    message = payload.get("message")
+    verification = payload.get("verification")
+    verification_signature = None
+    if isinstance(verification, dict):
+        raw_signature = verification.get("signature")
+        verification_signature = raw_signature if isinstance(raw_signature, str) else None
+    if _text_has_signature_payload(
+        message if isinstance(message, str) else None
+    ) or _text_has_signature_payload(verification_signature):
+        return "signed"
+    tag = payload.get("tag")
+    obj = payload.get("object")
+    if isinstance(tag, str) and tag and isinstance(obj, dict):
+        return "unsigned"
+    return "unknown"
+
+
+def official_tag_signature_state(
+    tag_name: str,
+    *,
+    force_refresh: bool = False,
+) -> str:
+    """Return ``signed``, ``unsigned``, or ``unknown`` for one official tag."""
+    if not tag_name:
+        return "unknown"
+    cleaned = tag_name[1:] if tag_name.startswith("v") else tag_name
+    if not is_safe_target_version(cleaned):
+        return "unknown"
+    now = time.time()
+    with _CACHE.lock:
+        cached = _CACHE.tag_signatures.get(tag_name)
+        if cached and not force_refresh and (now - cached[1]) < LATEST_TTL_SECS:
+            return cached[0]
+    ref = _http_get_json(GIT_TAG_REF_URL.format(tag=tag_name))
+    sha = None
+    if isinstance(ref, dict):
+        obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
+        candidate = obj.get("sha") if isinstance(obj, dict) else None
+        if (
+            isinstance(candidate, str)
+            and _TAG_OBJECT_SHA_RE.fullmatch(candidate)
+            and obj.get("type") == "tag"
+        ):
+            sha = candidate
+    payload = (
+        _http_get_json(GIT_TAG_OBJECT_URL.format(sha=sha)) if sha else None
+    )
+    state = (
+        _signature_state_from_tag_object(payload)
+        if isinstance(payload, dict)
+        else "unknown"
+    )
+    with _CACHE.lock:
+        _CACHE.tag_signatures[tag_name] = (state, now)
+    return state
 
 
 def is_safe_target_version(value: str) -> bool:
@@ -125,12 +285,54 @@ def is_safe_target_version(value: str) -> bool:
     return True
 
 
-def hermes_dir() -> Path:
-    """Return the active Hermes checkout dir, honoring ``MS4_HERMES_DIR``."""
-    raw = os.environ.get("MS4_HERMES_DIR")
+def _default_hermes_dir(
+    platform_name: str,
+    environ: Mapping[str, str],
+    home: Path,
+) -> Path:
+    """Resolve the Hermes checkout directory deterministically per platform.
+
+    F6 (cross-platform path semantics). Resolution order:
+
+    1. Explicit ``MS4_HERMES_DIR`` wins on **every** platform. This is the
+       recommended, documented control for all non-Windows deployments.
+    2. Otherwise an OS-appropriate default is used. POSIX never silently
+       reuses the Windows ``~/Documents`` shape:
+
+       * ``win32``  -> ``<home>/Documents/hermes-agent`` (preserves the
+         existing, deployed Windows layout; no behavior change on Windows).
+       * ``darwin`` -> ``<home>/Library/Application Support/hermes-agent``
+         (Apple's per-user application-support location).
+       * any other (POSIX: Linux x86_64/ARM64, Jetson/Thor aarch64, *BSD)
+         -> ``$XDG_DATA_HOME/hermes-agent`` when ``XDG_DATA_HOME`` is set,
+         else ``<home>/.local/share/hermes-agent`` (XDG Base Directory).
+
+    ``platform_name``, ``environ`` and ``home`` are injected so the decision
+    is unit-testable for every platform (Windows/Linux/macOS, ARM64/Jetson
+    share the POSIX branch) without touching the real process environment.
+    """
+    raw = environ.get("MS4_HERMES_DIR")
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / "Documents" / "hermes-agent"
+    if platform_name == "win32":
+        return home / "Documents" / "hermes-agent"
+    if platform_name == "darwin":
+        return home / "Library" / "Application Support" / "hermes-agent"
+    xdg = environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg).expanduser() / "hermes-agent"
+    return home / ".local" / "share" / "hermes-agent"
+
+
+def hermes_dir() -> Path:
+    """Return the active Hermes checkout dir, honoring ``MS4_HERMES_DIR``.
+
+    Thin wrapper over :func:`_default_hermes_dir` bound to the live platform
+    (``sys.platform``), process environment, and user home. See that function
+    for the per-platform resolution and the F6 rationale. Non-Windows hosts
+    should set ``MS4_HERMES_DIR`` explicitly rather than rely on the default.
+    """
+    return _default_hermes_dir(sys.platform, os.environ, Path.home())
 
 
 def install_mode() -> dict[str, Any]:
@@ -320,6 +522,17 @@ def latest_version(force_refresh: bool = False) -> CachedLatest | None:
         return _CACHE.latest
 
 
+def cached_latest_version() -> CachedLatest | None:
+    """Already-persisted in-memory latest only. Never HTTP or TTL-refresh.
+
+    Returns the cached record even when ``LATEST_TTL_SECS`` has expired.
+    ``None`` only when nothing is cached locally; callers must then fail
+    closed into the mutating path that validates Git-Bash before network.
+    """
+    with _CACHE.lock:
+        return _CACHE.latest
+
+
 def recent_releases(force_refresh: bool = False) -> list[RecentRelease]:
     """Recent Hermes releases for the "pin a version" dropdown.
 
@@ -349,13 +562,15 @@ def recent_releases(force_refresh: bool = False) -> list[RecentRelease]:
             continue
         if tag and not is_safe_target_version(tag.lstrip("v")):
             continue
+        tag_name = tag or f"v{version}"
         out.append(
             RecentRelease(
                 version=version,
                 published_at=str(entry.get("published_at") or ""),
                 prerelease=bool(entry.get("prerelease")),
-                tag_name=tag or f"v{version}",
+                tag_name=tag_name,
                 html_url=str(entry.get("html_url") or ""),
+                signature_state=official_tag_signature_state(tag_name),
             )
         )
     with _CACHE.lock:
@@ -411,15 +626,48 @@ def version_info(force_refresh_latest: bool = False) -> dict[str, Any]:
     mode = install_mode()
     current = mode.get("version")
     latest = latest_version(force_refresh=force_refresh_latest)
-    last = last_update()
-
     latest_str = latest.version if latest else None
+    latest_tag = latest.tag_name if latest else None
+    relation = installed_relation(
+        current if isinstance(current, str) else None,
+        latest_str,
+    )
+    reconcile_durable_terminal_state(
+        current_version=current if isinstance(current, str) else None,
+        latest=latest_str,
+        relation=relation,
+    )
+    last = last_update()
+    in_progress = update_in_progress()
+
+    signature_state = (
+        official_tag_signature_state(latest_tag) if latest_tag else "unknown"
+    )
+    newer_published = update_available(current, latest_str)
+    offered = newer_published and signature_state == "signed"
+    blocked = None
+    if newer_published and signature_state == "unsigned":
+        blocked = "official_tag_unsigned"
+    elif newer_published and signature_state != "signed":
+        blocked = "official_tag_signature_unknown"
+    operator = compute_operator_state(
+        update_in_progress=in_progress,
+        last_status=last.status if last else None,
+        relation=relation,
+        update_available_flag=offered,
+        blocked_reason=blocked,
+    )
     return {
         "schema": "Ms4HermesVersion.v1",
         "current": current,
         "latest": latest_str,
-        "update_available": update_available(current, latest_str),
-        "update_in_progress": update_in_progress(),
+        "latest_tag": latest_tag,
+        "latest_signature_state": signature_state,
+        "update_available": offered,
+        "update_blocked_reason": blocked,
+        "update_in_progress": in_progress,
+        "installed_relation": relation,
+        "operator_state": operator,
         "latest_published_at": latest.published_at if latest else None,
         "latest_release_url": latest.html_url if latest else None,
         "install_mode": mode.get("mode"),
@@ -436,3 +684,4 @@ def _clear_caches_for_test() -> None:
         _CACHE.latest = None
         _CACHE.recent = []
         _CACHE.recent_fetched_at = 0.0
+        _CACHE.tag_signatures = {}

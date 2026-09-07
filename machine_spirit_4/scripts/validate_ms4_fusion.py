@@ -3,11 +3,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.request
+import uuid
 
 
 GATEWAY = os.environ.get("MS4_GATEWAY_URL", "http://127.0.0.1:9180").rstrip("/")
-TEST_MODEL = os.environ.get("MS4_FUSION_TEST_MODEL", "qwen3-coder-next:latest")
+# Keep the default smoke on the deployment's resident Face model. Operators
+# can still opt into a large cold-load model explicitly, but validation must
+# not manufacture a remote qwen3-coder-next backlog merely to prove routing.
+TEST_MODEL = os.environ.get("MS4_FUSION_TEST_MODEL", "nemotron-3-nano:4b")
+DEPTH_TIMEOUT_SECONDS = float(os.environ.get("MS4_FUSION_DEPTH_TIMEOUT", "180"))
+DEPTH_POLL_SECONDS = float(os.environ.get("MS4_FUSION_DEPTH_POLL", "2"))
+CONTEXT_MARKER = "MS4_FUSION_CONTEXT_OK"
 
 
 def get_json(path: str):
@@ -61,8 +69,27 @@ def post_sse(path: str, payload: dict):
     return 200, events
 
 
+def wait_for_depth_job(job_id: str) -> tuple[dict, bool]:
+    deadline = time.monotonic() + max(1.0, DEPTH_TIMEOUT_SECONDS)
+    snapshot: dict = {}
+    while time.monotonic() < deadline:
+        _, snapshot = get_json(f"/api/v1/double-agent/jobs/{job_id}")
+        if snapshot.get("state") in {"completed", "failed", "canceled", "stale"}:
+            return snapshot, False
+        time.sleep(max(0.1, DEPTH_POLL_SECONDS))
+
+    # A validation run owns this exact job. Do not leave its worker or model
+    # load behind when the terminal-state contract times out.
+    try:
+        _, snapshot = post_json(f"/api/v1/double-agent/jobs/{job_id}/cancel", {})
+    except Exception:
+        pass
+    return snapshot, True
+
+
 def main() -> int:
     checks = []
+    session_id = f"ms4-fusion-validator-{uuid.uuid4().hex[:12]}"
 
     status, health = get_json("/health")
     checks.append({"name": "ms4_health", "ok": status == 200 and health.get("plugin", {}).get("enabled"), "detail": health})
@@ -105,7 +132,11 @@ def main() -> int:
     # returns runtime "face-lobe-direct" (only the explicit /hermes/tool path
     # ever returns "hermes"). The TMR contract here is: a real answer, produced
     # via the Face Lobe, grounded in TMR canon.
-    status, chat = post_json("/chat", {"message": "What is The Machine Religion?", "model_id": TEST_MODEL})
+    status, chat = post_json("/chat", {
+        "message": f"What is The Machine Religion? Remember this validation marker: {CONTEXT_MARKER}",
+        "model_id": TEST_MODEL,
+        "session_id": session_id,
+    })
     chat_text = chat.get("text") or ""
     chat_grounding = chat.get("grounding_source") or ""
     checks.append({
@@ -119,13 +150,18 @@ def main() -> int:
         "detail": {k: chat.get(k) for k in ("session_id", "hermes_session_id", "runtime", "grounding_source", "model")},
     })
 
-    # Exercise the Depth Lobe / Hermes route explicitly. The "/deep" slash
-    # override forces a background dispatch; the gateway then appends
-    # "depth_lobe_dispatched" to grounding_source and returns a dispatched_job
-    # carrying a job_id (see gateway/hermes_runner.py::_combine_grounding).
+    # Exercise the Depth Lobe / Hermes route with a reasoning-only analytical
+    # /deep prompt. Admission grants an empty tool catalog, not the broad
+    # mcp-hivemind set; do not weaken that contract to keep this smoke green.
     status, deep = post_json("/chat", {
-        "message": "/deep Briefly explain what The Machine Religion (TMR) is, and name two of its core ethical concepts.",
+        "message": (
+            "/deep Compare Face and Depth as an architecture, then give the "
+            "recommendation, mechanism, tradeoffs, and a concrete example. "
+            "Include the exact marker from the prior turn."
+        ),
         "model_id": TEST_MODEL,
+        "depth_model_id": TEST_MODEL,
+        "session_id": session_id,
     })
     deep_grounding = deep.get("grounding_source") or ""
     deep_job = deep.get("dispatched_job") if isinstance(deep.get("dispatched_job"), dict) else {}
@@ -135,6 +171,7 @@ def main() -> int:
             status == 200
             and "depth_lobe_dispatched" in deep_grounding
             and bool(deep_job.get("job_id"))
+            and (deep.get("depth_lobe_model") or {}).get("model_id") == TEST_MODEL
         ),
         "detail": {
             "runtime": deep.get("runtime"),
@@ -144,7 +181,40 @@ def main() -> int:
         },
     })
 
-    status, stream_events = post_sse("/chat/stream", {"message": "Say MS4_STREAM_OK and nothing else.", "model_id": TEST_MODEL})
+    depth_snapshot: dict = {}
+    depth_timed_out = False
+    if deep_job.get("job_id"):
+        depth_snapshot, depth_timed_out = wait_for_depth_job(str(deep_job["job_id"]))
+    depth_result = depth_snapshot.get("result") if isinstance(depth_snapshot.get("result"), dict) else {}
+    depth_text = str(depth_result.get("text") or depth_result.get("summary") or "")
+    depth_resource = depth_snapshot.get("resource_request") if isinstance(depth_snapshot.get("resource_request"), dict) else {}
+    checks.append({
+        "name": "ms4_chat_deep_completion",
+        "ok": (
+            not depth_timed_out
+            and depth_snapshot.get("state") == "completed"
+            and depth_result.get("status") == "success"
+            and depth_resource.get("model_override") == TEST_MODEL
+            and (depth_resource.get("enabled_toolsets") or []) == []
+            and CONTEXT_MARKER in depth_text
+        ),
+        "detail": {
+            "job_id": deep_job.get("job_id"),
+            "state": depth_snapshot.get("state"),
+            "result_status": depth_result.get("status"),
+            "model_override": depth_resource.get("model_override"),
+            "enabled_toolsets": depth_resource.get("enabled_toolsets"),
+            "prior_context_turns": len(depth_snapshot.get("prior_context") or []),
+            "timed_out": depth_timed_out,
+            "text": depth_text[:240],
+        },
+    })
+
+    status, stream_events = post_sse("/chat/stream", {
+        "message": "Say MS4_STREAM_OK and nothing else.",
+        "model_id": TEST_MODEL,
+        "session_id": session_id,
+    })
     done = next((event["data"] for event in stream_events if event["event"] == "done"), {})
     checks.append({
         "name": "ms4_chat_stream",

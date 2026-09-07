@@ -14,11 +14,43 @@ Clear those caches autouse before every test so behavior is hermetic.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_gateway_caches():
+def _isolate_gateway_audit_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    audit_path = tmp_path / "ms4_audit.jsonl"
+    monkeypatch.setenv("MS4_AUDIT_LOG", str(audit_path))
+    return audit_path
+
+
+def _clear_voice_turn_last_good(audit_module) -> None:
+    with audit_module._LAST_GOOD_LOCK:
+        if hasattr(audit_module, "_LAST_GOOD_VOICE_TURNS"):
+            audit_module._LAST_GOOD_VOICE_TURNS.clear()
+        scoped = getattr(audit_module, "_LAST_GOOD_BY_SCOPE", None)
+        if scoped is not None:
+            scoped.clear()
+    if hasattr(audit_module, "_SCAN_CHUNK_HOOK"):
+        audit_module._SCAN_CHUNK_HOOK = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_voice_turn_last_good():
+    from machine_spirit_4.gateway import audit as audit_module
+
+    _clear_voice_turn_last_good(audit_module)
+    yield
+    _clear_voice_turn_last_good(audit_module)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gateway_caches(_isolate_gateway_audit_log: Path):
     from machine_spirit_4.gateway import context as ctx_module
     from machine_spirit_4.double_agent import model_picker as picker_module
 

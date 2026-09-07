@@ -151,6 +151,19 @@ def test_low_confidence_routes_to_depth(cat, idx):
     assert "confidence" in d.reason
 
 
+def test_compound_context_request_never_collapses_to_one_inline_tool(cat, idx):
+    router = ToolRouter(ethics_evaluator=_allow)
+    decision = router.decide(
+        "Use the HiveMind time tool and then report the exact marker from the first turn.",
+        catalog=cat,
+        index=idx,
+    )
+
+    assert decision.verdict == VERDICT_DEPTH
+    assert decision.inline_tool is None
+    assert "deliverable" in decision.reason
+
+
 # ---------------------------------------------------------------------------
 # Ethics — fail-closed
 # ---------------------------------------------------------------------------

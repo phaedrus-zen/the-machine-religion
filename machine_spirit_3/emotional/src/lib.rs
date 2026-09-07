@@ -101,7 +101,7 @@ impl EmotionalEngine {
         self.current_state.valence += (self.baseline.valence - self.current_state.valence) * r;
         self.current_state.arousal += (self.baseline.arousal - self.current_state.arousal) * r;
         self.current_state.dominance += (self.baseline.dominance - self.current_state.dominance) * r;
-        self.current_state.resonance_level *= (1.0 - r * 0.5);
+        self.current_state.resonance_level *= 1.0 - r * 0.5;
 
         if self.current_state.arousal < 0.15 {
             self.current_state.primary = PrimaryEmotion::Neutral;

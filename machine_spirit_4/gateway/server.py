@@ -9,22 +9,41 @@ import threading
 log = logging.getLogger("ms4.gateway.server")
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from machine_spirit_4.scripts import runtime_common
+
+# Match managed launchers before Hermes resolves its data home during import.
+os.environ.setdefault("HERMES_HOME", str(runtime_common.hermes_home()))
 
 from machine_spirit_4 import hermes_admin
 from machine_spirit_4.contained import require_contained_runtime
 from machine_spirit_4.deps_status import dependency_status
 from machine_spirit_4.desktop import DesktopSafetyError, desktop_controller
 from machine_spirit_4.double_agent import (
+    DEPTH_MIN_TOTAL_PARAM_B,
+    DEPTH_FALLBACK_MIN_TOTAL_PARAM_B,
+    DEPTH_FAST_TOOL_FALLBACK_MODEL,
+    DEPTH_PREFERRED_CLUSTER_TARGET,
     JobEnvelope,
     JobRunner,
+    MS4_DEPTH_MODEL_ENV,
     RunnerError,
     SchemaError as DoubleAgentSchemaError,
+    choose_depth_model,
+    depth_fallback_model,
     default_blackboard,
     default_runner,
+)
+from machine_spirit_4.double_agent.model_picker import (
+    DEFAULT_FOREGROUND_MODEL,
+    _is_chat_capable,
+    choose_foreground_model,
 )
 from machine_spirit_4.double_agent.safety import (
     is_safe_conversation_id,
@@ -33,8 +52,8 @@ from machine_spirit_4.double_agent.safety import (
 from machine_spirit_4.double_agent.worker import build_real_chat_runner
 from machine_spirit_4.hermes_admin import HermesUpgradeError
 
-from .audit import append_event, read_events
-from .hermes_runner import HermesUnavailable, Ms4HermesRunner
+from .audit import append_event, read_events, read_recent_voice_turns
+from .hermes_runner import HermesUnavailable, Ms4HermesRunner, _face_lobe_prior_context
 from .vision import analyze_local_image
 from .canned_reflexes import (
     DEFAULT_REFLEX_VOICE,
@@ -94,6 +113,7 @@ from .storage_admin import StorageAdminError
 from .training_admin import TrainingAdminError
 from .vm_admin import VmAdminError
 from .voice_identity import VoiceIdentityError
+from .voice_candidate_reconcile import VoiceCandidateReconciler
 from .spirit_state import (
     SpiritStateError,
     get_state_snapshot,
@@ -132,6 +152,10 @@ def _safe_hermes_version() -> str:
         return "unknown"
 from .voice import (
     DEFAULT_TTS_FORMAT,
+    DEFAULT_TTS_MODEL,
+    SELECTED_FACE_ADMISSION_PROFILE,
+    _tts_location_policy,
+    _emit_text_as_parallel_chunks,
     VoiceRequestError,
     VoiceUnavailable,
     last_face_model,
@@ -140,8 +164,11 @@ from .voice import (
     prewarm_face_lobe_model,
     prewarm_tts,
     prewarm_tts_super_ws,
+    probe_voice_rest_concurrency,
     provision_tts_replicas,
     record_face_model,
+    selected_face_admission_latency_budget_ms,
+    check_voice_ready,
     synthesize,
     transcribe,
     voice_ptt_turn,
@@ -152,6 +179,138 @@ from .voice import (
 ROOT = Path(__file__).resolve().parents[2]
 WEB_ROOT = ROOT / "machine_spirit_4" / "web"
 SERVICE_NAME = "ms4-gateway"
+ROOT_WEB_ASSETS = {
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json; charset=utf-8"),
+    "/service-worker.js": ("service-worker.js", "application/javascript; charset=utf-8"),
+}
+_TTS_SUPER_MODELS = {
+    "tts-1-hd",
+    "gpt-4o-mini-tts",
+    "tts_super",
+    "tts-super",
+}
+
+
+def _tts_job_type_for_model(model: str) -> str:
+    normalized = str(model or "").strip().lower()
+    return "TTS_SUPER" if normalized in _TTS_SUPER_MODELS else "TTS"
+
+
+def _selected_face_prewarm_timeout_s() -> float:
+    """Outer selected-model cold-load budget (observed loads can exceed 80s)."""
+    try:
+        value = float(os.environ.get("MS4_FACE_SELECTED_PREWARM_TIMEOUT_S", "120"))
+    except (TypeError, ValueError):
+        value = 120.0
+    # The browser grants five seconds of transport slack above this hard cap.
+    return min(120.0, max(10.0, value))
+
+
+def _public_recommend_audit(result: dict[str, Any] | None) -> dict[str, Any]:
+    rec = (result or {}).get("recommend")
+    if not isinstance(rec, dict) or not rec:
+        return {}
+    return {
+        "recommend_owner": rec.get("owner"),
+        "recommend_endpoint": rec.get("endpoint"),
+        "recommend_generation": rec.get("generation"),
+        "recommend_lease_id": rec.get("lease_id"),
+    }
+
+
+_SELECTED_FACE_PREWARM_LOCK = threading.Lock()
+_SELECTED_FACE_PREWARM_CLIENTS: dict[str, dict[str, Any]] = {}
+_SELECTED_FACE_PREWARM_CLIENT_LIMIT = 1024
+
+
+def _begin_selected_face_prewarm(
+    client_id: str,
+    generation: int,
+) -> tuple[threading.Event | None, int | None]:
+    """Claim one browser generation and cancel its older server-side warm."""
+    cancel_event = threading.Event()
+    with _SELECTED_FACE_PREWARM_LOCK:
+        previous = _SELECTED_FACE_PREWARM_CLIENTS.get(client_id)
+        if previous is not None and generation <= int(previous["generation"]):
+            return None, int(previous["generation"])
+        if previous is not None:
+            previous_cancel = previous.get("cancel_event")
+            if isinstance(previous_cancel, threading.Event):
+                previous_cancel.set()
+        _SELECTED_FACE_PREWARM_CLIENTS[client_id] = {
+            "generation": generation,
+            "cancel_event": cancel_event,
+            "updated_at": time.monotonic(),
+        }
+        if len(_SELECTED_FACE_PREWARM_CLIENTS) > _SELECTED_FACE_PREWARM_CLIENT_LIMIT:
+            oldest = min(
+                (
+                    (key, value)
+                    for key, value in _SELECTED_FACE_PREWARM_CLIENTS.items()
+                    if key != client_id
+                ),
+                key=lambda item: float(item[1].get("updated_at") or 0.0),
+                default=None,
+            )
+            if oldest is not None:
+                stale = _SELECTED_FACE_PREWARM_CLIENTS.pop(oldest[0])
+                stale_cancel = stale.get("cancel_event")
+                if isinstance(stale_cancel, threading.Event):
+                    stale_cancel.set()
+    return cancel_event, None
+
+
+def _selected_face_prewarm_is_current(
+    client_id: str,
+    generation: int,
+    cancel_event: threading.Event,
+) -> bool:
+    with _SELECTED_FACE_PREWARM_LOCK:
+        current = _SELECTED_FACE_PREWARM_CLIENTS.get(client_id)
+        return bool(
+            current is not None
+            and int(current["generation"]) == generation
+            and current.get("cancel_event") is cancel_event
+            and not cancel_event.is_set()
+        )
+
+
+def _finish_selected_face_prewarm(
+    client_id: str,
+    generation: int,
+    cancel_event: threading.Event,
+) -> None:
+    with _SELECTED_FACE_PREWARM_LOCK:
+        current = _SELECTED_FACE_PREWARM_CLIENTS.get(client_id)
+        if (
+            current is not None
+            and int(current["generation"]) == generation
+            and current.get("cancel_event") is cancel_event
+        ):
+            current["cancel_event"] = None
+            current["updated_at"] = time.monotonic()
+
+
+def _commit_selected_face_prewarm(
+    client_id: str,
+    generation: int,
+    cancel_event: threading.Event,
+    effective_model: str,
+) -> bool:
+    """Atomically prove latest-generation ownership before keepwarm mutation."""
+    with _SELECTED_FACE_PREWARM_LOCK:
+        current = _SELECTED_FACE_PREWARM_CLIENTS.get(client_id)
+        if not (
+            current is not None
+            and int(current["generation"]) == generation
+            and current.get("cancel_event") is cancel_event
+            and not cancel_event.is_set()
+        ):
+            return False
+        record_face_model(effective_model)
+        current["cancel_event"] = None
+        current["updated_at"] = time.monotonic()
+        return True
 
 
 def service_info(runner: Ms4HermesRunner) -> dict[str, Any]:
@@ -190,14 +349,80 @@ def _sse_start(handler: SimpleHTTPRequestHandler) -> None:
     handler.end_headers()
 
 
-def _sse_event(handler: SimpleHTTPRequestHandler, event: str, payload: dict[str, Any]) -> bool:
+def _sse_event(
+    handler: SimpleHTTPRequestHandler,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    write_timeout: float | None = None,
+) -> bool:
     body = f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    connection = getattr(handler, "connection", None)
+    previous_timeout = None
     try:
+        if write_timeout is not None and connection is not None:
+            previous_timeout = connection.gettimeout()
+            connection.settimeout(max(0.05, write_timeout))
         handler.wfile.write(body)
         handler.wfile.flush()
         return True
     except (BrokenPipeError, ConnectionResetError, OSError):
         return False
+    finally:
+        if write_timeout is not None and connection is not None:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+
+def _voice_sse_write_ack_timeout() -> float:
+    try:
+        value = float(os.environ.get("MS4_VOICE_SSE_WRITE_ACK_TIMEOUT_S", "2.0"))
+    except (TypeError, ValueError):
+        value = 2.0
+    return max(0.05, value)
+
+
+def _voice_worker_cleanup_timeout() -> float:
+    try:
+        value = float(os.environ.get("MS4_VOICE_WORKER_CLEANUP_TIMEOUT_S", "2.0"))
+    except (TypeError, ValueError):
+        value = 2.0
+    return max(0.05, value)
+
+
+@dataclass
+class _VoiceSseDelivery:
+    event: str
+    payload: dict[str, Any]
+    terminal: bool = False
+    acknowledged: threading.Event = field(default_factory=threading.Event)
+    client_written: bool = False
+
+
+def _voice_error_payload(exc: Exception, *, fail_closed: bool = False) -> dict[str, Any]:
+    """Separate concise operator copy from raw voice-gate diagnostics."""
+    diagnostics = str(exc)
+    lowered = " ".join(diagnostics.split()).lower()
+    if "provisioning" in lowered and "asr" in lowered:
+        message = "Voice input is still provisioning. Try again shortly."
+    elif (
+        "voice_input_ready=false" in lowered
+        or "configured_not_provisioned" in lowered
+        or "no endpoints configured" in lowered
+        or ("asr" in lowered and ("unhealthy" in lowered or "not ready" in lowered))
+    ):
+        message = "Voice input is not ready. Provision ASR and try again."
+    elif any(token in lowered for token in ("unreachable", "connection refused", "timed out", "timeout")):
+        message = "Voice services cannot reach HiveMind right now. Check the cluster and try again."
+    else:
+        message = "Voice is unavailable right now. Check the diagnostics and try again."
+
+    payload: dict[str, Any] = {"error": message, "diagnostics": diagnostics}
+    if fail_closed:
+        payload["fail_closed"] = True
+    return payload
 
 
 def _read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
@@ -206,6 +431,99 @@ def _read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
         return {}
     raw = handler.rfile.read(length).decode("utf-8")
     return json.loads(raw)
+
+
+_VOICE_TRANSCRIPT_SCHEMA = "Ms4VoiceTranscriptTurn.v1"
+_VOICE_TRANSCRIPT_MODEL = "bounded-session"
+_VOICE_TRANSCRIPT_SOURCE = "voice_input_session"
+_VOICE_TRANSCRIPT_MAX_CHARS = 65_536
+_VOICE_TRANSCRIPT_FIELDS = frozenset({
+    "schema",
+    "transcript",
+    "transcription_model",
+    "source",
+})
+
+
+def _parse_voice_transcript_envelope(body: bytes) -> str:
+    if not body:
+        raise VoiceRequestError("transcript-ready request body is empty")
+    if len(body) > (_VOICE_TRANSCRIPT_MAX_CHARS * 4) + 4096:
+        raise VoiceRequestError("transcript-ready request body exceeds the bounded limit")
+    try:
+        text = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise VoiceRequestError("transcript-ready request body must be UTF-8 JSON") from exc
+
+    def reject_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise VoiceRequestError(f"duplicate transcript-ready field: {key}")
+            parsed[key] = value
+        return parsed
+
+    try:
+        payload = json.loads(text, object_pairs_hook=reject_duplicate_fields)
+    except VoiceRequestError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise VoiceRequestError("transcript-ready request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise VoiceRequestError("transcript-ready request body must be a JSON object")
+
+    fields = set(payload)
+    if fields != _VOICE_TRANSCRIPT_FIELDS:
+        unknown = sorted(fields - _VOICE_TRANSCRIPT_FIELDS)
+        missing = sorted(_VOICE_TRANSCRIPT_FIELDS - fields)
+        detail = []
+        if unknown:
+            detail.append(f"unknown fields: {', '.join(unknown)}")
+        if missing:
+            detail.append(f"missing fields: {', '.join(missing)}")
+        raise VoiceRequestError(
+            "transcript-ready envelope fields are not exact"
+            + (f" ({'; '.join(detail)})" if detail else "")
+        )
+    if payload["schema"] != _VOICE_TRANSCRIPT_SCHEMA:
+        raise VoiceRequestError("unsupported transcript-ready schema")
+    if payload["transcription_model"] != _VOICE_TRANSCRIPT_MODEL:
+        raise VoiceRequestError("unsupported transcript-ready transcription_model")
+    if payload["source"] != _VOICE_TRANSCRIPT_SOURCE:
+        raise VoiceRequestError("unsupported transcript-ready source")
+
+    transcript = payload["transcript"]
+    if not isinstance(transcript, str):
+        raise VoiceRequestError("transcript-ready transcript must be a string")
+    if len(transcript.encode("utf-16-le")) // 2 > _VOICE_TRANSCRIPT_MAX_CHARS:
+        raise VoiceRequestError("transcript-ready transcript exceeds 65,536 characters")
+    transcript = transcript.strip()
+    if not transcript:
+        raise VoiceRequestError("transcript-ready transcript must not be empty")
+    return transcript
+
+
+def _multipart_contains_transcript_fields(content_type: str, body: bytes) -> bool:
+    boundary = None
+    for part in (content_type or "").split(";"):
+        part = part.strip()
+        if part.lower().startswith("boundary="):
+            boundary = part.split("=", 1)[1].strip().strip('"')
+            break
+    if not boundary:
+        return False
+    marker = ("--" + boundary).encode("utf-8")
+    transcript_names = tuple(
+        f'name="{field}"'.encode("utf-8") for field in _VOICE_TRANSCRIPT_FIELDS
+    )
+    for section in body.split(marker):
+        header_end = section.find(b"\r\n\r\n")
+        if header_end < 0:
+            continue
+        headers = section[:header_end].lower()
+        if any(name in headers for name in transcript_names):
+            return True
+    return False
 
 
 _HIVEMIND_URL_FOR_AUTH: str = ""
@@ -355,7 +673,17 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/models":
             status, payload = _proxy_json(f"{self.runner.ms3_url}/models", timeout=8)
-            _json_response(self, status, payload if isinstance(payload, dict) else {"models": payload})
+            body = payload if isinstance(payload, dict) else {"models": payload}
+            if isinstance(body, dict):
+                models = body.get("models")
+                if isinstance(models, list):
+                    body = dict(body)
+                    body["models"] = [
+                        model for model in models
+                        if isinstance(model, dict) and _is_chat_capable(model)
+                    ]
+                    body["chat_filtered"] = True
+            _json_response(self, status, body)
             return
         if self.path == "/settings":
             self._settings_get()
@@ -507,8 +835,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             self._hivemind_game_session_evidence_get(job_id)
             return
         if self.path == "/voice/status":
-            status, payload = _proxy_json(f"{self.runner.ms3_url}/voice/status", timeout=15)
-            _json_response(self, status, payload if isinstance(payload, dict) else {"voice": payload})
+            self._voice_status_get()
             return
         if self.path in {"/hermes/version", "/api/v1/hermes/version"}:
             _json_response(self, 200, hermes_admin.version_info())
@@ -544,7 +871,15 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             if suffix.startswith("revisions"):
                 self._double_agent_revision_get(conv_id)
                 return
-        if self.path == "/" or self.path.startswith("/static/"):
+        # Static dispatch alone uses the parsed path so cache-busting queries
+        # reach reviewed files. All API routes above retain their existing raw
+        # request-target matching and query parsing.
+        request_path = urllib.parse.urlsplit(self.path).path
+        if (
+            request_path == "/"
+            or request_path in ROOT_WEB_ASSETS
+            or request_path.startswith("/static/")
+        ):
             self._serve_static()
             return
         _json_response(self, 404, {"error": "not found"})
@@ -558,6 +893,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path == "/chat/stream":
             self._stream_chat()
+            return
+        if self.path == "/voice/prewarm/face":
+            self._voice_face_prewarm()
             return
         if self.path == "/settings/clear-grounding-cache":
             self._settings_clear_grounding_cache()
@@ -783,6 +1121,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if self.path.startswith("/api/v1/double-agent/jobs/"):
             tail = self.path[len("/api/v1/double-agent/jobs/"):]
             job_id, _, suffix = tail.partition("/")
+            if suffix == "deliver":
+                self._double_agent_deliver(job_id)
+                return
             if suffix == "cancel":
                 self._double_agent_cancel(job_id)
                 return
@@ -817,6 +1158,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         path_only = self.path.split("?", 1)[0]
         if path_only == "/voice/transcribe":
             self._voice_transcribe()
+            return
+        if path_only == "/voice/synthesize/stream":
+            self._voice_synthesize_stream()
             return
         if path_only == "/voice/synthesize":
             self._voice_synthesize()
@@ -858,7 +1202,18 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 session_id=body.get("session_id") or None,
                 model=_face_model,
                 depth_model=body.get("depth_model_id") or body.get("depth_model") or None,
+                client_id=body.get("client_id") or None,
             )
+            if result.get("fail_closed"):
+                _json_response(
+                    self,
+                    409,
+                    {
+                        "error": result.get("error") or "recommend lease failed closed",
+                        "fail_closed": True,
+                    },
+                )
+                return
             _json_response(self, 200, result)
         except HermesUnavailable as exc:
             _json_response(self, 503, {"error": str(exc), "fail_closed": True})
@@ -871,6 +1226,344 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(length) if length > 0 else b""
         return parse_audio_request(self.headers.get("Content-Type", ""), body)
+
+    def _voice_face_prewarm(self) -> None:
+        """Warm the exact Face model selected by the operator.
+
+        The boot prewarm uses the automatic picker and can therefore warm a
+        different model from a value restored by the browser.  Voice turns
+        fail closed on this route so a cold selected model cannot cross the
+        first-token watchdog and become audible as a canned fallback.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0 or length > 4096:
+                raise ValueError("request body must be 1 to 4096 bytes")
+            raw = self.rfile.read(length)
+
+            def reject_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                parsed: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in parsed:
+                        raise ValueError(f"duplicate field: {key}")
+                    parsed[key] = value
+                return parsed
+
+            body = json.loads(
+                raw.decode("utf-8", errors="strict"),
+                object_pairs_hook=reject_duplicate_fields,
+            )
+            if not isinstance(body, dict):
+                raise ValueError("request body must be a JSON object")
+            unknown = sorted(
+                set(body) - {"model", "client_id", "generation", "operation"}
+            )
+            if unknown:
+                raise ValueError(f"unknown fields: {', '.join(unknown)}")
+            operation_present = "operation" in body
+            operation = body.get("operation")
+            invalidate_only = operation_present and operation == "invalidate"
+            if operation_present and not invalidate_only:
+                raise ValueError("operation must be invalidate when provided")
+            if invalidate_only:
+                if "model" in body:
+                    raise ValueError("invalidate operation must not include model")
+                requested = None
+            else:
+                requested = body.get("model")
+                if not isinstance(requested, str):
+                    raise ValueError("model must be a non-empty string")
+                requested = requested.strip()
+                if not requested:
+                    raise ValueError("model must be a non-empty string")
+                if len(requested) > 256:
+                    raise ValueError("model exceeds 256 characters")
+            client_id = body.get("client_id")
+            if not isinstance(client_id, str):
+                raise ValueError("client_id must be a non-empty string")
+            client_id = client_id.strip()
+            if not (
+                1 <= len(client_id) <= 256
+                and client_id.isascii()
+                and all(char.isalnum() or char in "-_.:" for char in client_id)
+            ):
+                raise ValueError("client_id has an invalid format")
+            generation = body.get("generation")
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+                or generation > 9_007_199_254_740_991
+            ):
+                raise ValueError("generation must be a positive safe integer")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            _json_response(
+                self,
+                400,
+                {"error": str(exc), "warmed": False, "fail_closed": True},
+            )
+            return
+
+        cancel_event, latest_generation = _begin_selected_face_prewarm(
+            client_id,
+            generation,
+        )
+        if cancel_event is None:
+            stale_payload = {
+                "error": "selected Face prewarm generation is stale",
+                "warmed": False,
+                "generation": generation,
+                "latest_generation": latest_generation,
+                "superseded": True,
+                "fail_closed": True,
+            }
+            if invalidate_only:
+                stale_payload.update({"operation": "invalidate", "invalidated": False})
+            else:
+                stale_payload["requested_model"] = requested
+            _json_response(
+                self,
+                409,
+                stale_payload,
+            )
+            return
+        if invalidate_only:
+            # Auto does not warm or record a concrete model.  It only advances
+            # this page's server-side generation tombstone so an older exact
+            # warm cannot become the keepwarm model after the UI has moved on.
+            _finish_selected_face_prewarm(client_id, generation, cancel_event)
+            _json_response(
+                self,
+                200,
+                {
+                    "warmed": False,
+                    "invalidated": True,
+                    "automatic": True,
+                    "operation": "invalidate",
+                    "generation": generation,
+                },
+            )
+            return
+        result_box: dict[str, Any] = {}
+        absolute_timeout = _selected_face_prewarm_timeout_s()
+        request_timeout = max(5, int(absolute_timeout - 5))
+        latency_budget_ms = selected_face_admission_latency_budget_ms()
+
+        def run_exact_prewarm() -> None:
+            try:
+                result_box["result"] = dict(
+                    prewarm_face_lobe_model(
+                        hivemind_url=self.runner.hivemind_url,
+                        model=requested,
+                        timeout=request_timeout,
+                        exact_model=True,
+                        cancel_event=cancel_event,
+                        latency_budget_ms=latency_budget_ms,
+                        face_chat=getattr(self.runner, "face_lobe_chat", None),
+                        lease_scope_id=client_id,
+                    )
+                    or {}
+                )
+            except Exception as exc:
+                result_box["result"] = {"error": str(exc), "warmed": False}
+
+        worker = threading.Thread(
+            target=run_exact_prewarm,
+            daemon=True,
+            name="ms4-selected-face-prewarm",
+        )
+        worker.start()
+        worker.join(timeout=absolute_timeout)
+        if worker.is_alive():
+            cancel_event.set()
+            worker.join(timeout=1.0)
+            worker_retired = not worker.is_alive()
+            _finish_selected_face_prewarm(client_id, generation, cancel_event)
+            append_event(
+                "face_model_prewarm_failed",
+                {
+                    "requested_model": requested,
+                    "reason": "absolute_timeout",
+                    "worker_retired": worker_retired,
+                },
+            )
+            _json_response(
+                self,
+                504,
+                {
+                    "error": (
+                        "selected Face model prewarm exceeded "
+                        f"{absolute_timeout:g} seconds"
+                    ),
+                    "warmed": False,
+                    "requested_model": requested,
+                    "worker_retired": worker_retired,
+                    "fail_closed": True,
+                },
+            )
+            return
+        result = dict(result_box.get("result") or {})
+
+        if not _selected_face_prewarm_is_current(
+            client_id,
+            generation,
+            cancel_event,
+        ):
+            _json_response(
+                self,
+                409,
+                {
+                    "error": "selected Face prewarm was superseded",
+                    "warmed": False,
+                    "requested_model": requested,
+                    "generation": generation,
+                    "superseded": True,
+                    "fail_closed": True,
+                },
+            )
+            return
+
+        effective = str(result.get("model") or "").strip()
+        resolved_requested = str(result.get("requested_model") or "").strip()
+        admission_profile = str(result.get("admission_profile") or "").strip()
+        raw_first_token_ms = result.get("first_token_ms")
+        first_token_valid = bool(
+            isinstance(raw_first_token_ms, int)
+            and not isinstance(raw_first_token_ms, bool)
+            and raw_first_token_ms >= 0
+        )
+        first_token_ms = raw_first_token_ms if first_token_valid else None
+        raw_result_budget_ms = result.get("latency_budget_ms")
+        result_budget_valid = bool(
+            isinstance(raw_result_budget_ms, int)
+            and not isinstance(raw_result_budget_ms, bool)
+            and raw_result_budget_ms > 0
+            and raw_result_budget_ms == latency_budget_ms
+        )
+        exact = bool(
+            result.get("warmed") is True
+            and result.get("completed") is True
+            and result.get("cancelled") is not True
+            and int(result.get("reply_len") or 0) > 0
+            and effective
+            and resolved_requested
+            and effective == resolved_requested
+            and not result.get("fallback_used")
+            and (requested is None or resolved_requested == requested)
+            and admission_profile == SELECTED_FACE_ADMISSION_PROFILE
+            and result.get("latency_admitted") is True
+            and first_token_valid
+            and first_token_ms is not None
+            and first_token_ms <= latency_budget_ms
+            and result_budget_valid
+        )
+        if not exact:
+            _finish_selected_face_prewarm(client_id, generation, cancel_event)
+            append_event(
+                "face_model_prewarm_failed",
+                {
+                    "requested_model": requested,
+                    "resolved_requested_model": resolved_requested or None,
+                    "effective_model": effective or None,
+                    "fallback_used": bool(result.get("fallback_used")),
+                    "admission_profile": admission_profile or None,
+                    "first_token_ms": first_token_ms,
+                    "latency_budget_ms": latency_budget_ms,
+                    "latency_admitted": False,
+                    **_public_recommend_audit(result),
+                },
+            )
+            _json_response(
+                self,
+                503,
+                {
+                    "error": str(result.get("error") or "exact Face model did not warm"),
+                    "warmed": False,
+                    "requested_model": requested,
+                    "resolved_requested_model": resolved_requested or None,
+                    "effective_model": effective or None,
+                    "fallback_used": bool(result.get("fallback_used")),
+                    "admission_profile": admission_profile or None,
+                    "first_token_ms": first_token_ms,
+                    "latency_budget_ms": latency_budget_ms,
+                    "latency_admitted": False,
+                    "fail_closed": True,
+                },
+            )
+            return
+
+        if not _commit_selected_face_prewarm(
+            client_id,
+            generation,
+            cancel_event,
+            effective,
+        ):
+            _json_response(
+                self,
+                409,
+                {
+                    "error": "selected Face prewarm was superseded before commit",
+                    "warmed": False,
+                    "requested_model": requested,
+                    "generation": generation,
+                    "superseded": True,
+                    "fail_closed": True,
+                },
+            )
+            return
+        append_event(
+            "face_model_prewarmed",
+            {
+                "requested_model": requested,
+                "effective_model": effective,
+                "reply_len": int(result.get("reply_len") or 0),
+                "generation": generation,
+                "admission_profile": SELECTED_FACE_ADMISSION_PROFILE,
+                "first_token_ms": first_token_ms,
+                "latency_budget_ms": latency_budget_ms,
+                "latency_admitted": True,
+                **_public_recommend_audit(result),
+            },
+        )
+        success_payload = {
+            "warmed": True,
+            "requested_model": requested,
+            "resolved_requested_model": resolved_requested,
+            "effective_model": effective,
+            "fallback_used": False,
+            "reply_len": int(result.get("reply_len") or 0),
+            "admission_profile": SELECTED_FACE_ADMISSION_PROFILE,
+            "first_token_ms": first_token_ms,
+            "latency_budget_ms": latency_budget_ms,
+            "latency_admitted": True,
+            "generation": generation,
+        }
+        recommend = result.get("recommend")
+        if isinstance(recommend, dict) and recommend:
+            success_payload["recommend"] = recommend
+        _json_response(
+            self,
+            200,
+            success_payload,
+        )
+
+    def _read_voice_turn_input(self) -> tuple[bytes, str, str | None]:
+        content_type = self.headers.get("Content-Type", "") or ""
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length > 0 else b""
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type == "application/json":
+            transcript = _parse_voice_transcript_envelope(body)
+            return b"", "transcript.json", transcript
+        if (
+            media_type == "multipart/form-data"
+            and _multipart_contains_transcript_fields(content_type, body)
+        ):
+            raise VoiceRequestError(
+                "mixed multipart audio and transcript-ready fields are not accepted"
+            )
+        audio, filename = parse_audio_request(content_type, body)
+        return audio, filename, None
 
     def _voice_transcribe(self) -> None:
         try:
@@ -891,7 +1584,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         except VoiceRequestError as exc:
             _json_response(self, 400, {"error": str(exc)})
         except VoiceUnavailable as exc:
-            _json_response(self, 503, {"error": str(exc), "fail_closed": True})
+            _json_response(self, 503, _voice_error_payload(exc, fail_closed=True))
         except Exception as exc:
             _json_response(self, 500, {"error": str(exc)})
 
@@ -920,7 +1613,154 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         except VoiceRequestError as exc:
             _json_response(self, 400, {"error": str(exc)})
         except VoiceUnavailable as exc:
-            _json_response(self, 503, {"error": str(exc), "fail_closed": True})
+            _json_response(self, 503, _voice_error_payload(exc, fail_closed=True))
+        except Exception as exc:
+            _json_response(self, 500, {"error": str(exc)})
+
+    def _voice_synthesize_stream(self) -> None:
+        """Sentence-chunked, cancel-aware TTS for already-produced text."""
+        try:
+            body = _read_json(self) or {}
+            text = str(body.get("text") or "").strip()
+            if not text:
+                _json_response(self, 400, {"error": "text is required"})
+                return
+            if len(text) > 20_000:
+                _json_response(self, 400, {"error": "text exceeds 20000 characters"})
+                return
+            tts_model = body.get("model")
+            tts_voice = body.get("voice")
+            response_format = body.get("response_format") or DEFAULT_TTS_FORMAT
+            events: queue.Queue[_VoiceSseDelivery] = queue.Queue()
+            client_alive = threading.Event()
+            client_alive.set()
+            cancel_event = threading.Event()
+            worker_done = threading.Event()
+            lifecycle: dict[str, int] = {}
+            audio_errors = [0]
+
+            def emit(event: str, payload: dict[str, Any]) -> bool:
+                if not client_alive.is_set() or cancel_event.is_set():
+                    return False
+                if event == "audio_error":
+                    audio_errors[0] += 1
+                delivery = _VoiceSseDelivery(event=event, payload=dict(payload))
+                events.put(delivery)
+                if not delivery.acknowledged.wait(_voice_sse_write_ack_timeout()):
+                    client_alive.clear()
+                    cancel_event.set()
+                    return False
+                if not delivery.client_written:
+                    client_alive.clear()
+                    cancel_event.set()
+                    return False
+                if event == "audio_error":
+                    cancel_event.set()
+                    return False
+                return True
+
+            def worker() -> None:
+                try:
+                    chunks = _emit_text_as_parallel_chunks(
+                        text=text,
+                        emit=emit,
+                        hivemind_url=self.runner.hivemind_url,
+                        tts_model=tts_model,
+                        tts_voice=tts_voice,
+                        response_format=response_format,
+                        cancel_event=cancel_event,
+                        client_alive=client_alive,
+                        lifecycle=lifecycle,
+                    )
+                    if client_alive.is_set() and (
+                        cancel_event.is_set() or audio_errors[0] or chunks <= 0
+                    ):
+                        events.put(_VoiceSseDelivery(event="error", payload={
+                            "error": "Text synthesis did not produce a complete audio stream.",
+                            "fail_closed": True,
+                            "completed": False,
+                            "audio_chunks": chunks,
+                            "audio_errors": audio_errors[0],
+                            "lifecycle": lifecycle,
+                        }, terminal=True))
+                    elif client_alive.is_set() and not cancel_event.is_set():
+                        events.put(_VoiceSseDelivery(event="done", payload={
+                            "schema": "Ms4TextSynthesisStream.v1",
+                            "completed": True,
+                            "audio_chunks": chunks,
+                            "lifecycle": lifecycle,
+                        }, terminal=True))
+                except Exception as exc:
+                    if client_alive.is_set():
+                        events.put(_VoiceSseDelivery(event="error", payload={
+                            "error": str(exc),
+                            "fail_closed": True,
+                            "completed": False,
+                        }, terminal=True))
+                finally:
+                    worker_done.set()
+
+            _sse_start(self)
+            if not _sse_event(
+                self,
+                "status",
+                {"status": "synthesizing"},
+                write_timeout=_voice_sse_write_ack_timeout(),
+            ):
+                client_alive.clear()
+                cancel_event.set()
+                return
+            thread = threading.Thread(
+                target=worker,
+                daemon=True,
+                name="ms4-text-synthesis-stream",
+            )
+            thread.start()
+            while True:
+                try:
+                    delivery = events.get(timeout=0.25)
+                except queue.Empty:
+                    if worker_done.is_set():
+                        if _sse_event(self, "error", {
+                            "error": "Text synthesis worker ended without a terminal result.",
+                            "fail_closed": True,
+                            "completed": False,
+                        }, write_timeout=_voice_sse_write_ack_timeout()):
+                            client_alive.clear()
+                            self.close_connection = True
+                        return
+                    if not _sse_event(
+                        self,
+                        "heartbeat",
+                        {"status": "synthesizing"},
+                        write_timeout=_voice_sse_write_ack_timeout(),
+                    ):
+                        client_alive.clear()
+                        cancel_event.set()
+                        thread.join(timeout=2.0)
+                        return
+                    continue
+                written = _sse_event(
+                    self,
+                    delivery.event,
+                    delivery.payload,
+                    write_timeout=_voice_sse_write_ack_timeout(),
+                )
+                delivery.client_written = written
+                delivery.acknowledged.set()
+                if not written:
+                    client_alive.clear()
+                    cancel_event.set()
+                    thread.join(timeout=2.0)
+                    return
+                if delivery.terminal:
+                    client_alive.clear()
+                    self.close_connection = True
+                    return
+        except VoiceRequestError as exc:
+            _json_response(self, 400, {"error": str(exc)})
+        except VoiceUnavailable as exc:
+            _json_response(self, 503, _voice_error_payload(exc, fail_closed=True))
         except Exception as exc:
             _json_response(self, 500, {"error": str(exc)})
 
@@ -929,6 +1769,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             audio, filename = self._read_audio_body()
             params = self._parse_query()
             session_id = params.get("session_id") or None
+            client_id = params.get("client_id") or None
             # ?model= is the Face Lobe chat model; ?tts_model= is the
             # TTS model (tts-1 / tts-1-hd). See _voice_turn_stream for
             # the bug history.
@@ -947,6 +1788,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 tts_model=tts_model,
                 tts_voice=tts_voice,
                 response_format=tts_format,
+                client_id=client_id,
             )
             _json_response(self, 200, {
                 "schema": "Ms4VoicePttTurn.v1",
@@ -965,7 +1807,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         except VoiceRequestError as exc:
             _json_response(self, 400, {"error": str(exc)})
         except VoiceUnavailable as exc:
-            _json_response(self, 503, {"error": str(exc), "fail_closed": True})
+            _json_response(self, 503, _voice_error_payload(exc, fail_closed=True))
         except Exception as exc:
             _json_response(self, 500, {"error": str(exc)})
 
@@ -984,7 +1826,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
           event: error          {"error": "...", "fail_closed": bool?}
         """
         try:
-            audio, filename = self._read_audio_body()
+            audio, filename, transcript_ready = self._read_voice_turn_input()
         except VoiceRequestError as exc:
             _json_response(self, 400, {"error": str(exc)})
             return
@@ -992,8 +1834,22 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             _json_response(self, 500, {"error": str(exc)})
             return
 
+        transcribe_model_override: str | None = None
+        transcribe_fn_override = None
+        if transcript_ready is not None:
+            transcribe_model_override = _VOICE_TRANSCRIPT_MODEL
+
+            def accepted_transcript(**_kwargs: Any) -> dict[str, str]:
+                return {
+                    "text": transcript_ready,
+                    "model": _VOICE_TRANSCRIPT_MODEL,
+                }
+
+            transcribe_fn_override = accepted_transcript
+
         params = self._parse_query()
         session_id = params.get("session_id") or None
+        client_id = params.get("client_id") or None
         # ?model= is the FACE LOBE chat model (e.g. phi4-mini). The TTS
         # model (tts-1 / tts-1-hd) is a separate knob — earlier the UI
         # was mistakenly sending ?model=tts-1 which made the Face Lobe
@@ -1009,7 +1865,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         # back to MS4_VOICE_TTS_ENGINE env default.
         engine_override = params.get("engine") or None
 
-        events: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
+        events: queue.Queue[_VoiceSseDelivery] = queue.Queue()
         # When the browser aborts the fetch (barge-in / new turn) the
         # _sse_event write raises and returns False. We flip this event
         # to signal voice_ptt_turn_stream to stop scheduling more TTS
@@ -1017,12 +1873,49 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         # keep paying HiveMind cycles for audio nobody is listening to.
         client_alive = threading.Event()
         client_alive.set()
+        turn_cancel = threading.Event()
+        delivery_lock = threading.Lock()
+        delivery_counts = {
+            "gateway_enqueued": 0,
+            "client_written": 0,
+            "write_failures": 0,
+            "write_ack_timeouts": 0,
+        }
+        terminal_lock = threading.Lock()
+        terminal_queued = [False]
+
+        def cancel_turn() -> None:
+            client_alive.clear()
+            turn_cancel.set()
+
+        def delivery_snapshot() -> dict[str, int]:
+            with delivery_lock:
+                return dict(delivery_counts)
+
+        def queue_terminal(event: str, payload: dict[str, Any]) -> bool:
+            with terminal_lock:
+                if terminal_queued[0]:
+                    return False
+                terminal_queued[0] = True
+            item = _VoiceSseDelivery(event=event, payload=payload, terminal=True)
+            with delivery_lock:
+                delivery_counts["gateway_enqueued"] += 1
+            events.put(item)
+            return True
 
         def emit(event: str, payload: dict[str, Any]) -> bool:
-            if not client_alive.is_set():
+            if not client_alive.is_set() or turn_cancel.is_set():
                 return False
-            events.put((event, payload))
-            return True
+            item = _VoiceSseDelivery(event=event, payload=payload)
+            with delivery_lock:
+                delivery_counts["gateway_enqueued"] += 1
+            events.put(item)
+            if not item.acknowledged.wait(timeout=_voice_sse_write_ack_timeout()):
+                with delivery_lock:
+                    delivery_counts["write_ack_timeouts"] += 1
+                cancel_turn()
+                return False
+            return item.client_written
 
         def worker() -> None:
             try:
@@ -1033,13 +1926,21 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                     session_id=session_id,
                     model=model,
                     depth_model=depth_model,
+                    transcribe_model=transcribe_model_override,
                     tts_model=tts_model,
                     tts_voice=tts_voice,
                     response_format=tts_format,
                     engine=engine_override,
                     emit=emit,
                     client_alive=client_alive,
+                    cancel_event=turn_cancel,
+                    transcribe_fn=transcribe_fn_override,
+                    client_id=client_id,
                 )
+                if turn_cancel.is_set():
+                    raise VoiceUnavailable(
+                        "voice stream delivery was cancelled before terminal acknowledgement"
+                    )
                 # Per-turn structured log: everything an operator needs
                 # to debug a slow / wrong / silent turn after the fact.
                 # Written to the audit log (jsonl) so `/audit?limit=N`
@@ -1071,38 +1972,125 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                         "grounding_source": (result or {}).get("grounding_source"),
                         "tts_model": (result or {}).get("tts_model"),
                         "transcription_model": (result or {}).get("transcription_model"),
+                        "delivery": delivery_snapshot(),
+                        **_public_recommend_audit(result),
                     })
                 except Exception as exc:
                     log.warning("voice_turn_complete audit log failed: %s", exc)
-                events.put(("done", result))
+                metrics = (result or {}).setdefault("metrics", {})
+                if isinstance(metrics, dict):
+                    metrics["delivery"] = delivery_snapshot()
+                queue_terminal("done", result)
             except VoiceRequestError as exc:
                 append_event("voice_turn_failed", {"kind": "request_error", "error": str(exc)})
-                events.put(("error", {"error": str(exc)}))
+                queue_terminal("error", {"error": str(exc)})
             except VoiceUnavailable as exc:
                 append_event("voice_turn_failed", {"kind": "fail_closed", "error": str(exc)})
-                events.put(("error", {"error": str(exc), "fail_closed": True}))
+                queue_terminal("error", _voice_error_payload(exc, fail_closed=True))
             except Exception as exc:
                 append_event("voice_turn_failed", {"kind": "exception", "error": str(exc)})
-                events.put(("error", {"error": str(exc)}))
+                queue_terminal("error", {"error": str(exc)})
 
         _sse_start(self)
-        if not _sse_event(self, "status", {"status": "started"}):
-            client_alive.clear()
+        if not _sse_event(
+            self,
+            "status",
+            {"status": "started"},
+            write_timeout=_voice_sse_write_ack_timeout(),
+        ):
+            cancel_turn()
             return
         thread = threading.Thread(target=worker, daemon=True, name="ms4-voice-stream")
         thread.start()
+        terminal_sent = False
+
+        def retire_after_write_failure(failed_item: _VoiceSseDelivery | None) -> None:
+            nonlocal terminal_sent
+            cancel_turn()
+            if failed_item is not None:
+                failed_item.client_written = False
+                failed_item.acknowledged.set()
+            thread.join(timeout=_voice_worker_cleanup_timeout())
+            worker_leaked = thread.is_alive()
+            if worker_leaked:
+                log.error(
+                    "voice worker did not retire within %.2fs after client write failure",
+                    _voice_worker_cleanup_timeout(),
+                )
+
+            terminal_item: _VoiceSseDelivery | None = None
+            while True:
+                try:
+                    queued = events.get_nowait()
+                except queue.Empty:
+                    break
+                if queued.terminal and terminal_item is None:
+                    terminal_item = queued
+                else:
+                    queued.client_written = False
+                    queued.acknowledged.set()
+
+            if failed_item is not None and failed_item.terminal:
+                terminal_sent = True
+                return
+            if terminal_item is None:
+                payload = {
+                    "error": "Voice stream stopped after client write failure.",
+                    "fail_closed": True,
+                    "worker_join_timeout": worker_leaked,
+                }
+                if queue_terminal("error", payload):
+                    terminal_item = events.get_nowait()
+            if terminal_item is not None and not terminal_sent:
+                terminal_sent = True
+                _sse_event(
+                    self,
+                    terminal_item.event,
+                    terminal_item.payload,
+                    write_timeout=_voice_sse_write_ack_timeout(),
+                )
+                terminal_item.acknowledged.set()
+
         while True:
             try:
-                event, payload = events.get(timeout=2.0)
+                item = events.get(timeout=2.0)
             except queue.Empty:
-                if not _sse_event(self, "heartbeat", {"status": "running"}):
-                    client_alive.clear()
+                if not _sse_event(
+                    self,
+                    "heartbeat",
+                    {"status": "running"},
+                    write_timeout=_voice_sse_write_ack_timeout(),
+                ):
+                    with delivery_lock:
+                        delivery_counts["write_failures"] += 1
+                    retire_after_write_failure(None)
                     return
                 continue
-            if not _sse_event(self, event, payload):
-                client_alive.clear()
+            written = _sse_event(
+                self,
+                item.event,
+                item.payload,
+                write_timeout=_voice_sse_write_ack_timeout(),
+            )
+            item.client_written = written
+            with delivery_lock:
+                if written:
+                    delivery_counts["client_written"] += 1
+                else:
+                    delivery_counts["write_failures"] += 1
+            item.acknowledged.set()
+            if not written:
+                retire_after_write_failure(item)
                 return
-            if event in {"done", "error"}:
+            if item.terminal:
+                terminal_sent = True
+                thread.join(timeout=_voice_worker_cleanup_timeout())
+                if thread.is_alive():
+                    log.error(
+                        "voice worker still alive %.2fs after terminal write",
+                        _voice_worker_cleanup_timeout(),
+                    )
+                self.close_connection = True
                 return
 
     # ------------------------------------------------------------------
@@ -1127,6 +2115,55 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             asr_ready = {"ready": False, "detail": str(exc)[:240]}
 
         from .hivemind_state import hivemind_auth_configured, mcp_base_url
+
+        # ``runner.default_model`` belongs to the Depth worker.  Face and
+        # Depth intentionally have separate defaults now, so a direct gateway
+        # launch (without runtime_common seeding the environment) must not
+        # report the 30B Depth fallback as Face configuration.
+        configured_default_model = (
+            os.environ.get("MS4_DEFAULT_MODEL") or DEFAULT_FOREGROUND_MODEL
+        )
+        try:
+            fallback_choice = choose_foreground_model(
+                hivemind_url=self.runner.hivemind_url,
+                force_refresh=False,
+            )
+            fallback_model = fallback_choice.model_id
+            fallback_source = fallback_choice.source
+            fallback_detail = fallback_choice.detail
+        except Exception as exc:
+            fallback_model = None
+            fallback_source = "error"
+            fallback_detail = str(exc)[:240]
+
+        depth_override = os.environ.get(MS4_DEPTH_MODEL_ENV, "").strip() or None
+        depth_fallback = depth_fallback_model()
+        try:
+            depth_choice = choose_depth_model(
+                hivemind_url=self.runner.hivemind_url,
+                force_refresh=False,
+            )
+            depth_selection = {
+                "model_id": depth_choice.model_id,
+                "source": depth_choice.source,
+                "detail": depth_choice.detail,
+                "policy_tier": (
+                    "quality_target"
+                    if depth_choice.source == "loaded"
+                    else "explicit_override"
+                    if depth_choice.source in {"env_override", "envelope_override"}
+                    else "degraded_fast_tool_fallback"
+                    if depth_choice.model_id == DEPTH_FAST_TOOL_FALLBACK_MODEL
+                    else "configured_fallback"
+                ),
+            }
+        except Exception as exc:
+            depth_selection = {
+                "model_id": None,
+                "source": "error",
+                "detail": str(exc)[:240],
+                "policy_tier": "unavailable",
+            }
 
         payload = {
             "schema": "Ms4Settings.v1",
@@ -1171,9 +2208,33 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 "version": _safe_hermes_version(),
             },
             "face_lobe": {
-                "default_model": self.runner.default_model,
-                "fallback_model": os.environ.get("MS4_DEFAULT_MODEL", self.runner.default_model),
+                "default_model": configured_default_model,
+                "configured_default_model": configured_default_model,
+                "fallback_model": fallback_model,
+                "fallback_source": fallback_source,
+                "fallback_detail": fallback_detail,
                 "foreground_override": os.environ.get("MS4_FOREGROUND_MODEL") or None,
+                "serving_scope": "hivemind_cluster",
+            },
+            "depth_lobe": {
+                # Durable policy intent is distinct from the readiness-driven
+                # selection below. A cold preferred model must not disappear
+                # from the operator snapshot merely because the safe fallback
+                # is serving the current turn.
+                "preferred_cluster_target": DEPTH_PREFERRED_CLUSTER_TARGET,
+                "quality_target_model": DEPTH_PREFERRED_CLUSTER_TARGET,
+                "automatic_selection": depth_selection,
+                "configured_override": depth_override,
+                "fallback_model": depth_fallback,
+                "fallback_policy_tier": (
+                    "degraded_fast_tool_fallback"
+                    if depth_fallback == DEPTH_FAST_TOOL_FALLBACK_MODEL
+                    else "configured_fallback"
+                ),
+                "fallback_minimum_total_parameters_b": DEPTH_FALLBACK_MIN_TOTAL_PARAM_B,
+                "minimum_total_parameters_b": DEPTH_MIN_TOTAL_PARAM_B,
+                "minimum_target_total_parameters_b": DEPTH_MIN_TOTAL_PARAM_B,
+                "serving_scope": "hivemind_cluster",
             },
         }
         _json_response(self, 200, payload)
@@ -1181,6 +2242,51 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Voice services lifecycle (HiveMind ASR / TTS / TTS_SUPER)
     # ------------------------------------------------------------------
+
+    def _voice_status_get(self) -> None:
+        """Effective voice-readiness view for the Oracle front door.
+
+        Voice turns already route through ``check_voice_ready`` so healthy
+        HiveMind ASR can keep working when MS3's cached readiness is stale.
+        The UI status route must report the same effective readiness; a raw
+        MS3 proxy makes the mic look broken even when the turn path can use
+        HiveMind ASR directly.
+        """
+        try:
+            payload = check_voice_ready(
+                self.runner.ms3_url,
+                hivemind_url=self.runner.hivemind_url,
+                timeout=5,
+                retries=1,
+            )
+            out = dict(payload) if isinstance(payload, dict) else {"voice": payload}
+            out.setdefault("schema", "VoiceReadiness.v1")
+            out.setdefault("voice_input_ready", True)
+            out.setdefault("effective_source", out.get("source") or "ms3")
+            _json_response(self, 200, out)
+            return
+        except VoiceUnavailable as exc:
+            status, payload = _proxy_json(f"{self.runner.ms3_url}/voice/status", timeout=10)
+            out = dict(payload) if isinstance(payload, dict) else {"voice": payload}
+            out.setdefault("schema", "VoiceReadiness.v1")
+            out["voice_input_ready"] = False
+            out.setdefault("effective_source", "ms3")
+            out["effective_detail"] = str(exc)[:400]
+            try:
+                services = list_voice_services(self.runner.hivemind_url)
+                asr = next((svc for svc in services if svc.get("service") == "ASR"), None)
+                if asr is not None:
+                    out["hivemind_asr"] = {
+                        "healthy": bool(asr.get("healthy")),
+                        "detail": asr.get("detail"),
+                        "endpoint": asr.get("endpoint"),
+                        "endpoints_configured": asr.get("endpoints_configured"),
+                        "provisioning_state": asr.get("provisioning_state"),
+                    }
+            except Exception as svc_exc:  # noqa: BLE001 - status route is diagnostic
+                out["hivemind_asr_error"] = str(svc_exc)[:240]
+            _json_response(self, 200 if status == 200 else status, out)
+            return
 
     def _voice_services_get(self) -> None:
         """Combined ASR / TTS / TTS_SUPER status snapshot.
@@ -1690,9 +2796,9 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
     def _voice_recent_turns_get(self) -> None:
         """Return the most recent ``voice_turn_complete`` and
         ``voice_turn_failed`` audit events so the UI can render a
-        per-turn diagnostics panel. Tail-only, newest first."""
+        per-turn diagnostics panel. Bounded reverse scan + ring; newest first."""
+        limit = 25
         try:
-            limit = 25
             if "?" in self.path:
                 qs = self.path.split("?", 1)[1]
                 for part in qs.split("&"):
@@ -1702,22 +2808,20 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                             limit = max(1, min(200, int(value)))
                         except ValueError:
                             limit = 25
-            # Pull a generous slice from the audit log (events are
-            # heterogeneous), then filter to voice events.
-            events = read_events(limit=limit * 8)
-            voice_events = [
-                e for e in events
-                if isinstance(e, dict)
-                and e.get("event") in ("voice_turn_complete", "voice_turn_failed")
-            ]
-            voice_events.reverse()  # newest first
+            payload = read_recent_voice_turns(limit=limit)
+            if "schema" not in payload:
+                payload["schema"] = "Ms4VoiceRecentTurns.v1"
+            _json_response(self, 200, payload)
+        except Exception as exc:
             _json_response(self, 200, {
                 "schema": "Ms4VoiceRecentTurns.v1",
-                "turns": voice_events[:limit],
+                "turns": [],
                 "limit": limit,
+                "source": "error",
+                "error": str(exc),
+                "complete": False,
+                "stale": False,
             })
-        except Exception as exc:
-            _json_response(self, 500, {"error": str(exc)})
 
     # ------------------------------------------------------------------
     # HiveMind admin shared error mapping
@@ -2435,14 +3539,23 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 result = voice_identity.delete(self.runner.hivemind_url, identity_id)
                 append_event("hivemind_voice_identity_delete", {"identity_id": identity_id})
             elif action == "refine":
-                audio_b64 = body.get("audio_base64") or ""
-                if not audio_b64:
-                    _json_response(self, 400, {"error": "audio_base64 required"})
+                embedding = body.get("embedding")
+                if not isinstance(embedding, list) or not embedding:
+                    _json_response(self, 400, {
+                        "error": "embedding array required; HLI refine does not accept audio_base64"
+                    })
                     return True
-                import base64 as _b64
-                audio = _b64.b64decode(audio_b64)
-                result = voice_identity.refine(self.runner.hivemind_url, identity_id=identity_id, audio=audio)
-                append_event("hivemind_voice_identity_refine", {"identity_id": identity_id, "audio_bytes": len(audio)})
+                result = voice_identity.refine(
+                    self.runner.hivemind_url,
+                    name=identity_id,
+                    embedding=embedding,
+                    blend_alpha=body.get("blend_alpha"),
+                    metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None,
+                )
+                append_event("hivemind_voice_identity_refine", {
+                    "name": identity_id,
+                    "embedding_dims": len(embedding),
+                })
             else:
                 return False
         except Exception as exc:
@@ -2851,7 +3964,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         _json_response(self, 200, result if isinstance(result, dict) else {"result": result})
 
     # ------------------------------------------------------------------
-    # /hivemind/jobs/cancel — destructive (resets all active jobs per spec)
+    # /hivemind/jobs/cancel - destructive, UUID-scoped inference cancel
     # ------------------------------------------------------------------
 
     def _hivemind_jobs_cancel(self) -> None:
@@ -2860,14 +3973,21 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             confirm = bool(body.get("confirm"))
             if not confirm:
                 _json_response(self, 400, {
-                    "error": "jobs.cancel currently resets ALL active inference jobs "
-                             "(per HiveMind spec — per-job cancel is not yet implemented). "
-                             "Pass {\"confirm\": true} to proceed."
+                    "error": "jobs.cancel is destructive. Pass {\"confirm\": true, "
+                             "\"job_id\": \"<trace-uuid>\"} to proceed."
                 })
                 return
-            job_id = str(body.get("job_id") or "all")
-            result = hivemind_tools.jobs_cancel(self.runner.hivemind_url, job_id=job_id)
-            append_event("hivemind_jobs_cancel_all", {"job_id_requested": job_id})
+            job_id = str(body.get("job_id") or "").strip()
+            if not job_id:
+                _json_response(self, 400, {"error": "job_id trace UUID is required"})
+                return
+            reason = str(body.get("reason") or "MS4 operator cancellation").strip()
+            result = hivemind_tools.jobs_cancel(
+                self.runner.hivemind_url,
+                job_id=job_id,
+                reason=reason,
+            )
+            append_event("hivemind_jobs_cancel", {"job_id": job_id, "reason": reason})
         except Exception as exc:
             self._emit_admin_error(exc)
             return
@@ -3019,6 +4139,14 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             if not isinstance(body, dict):
                 _json_response(self, 400, {"error": "request body must be a JSON object"})
                 return
+            if not body.get("prior_context"):
+                session_id = body.get("parent_conversation_id")
+                prior_context = _face_lobe_prior_context(
+                    getattr(self.runner, "face_lobe_chat", None),
+                    str(session_id) if session_id else None,
+                )
+                if prior_context:
+                    body["prior_context"] = prior_context
             envelope = JobEnvelope.from_dict(body)
             # Obey an explicit Depth Lobe model from the submit dialog
             # (top-level depth_model_id / model_override) when the
@@ -3065,6 +4193,27 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if result is not None:
             snap = {**snap, "result": result}
         _json_response(self, 200, snap)
+
+    def _double_agent_deliver(self, job_id: str) -> None:
+        if not is_safe_job_id(job_id):
+            _json_response(self, 400, {"error": "unsafe job_id"})
+            return
+        try:
+            body = _read_json(self) or {}
+            conversation_id = str(body.get("conversation_id") or "").strip()
+            if not is_safe_conversation_id(conversation_id):
+                _json_response(self, 400, {"error": "safe conversation_id is required"})
+                return
+            delivery = self.runner.deliver_depth_result(job_id, conversation_id)
+            _json_response(self, 200, delivery)
+        except KeyError:
+            _json_response(self, 404, {"error": "unknown job_id"})
+        except ValueError as exc:
+            _json_response(self, 409, {"error": str(exc), "fail_closed": True})
+        except RuntimeError as exc:
+            _json_response(self, 409, {"error": str(exc), "fail_closed": True})
+        except Exception as exc:
+            _json_response(self, 500, {"error": str(exc), "fail_closed": True})
 
     def _double_agent_cancel(self, job_id: str) -> None:
         if not is_safe_job_id(job_id):
@@ -3138,13 +4287,11 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
         if "?" not in self.path:
             return {}
         query = self.path.split("?", 1)[1]
-        params: dict[str, str] = {}
-        for part in query.split("&"):
-            if not part:
-                continue
-            key, _, value = part.partition("=")
-            params[key] = value
-        return params
+        # URLSearchParams percent-encodes model ids such as
+        # ``llama3.1:8b``. Keep the existing last-value-wins behavior while
+        # applying the standard query-string decoding contract (including
+        # ``+`` as a space) before any value reaches routing/model selection.
+        return dict(urllib.parse.parse_qsl(query, keep_blank_values=True))
 
     def _stream_chat(self) -> None:
         try:
@@ -3156,9 +4303,11 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             events: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
             client_alive = threading.Event()
             client_alive.set()
+            turn_cancel = threading.Event()
 
             def stream_callback(delta: str) -> bool:
                 if not client_alive.is_set():
+                    turn_cancel.set()
                     return False
                 if delta:
                     events.put(("token", {"text": delta}))
@@ -3172,9 +4321,34 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                         model=body.get("model_id") or body.get("model") or None,
                         depth_model=body.get("depth_model_id") or body.get("depth_model") or None,
                         stream_callback=stream_callback,
+                        cancel_event=turn_cancel,
+                        client_id=body.get("client_id") or None,
                     )
                     if client_alive.is_set():
-                        events.put(("done", result))
+                        if result.get("fail_closed"):
+                            events.put(("error", {
+                                "error": result.get("error") or "recommend lease failed closed",
+                                "fail_closed": True,
+                            }))
+                        elif result.get("completed") is True and result.get("cancelled") is not True:
+                            events.put(("done", result))
+                        else:
+                            events.put(("incomplete", {
+                                "error": "Face response ended before verified completion.",
+                                "code": "face_stream_incomplete",
+                                "text": str(result.get("text") or ""),
+                                 "session_id": result.get("session_id"),
+                                 "model": result.get("model"),
+                                 # Dispatch happens before Face inference. Keep
+                                 # the safe job identity so an incomplete Face
+                                 # stream cannot orphan a valid Depth result.
+                                 "dispatched_job": result.get("dispatched_job"),
+                                 "router": result.get("router"),
+                                 "depth_lobe_model": result.get("depth_lobe_model"),
+                                 "completed": False,
+                                "cancelled": bool(result.get("cancelled")),
+                                "metrics": result.get("metrics") or {},
+                            }))
                 except ValueError as exc:
                     if client_alive.is_set():
                         events.put(("error", {"error": str(exc), "model_incompatible": True}))
@@ -3188,6 +4362,7 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             _sse_start(self)
             if not _sse_event(self, "status", {"status": "started"}):
                 client_alive.clear()
+                turn_cancel.set()
                 return
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
@@ -3197,19 +4372,39 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
                 except queue.Empty:
                     if not _sse_event(self, "heartbeat", {"status": "running"}):
                         client_alive.clear()
+                        turn_cancel.set()
                         return
                     continue
                 if not _sse_event(self, event, payload):
                     client_alive.clear()
+                    turn_cancel.set()
                     return
-                if event in {"done", "error"}:
+                if event in {"done", "incomplete", "error"}:
                     client_alive.clear()
+                    # _sse_start advertises keep-alive for the streaming
+                    # phase. A terminal frame has no Content-Length, so the
+                    # socket close is the only unambiguous EOF for HTTP/1.1
+                    # clients that keep reading after done/error.
+                    self.close_connection = True
                     return
         except Exception as exc:
             _json_response(self, 500, {"error": str(exc)})
 
     def _serve_static(self) -> None:
-        relative = "index.html" if self.path == "/" else self.path.removeprefix("/static/")
+        # Route on the URL path, not the raw request target. A reviewed build can
+        # therefore be requested as ``/?v=<sha256>`` without turning the query
+        # string into a filesystem name and returning a false 404.
+        request_path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        root_asset = ROOT_WEB_ASSETS.get(request_path)
+        if request_path == "/":
+            relative = "index.html"
+        elif root_asset:
+            relative = root_asset[0]
+        elif request_path.startswith("/static/"):
+            relative = request_path.removeprefix("/static/")
+        else:
+            _json_response(self, 404, {"error": "not found"})
+            return
         target = (WEB_ROOT / relative).resolve()
         if WEB_ROOT.resolve() not in target.parents and target != WEB_ROOT.resolve():
             _json_response(self, 403, {"error": "forbidden"})
@@ -3218,24 +4413,45 @@ class Ms4GatewayHandler(SimpleHTTPRequestHandler):
             _json_response(self, 404, {"error": "not found"})
             return
         content = target.read_bytes()
-        content_type = "text/html; charset=utf-8" if target.suffix == ".html" else "text/plain; charset=utf-8"
+        content_type = (
+            root_asset[1]
+            if root_asset
+            else "text/html; charset=utf-8"
+            if target.suffix == ".html"
+            else "text/plain; charset=utf-8"
+        )
         if target.suffix == ".js":
             content_type = "application/javascript; charset=utf-8"
         if target.suffix == ".css":
             content_type = "text/css; charset=utf-8"
+        if target.suffix == ".svg":
+            content_type = "image/svg+xml; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if request_path == "/service-worker.js":
+            self.send_header("Service-Worker-Allowed", "/")
+        if target.suffix == ".html" or request_path == "/service-worker.js":
+            # The Oracle UI is an executable control surface. Never let a prior
+            # candidate survive a source switch in the browser HTTP cache.
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(content)
 
 
 def build_runner() -> Ms4HermesRunner:
     return Ms4HermesRunner(
-        hermes_dir=os.environ.get("MS4_HERMES_DIR", str(Path.home() / "Documents" / "hermes-agent")),
-        hivemind_url=os.environ.get("MS4_HIVEMIND_URL", "http://127.0.0.1:6089"),
+        hermes_dir=str(runtime_common.hermes_dir()),
+        hivemind_url=(
+            os.environ.get("MS4_HIVEMIND_URL")
+            or os.environ.get("MS4_HIVEMIND_HLI_URL")
+            or "http://127.0.0.1:6089"
+        ),
         ms3_url=os.environ.get("MS4_MS3_URL", "http://127.0.0.1:9080"),
-        default_model=os.environ.get("MS4_DEFAULT_MODEL", "qwen3-coder-next:latest"),
+        default_model=depth_fallback_model(),
     )
 
 
@@ -3244,6 +4460,10 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     handler_cls = Ms4GatewayHandler
     handler_cls.runner = build_runner()
     hermes_admin.initialize_state()
+    try:
+        hermes_admin.reconcile_durable_terminal_state()
+    except Exception as exc:
+        log.warning("Hermes terminal-state reconcile on startup failed: %s", exc)
     # The Double Agent runner deliberately stays in subprocess mode here so
     # cancel() can truly terminate a blocking Hermes model call. The child
     # process (`double_agent/_worker_entry.py`) constructs its own
@@ -3272,11 +4492,11 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
             print("MS4 Double Agent continuation classifier: enabled", flush=True)
         except Exception as exc:
             print(f"MS4 Double Agent continuation classifier wiring failed: {exc}", flush=True)
-    # Pre-warm ASR + TTS + Face Lobe model on boot. Voice latency is
+    # Pre-warm ASR + Face Lobe model on boot. Voice latency is
     # dominated by cold loads on the first turn (whisper ~3-8s, TTS
-    # ~3-5s, Face Lobe model load ~5-10s). Each pre-warm runs in its
-    # own daemon thread so the gateway itself doesn't block on boot;
-    # the gateway is serving traffic the moment the HTTP server starts.
+    # ~3-5s, Face Lobe model load ~5-10s). The autoscale daemon below
+    # attempts selected-pool scale-out when enabled, then warms that pool
+    # regardless of scale availability. Gateway boot never blocks.
     def _prewarm(label, fn):
         t0 = time.monotonic()
         try:
@@ -3287,16 +4507,20 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
             print(f"MS4 {label} pre-warm failed: {exc}", flush=True)
 
     hivemind_url = handler_cls.runner.hivemind_url
+    tts_model = DEFAULT_TTS_MODEL
+    tts_job_type = _tts_job_type_for_model(tts_model)
     _set_hivemind_url_for_auth(hivemind_url)
     threading.Thread(target=_prewarm, args=("ASR", lambda: {"warmed": True, "text": (prewarm_asr(hivemind_url=hivemind_url) or {}).get("text", "")}), daemon=True, name="ms4-asr-prewarm").start()
-    threading.Thread(target=_prewarm, args=("TTS", lambda: {"warmed": True, "bytes": len((prewarm_tts(hivemind_url=hivemind_url) or {}).get("audio_bytes") or b"")}), daemon=True, name="ms4-tts-prewarm").start()
     # TTS_SUPER WebSocket pre-warm: opens a WS to HiveMind's
     # /v1/text-to-speech/{voice}/stream-input, pushes a tiny "Ready."
     # payload, and closes. Pays the TCP/TLS/WS-upgrade and GIM model
     # load cost at boot so the first real voice turn doesn't. We are
     # the only callers of TTS_SUPER ws_super engine — if HiveMind
     # isn't ready, this logs and skips silently.
-    threading.Thread(target=_prewarm, args=("TTS_SUPER WS", lambda: prewarm_tts_super_ws(hivemind_url=hivemind_url)), daemon=True, name="ms4-tts-super-prewarm").start()
+    # When TTS_SUPER is the selected model pool, the autoscale daemon
+    # performs this pre-warm after its scale attempt instead of racing it.
+    if tts_job_type != "TTS_SUPER":
+        threading.Thread(target=_prewarm, args=("TTS_SUPER WS", lambda: prewarm_tts_super_ws(hivemind_url=hivemind_url)), daemon=True, name="ms4-tts-super-prewarm").start()
     threading.Thread(target=_prewarm, args=("Face Lobe", lambda: prewarm_face_lobe_model(hivemind_url=hivemind_url)), daemon=True, name="ms4-flb-prewarm").start()
     # Pre-warm grounding caches (inventory + tools) so the first
     # "what's the cluster status?" turn doesn't pay 15-20s of MCP
@@ -3352,7 +4576,8 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     # scale endpoint only ADDS replicas (floors), so this can't reduce an
     # already-oversized pool — that's a HiveMind-side reset. We provision on
     # boot and re-issue periodically (idempotent). MS4_VOICE_TTS_AUTOSCALE=0
-    # disables; MS4_VOICE_TTS_AUTOSCALE_SECS (default 600; 0 = boot-only).
+    # disables scale-out, not initial pre-warm; MS4_VOICE_TTS_AUTOSCALE_SECS
+    # (default 600; 0 = boot-only).
     def _tts_replica_target() -> int | None:
         raw = os.environ.get("MS4_VOICE_TTS_REPLICA_TARGET", "2").strip()
         if not raw:
@@ -3363,24 +4588,150 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
             return None
         return t if t > 0 else None
 
+    def _prewarm_selected_tts_pool() -> dict[str, Any]:
+        if tts_job_type == "TTS_SUPER":
+            result = dict(prewarm_tts_super_ws(hivemind_url=hivemind_url) or {})
+            result.update({"model": tts_model, "job_type": tts_job_type})
+            return result
+        result = prewarm_tts(hivemind_url=hivemind_url, model=tts_model) or {}
+        audio = result.get("audio_bytes") if isinstance(result, dict) else b""
+        audio_bytes = audio if isinstance(audio, (bytes, bytearray)) else b""
+        verdict: dict[str, Any] = {
+            "warmed": bool(audio_bytes),
+            "bytes": len(audio_bytes),
+            "model": tts_model,
+            "job_type": tts_job_type,
+        }
+        if isinstance(result, dict) and result.get("error"):
+            verdict["error"] = result["error"]
+        return verdict
+
+    def _regular_tts_warm_attempts(
+        scale_result: dict[str, Any],
+        requested_target: int | None,
+    ) -> int:
+        if not scale_result.get("ok"):
+            return 1
+        replicas = scale_result.get("replicas")
+        response_target = scale_result.get("target")
+        if type(replicas) is not int or replicas <= 0:
+            return 1
+        limits = []
+        if requested_target is not None:
+            limits.append(requested_target)
+        if type(response_target) is int and response_target > 0:
+            limits.append(response_target)
+        if not limits:
+            return 1
+        return max(1, min(replicas, *limits))
+
+    def _probe_selected_tts_capacity(
+        scale_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Admit REST capacity two only after a same-route live measurement."""
+
+        replicas = scale_result.get("replicas")
+        local_scale_proves_two_candidates = (
+            scale_result.get("ok") is True
+            and type(replicas) is int
+            and replicas >= 2
+        )
+        location_policy = _tts_location_policy()
+        # peer_only routes to the LAN pool, which the local scale endpoint does
+        # not enumerate. Measure that already-existing same route even when
+        # local replicas=0/1. local_only must retain the >=2 local-discovery
+        # precondition so this background check cannot invent a second origin.
+        if location_policy == "local_only" and not local_scale_proves_two_candidates:
+            return None
+        if location_policy != "peer_only" and not local_scale_proves_two_candidates:
+            return None
+        result = probe_voice_rest_concurrency(
+            hivemind_url=hivemind_url,
+            model=tts_model,
+            response_format=DEFAULT_TTS_FORMAT,
+        )
+        # The probe result is intentionally sanitized: no text, audio, endpoint,
+        # token, or raw provenance is retained in the boot log.
+        print(
+            f"MS4 {tts_job_type} capacity proof: "
+            f"passed={result.get('passed')} "
+            f"speedup={result.get('observed_speedup')} "
+            f"floor={result.get('minimum_speedup')} "
+            f"policy={result.get('location_policy')} "
+            f"provenance={result.get('provenance_non_cloud_count')}/"
+            f"{result.get('provenance_sample_count')} "
+            f"reason={result.get('reason')}",
+            flush=True,
+        )
+        return result
+
     def _tts_autoscale_loop() -> None:
-        if os.environ.get("MS4_VOICE_TTS_AUTOSCALE", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        autoscale_enabled = (
+            os.environ.get("MS4_VOICE_TTS_AUTOSCALE", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        target = _tts_replica_target()
+        res: dict[str, Any] = {"ok": False}
+        if autoscale_enabled:
+            try:
+                res = provision_tts_replicas(
+                    hivemind_url=hivemind_url,
+                    target=target,
+                    job_type=tts_job_type,
+                )
+            except Exception as exc:
+                print(f"MS4 {tts_job_type} scale-out failed: {exc}", flush=True)
+            if res.get("ok"):
+                print(f"MS4 {tts_job_type} scale-out: {res.get('replicas')} replica(s) "
+                      f"(target={target if target else 'per-GPU'}) — {res.get('status')}", flush=True)
+
+        warm_attempts = (
+            _regular_tts_warm_attempts(res, target)
+            if tts_job_type == "TTS"
+            else 1
+        )
+        for attempt in range(warm_attempts):
+            label = (
+                tts_job_type
+                if warm_attempts == 1
+                else f"{tts_job_type} {attempt + 1}/{warm_attempts}"
+            )
+            _prewarm(label, _prewarm_selected_tts_pool)
+        _probe_selected_tts_capacity(res)
+
+        if not autoscale_enabled:
             return
         try:
             interval = int(os.environ.get("MS4_VOICE_TTS_AUTOSCALE_SECS", "600"))
         except (TypeError, ValueError):
             interval = 600
-        target = _tts_replica_target()
-        res = provision_tts_replicas(hivemind_url=hivemind_url, target=target)
-        if res.get("ok"):
-            print(f"MS4 TTS scale-out: {res.get('replicas')} replica(s) "
-                  f"(target={target if target else 'per-GPU'}) — {res.get('status')}", flush=True)
         if interval <= 0:
             return
         while True:
             time.sleep(interval)
             try:
-                provision_tts_replicas(hivemind_url=hivemind_url, target=_tts_replica_target())
+                refreshed = provision_tts_replicas(
+                    hivemind_url=hivemind_url,
+                    target=_tts_replica_target(),
+                    job_type=tts_job_type,
+                )
+                refreshed_target = _tts_replica_target()
+                refreshed_warm_attempts = (
+                    _regular_tts_warm_attempts(refreshed, refreshed_target)
+                    if tts_job_type == "TTS"
+                    else 1
+                )
+                for attempt in range(refreshed_warm_attempts):
+                    label = (
+                        f"{tts_job_type} refresh"
+                        if refreshed_warm_attempts == 1
+                        else (
+                            f"{tts_job_type} refresh "
+                            f"{attempt + 1}/{refreshed_warm_attempts}"
+                        )
+                    )
+                    _prewarm(label, _prewarm_selected_tts_pool)
+                _probe_selected_tts_capacity(refreshed)
             except Exception:
                 pass  # best-effort; single replica still serves TTS
     threading.Thread(target=_tts_autoscale_loop, daemon=True, name="ms4-tts-autoscale").start()
@@ -3416,8 +4767,19 @@ def run(host: str = "127.0.0.1", port: int = 9180) -> None:
     # /spirit/state but don't crash the gateway.
     start_heartbeat_thread(handler_cls.runner.ms3_url)
     server = ThreadingHTTPServer((host, port), handler_cls)
+    # MS4-owned dream-cadence/background review consumer (not MS3 dreaming).
+    voice_candidate_reconciler = VoiceCandidateReconciler(
+        hivemind_url=handler_cls.runner.hivemind_url,
+    )
+    voice_candidate_reconciler.start()
     print(f"MS4 gateway listening on http://{host}:{port}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        voice_candidate_reconciler.stop()
+        closer = getattr(server, "server_close", None)
+        if closer is not None:
+            closer()
 
 
 if __name__ == "__main__":

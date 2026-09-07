@@ -6,11 +6,10 @@ What's locked in
 * The :data:`REFLEXES` catalog has the categories the UI keys off
   (``ack``, ``thinking``, ``error``, ``confirm``, ``identity``).
 * ``generate_reflex`` writes to the path :func:`reflex_path` returns,
-  with the WAV bytes :func:`synthesize` produced. Idempotent
-  (re-writing the same file is fine).
+  only after QA accepts the candidate and binds metadata to its hash.
 * ``generate_all`` skips already-present reflexes when ``force=False``
   and re-renders them when ``force=True``.
-* ``list_reflexes`` projects on-disk availability + sizes per voice.
+* ``list_reflexes`` projects validated, hash-bound availability per voice.
 * Unknown reflex ids raise :class:`ReflexUnknown` so the gateway
   can map to 400 vs 404 correctly.
 * Voice ids are sanitized so a malicious caller can't write outside
@@ -22,6 +21,7 @@ need a live cluster.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 import threading
@@ -34,12 +34,22 @@ from machine_spirit_4.gateway import canned_reflexes as cr
 
 
 @pytest.fixture(autouse=True)
-def _disable_reflex_qa(monkeypatch):
+def _accept_reflex_qa(monkeypatch):
     """These tests exercise generation/listing mechanics, not the QA
-    round-trip (which transcribes audio back via ASR). Keep QA OFF so they
-    stay hermetic and don't reach the network. QA itself is covered in
+    round-trip (which transcribes audio back via ASR). Stub an accepted QA
+    result so they stay hermetic and don't reach the network. QA itself is in
     test_reflex_qa.py."""
-    monkeypatch.setenv("MS4_REFLEX_QA", "0")
+    monkeypatch.setenv("MS4_REFLEX_QA", "1")
+    monkeypatch.setattr(
+        cr,
+        "validate_reflex_audio",
+        lambda intended, audio, url: {
+            "valid": True,
+            "heard": intended,
+            "reason": "semantic_accept",
+            "disposition": "accept",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +195,8 @@ def test_generate_reflex_writes_valid_wav(cache_dir, fake_synthesize):
     assert info["id"] == "ack_mhm"
     assert info["voice"] == "alloy"
     assert info["size_bytes"] > 0
+    assert info.get("status") == "promoted"
+    assert info.get("promoted") is True
     # On-disk file is a real WAV decodable by stdlib wave.
     p = cr.reflex_path("alloy", "ack_mhm")
     assert p.exists()
@@ -192,6 +204,10 @@ def test_generate_reflex_writes_valid_wav(cache_dir, fake_synthesize):
         assert w.getnchannels() == 1
         assert w.getsampwidth() == 2
         assert w.getframerate() == 24000
+    meta = cr._read_meta("alloy", "ack_mhm")
+    assert meta["validated"] is True
+    assert meta["qa_version"] == cr._QA_VERSION
+    assert meta["audio_sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
 
 def test_generate_reflex_unknown_id_raises(cache_dir, fake_synthesize):
@@ -292,6 +308,65 @@ def test_read_reflex_returns_wav_bytes_when_available(cache_dir, fake_synthesize
 def test_read_reflex_returns_none_when_missing(cache_dir):
     bytes_out = cr.read_reflex(reflex_id="ack_mhm", voice="alloy")
     assert bytes_out is None
+
+
+def test_read_reflex_rejects_hash_mismatch(cache_dir):
+    rid = "ack_mhm"
+    voice = "alloy"
+    path = cr.reflex_path(voice, rid)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"current-wav")
+    cr._write_meta(voice, rid, {
+        "schema": "Ms4ReflexMeta.v1",
+        "id": rid,
+        "validated": True,
+        "qa_version": cr._QA_VERSION,
+        "audio_sha256": hashlib.sha256(b"different-wav").hexdigest(),
+    })
+
+    assert cr.read_reflex(reflex_id=rid, voice=voice) is None
+
+
+@pytest.mark.parametrize(
+    ("validated", "qa_version"),
+    [
+        (False, cr._QA_VERSION),
+        (None, cr._QA_VERSION),
+        (True, cr._QA_VERSION - 1),
+    ],
+)
+def test_read_reflex_rejects_unvalidated_or_stale_metadata(
+    cache_dir,
+    validated,
+    qa_version,
+):
+    rid = "ack_yes"
+    voice = "alloy"
+    audio = b"bound-wav"
+    path = cr.reflex_path(voice, rid)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(audio)
+    cr._write_meta(voice, rid, {
+        "schema": "Ms4ReflexMeta.v1",
+        "id": rid,
+        "validated": validated,
+        "qa_version": qa_version,
+        "audio_sha256": hashlib.sha256(audio).hexdigest(),
+    })
+
+    assert cr.read_reflex(reflex_id=rid, voice=voice) is None
+
+
+def test_list_reflexes_does_not_advertise_unbound_audio(cache_dir):
+    rid = "ack_mhm"
+    path = cr.reflex_path("alloy", rid)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"orphaned-wav")
+
+    out = cr.list_reflexes(voice="alloy")
+    by_id = {item["id"]: item for item in out["reflexes"]}
+    assert by_id[rid]["available"] is False
+    assert by_id[rid]["size_bytes"] == 0
 
 
 def test_read_reflex_unknown_id_raises(cache_dir):

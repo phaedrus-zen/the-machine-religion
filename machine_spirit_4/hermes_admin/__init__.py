@@ -47,15 +47,44 @@ from .versioning import (
     latest_version,
     parse_semver,
     recent_releases,
+    reconcile_durable_terminal_state,
     resolve_git_tag,
     update_available,
     version_info,
 )
-from .installer import HermesUpgradeError, run_update_job, trigger_update
+from .provenance import (
+    GitSignedTagVerifier,
+    ProvenanceError,
+    ProvenancePolicy,
+    PyPiAttestationVerifier,
+    ReleaseProvenanceRequest,
+    SignatureVerifier,
+    SignedTagManifest,
+    VerifiedProvenance,
+    verify_release_provenance,
+    verify_update_provenance,
+)
+from .installer import (
+    HermesInsufficientDiskError,
+    HermesUpgradeError,
+    HermesUpgradeTimeoutError,
+    run_update_job,
+    trigger_update,
+)
 
 __all__ = [
+    "GitSignedTagVerifier",
+    "HermesInsufficientDiskError",
     "HermesUpgradeError",
+    "HermesUpgradeTimeoutError",
+    "ProvenanceError",
+    "ProvenancePolicy",
+    "PyPiAttestationVerifier",
+    "ReleaseProvenanceRequest",
+    "SignatureVerifier",
+    "SignedTagManifest",
     "UpdateJobSnapshot",
+    "VerifiedProvenance",
     "current_version",
     "finalize_job",
     "initialize_state",
@@ -65,6 +94,7 @@ __all__ = [
     "latest_version",
     "parse_semver",
     "recent_releases",
+    "reconcile_durable_terminal_state",
     "resolve_git_tag",
     "run_update_job",
     "set_phase",
@@ -72,5 +102,7 @@ __all__ = [
     "trigger_update",
     "update_available",
     "update_in_progress",
+    "verify_release_provenance",
+    "verify_update_provenance",
     "version_info",
 ]

@@ -277,6 +277,50 @@ def get_service_health(hivemind_url: str, *, timeout: int = 10) -> dict[str, Any
     return _mcp_call(hivemind_url, "hivemind.service_health@v1", {}, timeout=timeout)
 
 
+def get_lifecycle_state(hivemind_url: str, *, timeout: int = 10) -> dict[str, Any]:
+    """Read HiveMind's authoritative single-node lifecycle snapshot.
+
+    Direct read-only ``GET {hivemind_url}/api/v1/cluster/lifecycle_state``
+    against the HLI gateway (port 6089). This is a plain REST route served
+    by ``menta_hli`` (not an MCP tool), so it uses the configured
+    ``hivemind_url`` base and the shared bearer-auth helper — the same
+    credentials every other MS4 -> HiveMind call carries — so it works
+    against clusters that have ``MENTA_API_KEYS`` set.
+
+    The response (schema ``menta_hli.cluster.lifecycle_state.v1``) carries
+    ``ai_plane_ready`` (true iff a chat-capable service/model is up),
+    ``capabilities_available`` / ``capabilities_unavailable``, and
+    ``signals.loaded_models_count``. That is the authoritative chat-plane
+    truth Oracle readiness must fail closed against.
+
+    Read-only and fail-soft: never mutates cluster state, and raises
+    :class:`HivemindStateError` on any transport / HTTP / decode failure
+    so callers can degrade instead of crashing. Honours the caller's
+    ``timeout`` (seconds) end-to-end.
+    """
+    url = f"{hivemind_url.rstrip('/')}/api/v1/cluster/lifecycle_state"
+    headers = {"Accept": "application/json"}
+    headers.update(hivemind_auth_headers())
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raise HivemindStateError(
+            f"HiveMind lifecycle_state at {url} -> {exc.code}: "
+            f"{exc.read().decode('utf-8', errors='replace')[:200]}"
+        ) from exc
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HivemindStateError(
+            f"HiveMind lifecycle_state at {url} unreachable: {exc}"
+        ) from exc
+    if not isinstance(body, dict):
+        raise HivemindStateError(
+            f"HiveMind lifecycle_state at {url} returned non-object JSON"
+        )
+    return body
+
+
 def get_combined_snapshot(hivemind_url: str, *, timeout: int = 10) -> dict[str, Any]:
     """Combine active jobs + cluster load + service health into one
     snapshot for the UI. Per-call failures are surfaced in

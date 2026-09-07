@@ -254,7 +254,7 @@ pub fn load_recent_events(
 
     if let Ok(entries) = std::fs::read_dir(&events_dir) {
         let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        files.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
 
         for entry in files {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {

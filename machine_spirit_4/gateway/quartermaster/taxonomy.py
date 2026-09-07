@@ -380,6 +380,17 @@ TOOLBOX_KEYWORDS: dict[str, tuple[str, ...]] = {
         "stream a game",
         "cyberpunk session",
     ),
+    "gamestream": (
+        "gamestream status",
+        "game stream status",
+    ),
+    "grid": (
+        "grid status",
+    ),
+    "screenstream": (
+        "screenstream status",
+        "screen stream status",
+    ),
     "psykyo": (
         "psykyo",
         "psykyo benchmark",
@@ -557,18 +568,12 @@ def keywords_for_toolbox(toolbox: str) -> tuple[str, ...]:
 # we can construct the worker with only those toolsets, trimming the
 # per-job tool context.
 #
-# This mapping is DELIBERATELY CONSERVATIVE. Most deep requests are
-# open-ended ("debug this", "research X and implement Y") and need the
-# full toolbox, so the default is None (full catalog, the escape hatch).
-# We only narrow when a request maps to an obvious, self-contained
-# Hermes capability and contains no signal that broader tools are
-# needed. When in doubt, return None — a too-narrow toolset silently
-# strips a capability, which is worse than a slightly larger context.
+# This mapping is a hint only. ``None`` means no mapping / not admitted.
+# It is never full-catalog authority and never a default tool grant.
 
-# Hermes legacy toolset group names (verified against the installed
-# Hermes ``model_tools._LEGACY_TOOLSET_MAP``): web_tools, terminal_tools,
-# vision_tools, image_tools, skills_tools, browser_tools, cronjob_tools,
-# file_tools, tts_tools.
+# Hermes legacy toolset group names come from the installed Hermes
+# ``model_tools._LEGACY_TOOLSET_MAP``. MS4 also contributes the
+# plugin-registered ``mcp-hivemind`` toolset through ``ms4_consciousness``.
 _HERMES_INTENT_TOOLSETS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     # (query keyword/phrases, hermes toolsets to enable)
     (("browse", "navigate to", "click the", "scroll the page", "web page", "open the site"),
@@ -581,6 +586,60 @@ _HERMES_INTENT_TOOLSETS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 
 # If ANY of these broadening signals appear, never narrow — the request
 # likely needs terminal / file / multi-tool work.
+_HIVEMIND_TOOLSET = "mcp-hivemind"
+
+_HIVEMIND_TOOLSET_HINTS: tuple[str, ...] = (
+    "hivemind",
+    "cluster summary",
+    "cluster load",
+    "cluster nodes",
+    "service health",
+    "services healthy",
+    "capability matrix",
+    "active jobs",
+    "running jobs",
+    "current jobs",
+    "job list",
+    "list jobs",
+    "what is running",
+    "what's running",
+    "running right now",
+    "anything running",
+    "what gpus",
+    "list gpus",
+    "free gpus",
+    "available gpus",
+    "gpu availability",
+    "model catalog",
+    "list models",
+    "what models",
+    "vm list",
+    "list vms",
+    "virtual machines",
+    "mcp tools",
+    "toolbox",
+    "toolboxes",
+)
+
+_HIVEMIND_TOOLSET_BROADENING_SIGNALS: tuple[str, ...] = (
+    "terminal",
+    "shell",
+    "command",
+    "install",
+    "build",
+    "file",
+    "write ",
+    "edit ",
+    "patch",
+    "code",
+    "script",
+    "debug",
+    "deploy",
+    "and then",
+    "and also",
+    "everything",
+)
+
 _BROADENING_SIGNALS: tuple[str, ...] = (
     "terminal", "run ", "execute", "shell", "command", "install", "build",
     "file", "read ", "write ", "edit ", "patch", "code", "script", "debug",
@@ -589,20 +648,19 @@ _BROADENING_SIGNALS: tuple[str, ...] = (
 
 
 def hermes_toolsets_for_query(query: str) -> list[str] | None:
-    """Conservative Hermes-toolset hint for a Depth Lobe job.
+    """Hint only. ``None`` means no mapping, never full-catalog authority.
 
-    Returns a small list of Hermes toolset names when the request maps
-    cleanly to a narrow capability and shows no broadening signal;
-    otherwise ``None`` (full catalog — the escape hatch). Pure /
-    deterministic / no I/O."""
+    The runner must not treat this return as admission. Only the two
+    current exact Oracle wrapper toolset names may be hinted when those
+    wrapper names are already present in the query. Pure / deterministic
+    / no I/O."""
     if not query:
         return None
-    lower = f" {query.lower().strip()} "
-    if any(sig in lower for sig in _BROADENING_SIGNALS):
-        return None
-    for phrases, toolsets in _HERMES_INTENT_TOOLSETS:
-        if any((p in lower) for p in phrases):
-            return list(toolsets)
+    lower = query.casefold()
+    if "hivemind_exact_gated" in lower:
+        return ["mcp-hivemind-exact-gated"]
+    if "hivemind_exact_read" in lower:
+        return ["mcp-hivemind-exact-read"]
     return None
 
 

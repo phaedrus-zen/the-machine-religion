@@ -82,6 +82,8 @@ pub trait ToolExecutor: Send + Sync {
     fn handles(&self, tool_name: &str) -> bool;
 }
 
+pub type DynamicToolHandler = dyn Fn(&Value) -> Ms3Result<ToolResult> + Send + Sync;
+
 // ── Built-in executor ──
 
 /// Executes built-in MS3 consciousness tools.
@@ -89,6 +91,12 @@ pub trait ToolExecutor: Send + Sync {
 /// to avoid circular Arc references.
 pub struct BuiltInExecutor {
     mind: std::sync::RwLock<std::sync::Weak<crate::Mind>>,
+}
+
+impl Default for BuiltInExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BuiltInExecutor {
@@ -402,10 +410,31 @@ async fn run_shell_hook(command: &str, stdin_payload: &str) -> Result<(i32, Stri
 
 // ── ToolRegistry ──
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpReconcileSummary {
+    pub discovered: usize,
+    pub unique: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub protected_collisions: usize,
+    pub duplicates: usize,
+    pub rejected: usize,
+    pub active: usize,
+    pub applied: bool,
+}
+
 pub struct ToolRegistry {
     specs: HashMap<String, ToolSpec>,
     executors: Vec<Box<dyn ToolExecutor>>,
+    mcp_executor: Option<McpExecutor>,
     builtin: std::sync::Arc<BuiltInExecutor>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolRegistry {
@@ -414,6 +443,7 @@ impl ToolRegistry {
         let mut registry = Self {
             specs: HashMap::new(),
             executors: Vec::new(),
+            mcp_executor: None,
             builtin: builtin.clone(),
         };
         for spec in BuiltInExecutor::tool_specs() {
@@ -437,13 +467,83 @@ impl ToolRegistry {
         }
     }
 
+    /// Atomically reconcile a non-empty snapshot of MCP-owned tools.
+    ///
+    /// Duplicate names are resolved first-wins in discovery order. Empty input is
+    /// intentionally a no-op because `McpBridge::discover` currently represents
+    /// both discovery failure and a successful empty response as an empty vector.
+    pub fn reconcile_mcp_tools(&mut self, tools: Vec<ToolSpec>) -> McpReconcileSummary {
+        let mut summary = McpReconcileSummary {
+            discovered: tools.len(),
+            active: self
+                .specs
+                .values()
+                .filter(|spec| spec.source == ToolSource::Mcp)
+                .count(),
+            ..McpReconcileSummary::default()
+        };
+        if tools.is_empty() {
+            return summary;
+        }
+
+        let mut incoming = HashMap::with_capacity(tools.len());
+        for spec in tools {
+            if spec.source != ToolSource::Mcp {
+                summary.rejected += 1;
+                continue;
+            }
+            match incoming.entry(spec.name.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(spec);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => summary.duplicates += 1,
+            }
+        }
+        summary.unique = incoming.len();
+        if incoming.is_empty() {
+            return summary;
+        }
+
+        let mut reconciled = self.specs.clone();
+        for (name, spec) in &self.specs {
+            if spec.source == ToolSource::Mcp && !incoming.contains_key(name) {
+                reconciled.remove(name);
+                summary.removed += 1;
+            }
+        }
+        for (name, spec) in incoming {
+            match self.specs.get(&name) {
+                Some(existing) if existing.source != ToolSource::Mcp => {
+                    summary.protected_collisions += 1;
+                }
+                Some(_) => {
+                    reconciled.insert(name, spec);
+                    summary.updated += 1;
+                }
+                None => {
+                    reconciled.insert(name, spec);
+                    summary.added += 1;
+                }
+            }
+        }
+
+        self.specs = reconciled;
+        summary.active = self
+            .specs
+            .values()
+            .filter(|spec| spec.source == ToolSource::Mcp)
+            .count();
+        summary.applied = true;
+        summary
+    }
+
     pub fn add_executor(&mut self, executor: Box<dyn ToolExecutor>) {
         self.executors.push(executor);
     }
 
-    /// Add an MCP executor for dispatching to HiveMind gateway.
+    /// Set or replace the single MCP executor used to dispatch to HiveMind.
     pub fn set_mcp_executor(&mut self, gateway_url: &str) {
-        self.executors.push(Box::new(McpExecutor::new(gateway_url)));
+        self.mcp_executor = Some(McpExecutor::new(gateway_url));
     }
 
     /// Register a dynamic tool at runtime with a closure handler.
@@ -451,7 +551,7 @@ impl ToolRegistry {
     pub fn register_dynamic(
         &mut self,
         spec: ToolSpec,
-        handler: Box<dyn Fn(&Value) -> Ms3Result<ToolResult> + Send + Sync>,
+        handler: Box<DynamicToolHandler>,
     ) {
         let name = spec.name.clone();
         self.specs.insert(name.clone(), spec);
@@ -482,7 +582,7 @@ impl ToolRegistry {
 
     pub fn list_tools_filtered(&self, source: Option<&ToolSource>) -> Vec<&ToolSpec> {
         self.specs.values()
-            .filter(|s| source.map_or(true, |src| &s.source == src))
+            .filter(|s| source.is_none_or(|src| &s.source == src))
             .collect()
     }
 
@@ -492,6 +592,16 @@ impl ToolRegistry {
         }
         for executor in &self.executors {
             if executor.handles(tool_name) {
+                return executor.execute(tool_name, input).await;
+            }
+        }
+        if self
+            .specs
+            .get(tool_name)
+            .map(|spec| spec.source == ToolSource::Mcp)
+            .unwrap_or(false)
+        {
+            if let Some(executor) = &self.mcp_executor {
                 return executor.execute(tool_name, input).await;
             }
         }
@@ -566,7 +676,7 @@ impl ToolExecutor for McpExecutor {
 
 struct DynamicExecutor {
     name: String,
-    handler: Box<dyn Fn(&Value) -> Ms3Result<ToolResult> + Send + Sync>,
+    handler: Box<DynamicToolHandler>,
 }
 
 #[async_trait::async_trait]
@@ -728,4 +838,171 @@ pub async fn execute_tool_pipeline(
     }).await;
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mcp_spec(name: &str, description: &str, input_schema: Value) -> ToolSpec {
+        ToolSpec::from_mcp(
+            name.into(),
+            description.into(),
+            input_schema,
+            PermissionLevel::ReadOnly,
+        )
+    }
+
+    #[test]
+    fn mcp_reconciliation_updates_adds_and_removes_only_mcp_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(
+            ToolSpec {
+                name: "dynamic.keep".into(),
+                description: "local dynamic tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                required_permission: PermissionLevel::Modify,
+                source: ToolSource::Plugin,
+            },
+            Box::new(|_| Ok(ToolResult::success("local".into()))),
+        );
+        let initial = registry.reconcile_mcp_tools(vec![
+            mcp_spec(
+                "remote.keep",
+                "old metadata",
+                serde_json::json!({"type": "string"}),
+            ),
+            mcp_spec("remote.remove", "remove me", serde_json::json!({})),
+        ]);
+        assert_eq!((initial.added, initial.active), (2, 2));
+
+        let refreshed = registry.reconcile_mcp_tools(vec![
+            mcp_spec(
+                "remote.keep",
+                "new metadata",
+                serde_json::json!({"type": "object", "required": ["value"]}),
+            ),
+            mcp_spec("remote.added", "new tool", serde_json::json!({})),
+            mcp_spec(
+                "ms3.get_status",
+                "must not replace built-in",
+                serde_json::json!({}),
+            ),
+            mcp_spec(
+                "dynamic.keep",
+                "must not replace dynamic",
+                serde_json::json!({}),
+            ),
+        ]);
+
+        assert_eq!(refreshed.updated, 1);
+        assert_eq!(refreshed.added, 1);
+        assert_eq!(refreshed.removed, 1);
+        assert_eq!(refreshed.protected_collisions, 2);
+        assert_eq!(refreshed.active, 2);
+        assert!(refreshed.applied);
+        assert!(registry.get_spec("remote.remove").is_none());
+        let updated = registry.get_spec("remote.keep").unwrap();
+        assert_eq!(updated.description, "new metadata");
+        assert_eq!(updated.input_schema["required"][0], "value");
+        assert_eq!(
+            registry.get_spec("ms3.get_status").unwrap().source,
+            ToolSource::BuiltIn
+        );
+        assert_eq!(
+            registry.get_spec("dynamic.keep").unwrap().source,
+            ToolSource::Plugin
+        );
+        assert_eq!(
+            registry.get_spec("dynamic.keep").unwrap().description,
+            "local dynamic tool"
+        );
+    }
+
+    #[test]
+    fn mcp_reconciliation_uses_first_duplicate_in_discovery_order() {
+        let mut registry = ToolRegistry::new();
+        let summary = registry.reconcile_mcp_tools(vec![
+            mcp_spec(
+                "remote.duplicate",
+                "first",
+                serde_json::json!({"winner": 1}),
+            ),
+            mcp_spec(
+                "remote.duplicate",
+                "second",
+                serde_json::json!({"winner": 2}),
+            ),
+            mcp_spec("remote.unique", "unique", serde_json::json!({})),
+        ]);
+
+        assert_eq!(
+            (summary.discovered, summary.unique, summary.duplicates),
+            (3, 2, 1)
+        );
+        assert_eq!(summary.added, 2);
+        assert_eq!(
+            registry.get_spec("remote.duplicate").unwrap().description,
+            "first"
+        );
+        assert_eq!(
+            registry.get_spec("remote.duplicate").unwrap().input_schema["winner"],
+            1
+        );
+    }
+
+    #[test]
+    fn empty_mcp_discovery_retains_prior_snapshot() {
+        let mut registry = ToolRegistry::new();
+        registry.reconcile_mcp_tools(vec![mcp_spec(
+            "remote.keep",
+            "known good metadata",
+            serde_json::json!({"type": "object"}),
+        )]);
+
+        let summary = registry.reconcile_mcp_tools(Vec::new());
+
+        assert!(!summary.applied);
+        assert_eq!((summary.active, summary.removed), (1, 0));
+        assert_eq!(
+            registry.get_spec("remote.keep").unwrap().description,
+            "known good metadata"
+        );
+    }
+
+    #[test]
+    fn setting_mcp_executor_replaces_the_singleton() {
+        let mut registry = ToolRegistry::new();
+        registry.set_mcp_executor("http://first.example");
+        registry.set_mcp_executor("http://second.example/");
+
+        assert!(registry.executors.is_empty());
+        assert_eq!(
+            registry.mcp_executor.as_ref().unwrap().mcp_url,
+            "http://second.example/v1/mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_dispatch_is_not_shadowed_by_mcp_executor() {
+        let mut registry = ToolRegistry::new();
+        registry.set_mcp_executor("http://127.0.0.1:1");
+        registry.register_dynamic(
+            ToolSpec {
+                name: "dynamic.local".into(),
+                description: "local dynamic tool".into(),
+                input_schema: serde_json::json!({}),
+                required_permission: PermissionLevel::ReadOnly,
+                source: ToolSource::Plugin,
+            },
+            Box::new(|_| Ok(ToolResult::success("handled locally".into()))),
+        );
+
+        let result = registry
+            .dispatch("dynamic.local", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "handled locally");
+    }
 }

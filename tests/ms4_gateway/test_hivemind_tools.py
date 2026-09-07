@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -151,6 +152,9 @@ def hm_url(fake: _FakeMcp) -> str:
         ("voice_identities_list", "hivemind.voice_identities.list@v1", (), {"identities": []}, {}),
         # human
         ("human_telegram_poll", "hivemind.human.telegram.poll@v1", (), {"messages": []}, {}),
+        # cluster grounding
+        ("cluster_summary", "hivemind.cluster.summary@v1", (), {"nodes": 3}, {"include_gpu_details": False}),
+        ("hosts_list", "hivemind.hosts.list@v1", (), {"hosts": []}, {"status_filter": "all"}),
         # services maintenance
         ("services_maintenance_clear", "hivemind.services.maintenance.clear@v1", ("ASR",), {"ok": True}, {"service_name": "ASR"}),
         # time + models
@@ -212,9 +216,9 @@ def test_is_service_in_maintenance_fail_soft(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Compose helpers: voice_identities.enroll/refine/identify do a
-# base64-encode step before hitting the tool. Lock that in so a future
-# refactor can't accidentally regress to passing raw bytes.
+# Voice identity wrapper contracts. Enroll/identify carry base64 audio;
+# refine carries HLI's name + pre-computed embedding shape and must never
+# fabricate raw-audio support.
 # ---------------------------------------------------------------------------
 
 
@@ -229,20 +233,182 @@ def test_voice_identities_enroll_base64_encodes_audio(fake_mcp):
     assert args["name"] == "Alice"
 
 
-def test_models_recommend_passes_workload_and_constraints(fake_mcp):
-    fake_mcp.set_response(
-        "hivemind.models.recommend@v1",
-        {"recommended": [{"model_id": "phi4-mini:latest", "score": 0.9, "reason": "fast + tool-use"}]},
+def test_voice_identities_identify_forwards_timeout_and_cancel(monkeypatch):
+    observed: dict[str, Any] = {}
+    cancellation = threading.Event()
+
+    def fake_call(url, tool_name, arguments, *, timeout, cancel_event):
+        observed.update({
+            "url": url,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "timeout": timeout,
+            "cancel_event": cancel_event,
+        })
+        return {
+            "ok": True,
+            "name": None,
+            "confidence": 0.0,
+            "threshold": 0.75,
+            "below_threshold": True,
+        }
+
+    monkeypatch.setattr(hivemind_tools, "_call_tool", fake_call)
+    result = hivemind_tools.voice_identities_identify(
+        "http://hive",
+        audio_base64="V0FW",
+        timeout=0.3,
+        cancel_event=cancellation,
     )
+
+    assert result == {
+        "ok": True,
+        "name": None,
+        "confidence": 0.0,
+        "threshold": 0.75,
+        "below_threshold": True,
+    }
+    assert observed["tool_name"] == "hivemind.voice_identities.identify@v1"
+    assert observed["timeout"] == 0.3
+    assert observed["cancel_event"] is cancellation
+
+
+def test_voice_identities_refine_sends_name_and_embedding_without_audio(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.voice_identities.refine@v1",
+        {"ok": True, "name": "Alice", "refined": True},
+    )
+    result = hivemind_tools.voice_identities_refine(
+        hm_url(fake_mcp),
+        name="Alice",
+        embedding=[0.1, 0.2, 0.3],
+        blend_alpha=0.05,
+        metadata={"source": "fixture"},
+    )
+    assert result["refined"] is True
+    args = fake_mcp.calls[-1]["body"]["params"]["arguments"]
+    assert args == {
+        "name": "Alice",
+        "embedding": [0.1, 0.2, 0.3],
+        "blend_alpha": 0.05,
+        "metadata": {"source": "fixture"},
+    }
+    assert "audio_base64" not in args
+
+
+def test_call_tool_honors_pre_cancel_without_transport(monkeypatch):
+    cancellation = threading.Event()
+    cancellation.set()
+    monkeypatch.setattr(
+        hivemind_tools,
+        "post_mcp_envelope",
+        lambda *_args, **_kwargs: pytest.fail("cancelled call must not open transport"),
+    )
+
+    with pytest.raises(HivemindToolError, match="cancelled"):
+        hivemind_tools._call_tool(
+            "http://hive",
+            "hivemind.voice_identities.identify@v1",
+            {},
+            timeout=0.3,
+            cancel_event=cancellation,
+        )
+
+
+def test_call_tool_cancellation_retires_running_transport(monkeypatch):
+    request_started = threading.Event()
+    release_handler = threading.Event()
+
+    class _SlowHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args, **_kwargs):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            request_started.set()
+            release_handler.wait(timeout=2.0)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    monkeypatch.setenv("MS4_HIVEMIND_MCP_URL", f"http://127.0.0.1:{server.server_port}/mcp")
+    cancellation = threading.Event()
+    failures: list[BaseException] = []
+
+    def run_call():
+        try:
+            hivemind_tools._call_tool(
+                f"http://127.0.0.1:{server.server_port}",
+                "hivemind.voice_identities.identify@v1",
+                {},
+                timeout=5,
+                cancel_event=cancellation,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    caller = threading.Thread(target=run_call, name="mcp-cancel-test")
+    caller.start()
+    try:
+        assert request_started.wait(timeout=1.0)
+        cancelled_at = time.monotonic()
+        cancellation.set()
+        caller.join(timeout=0.75)
+        assert not caller.is_alive()
+        assert time.monotonic() - cancelled_at < 0.75
+        assert failures and isinstance(failures[0], HivemindToolError)
+        assert "cancelled" in str(failures[0]).lower()
+    finally:
+        release_handler.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_models_recommend_matches_authoritative_contract(fake_mcp):
+    response = {
+        "capability": "chat",
+        "quality": "balanced",
+        "recommended_model": "phi4-mini:latest",
+        "backend": "ollama",
+    }
+    fake_mcp.set_response("hivemind.models.recommend@v1", response)
+
     body = hivemind_tools.models_recommend(
         hm_url(fake_mcp),
-        workload="foreground_chat_small",
-        constraints={"max_size_b": 8, "instruct": True},
+        capability="chat",
     )
-    assert body["recommended"][0]["model_id"] == "phi4-mini:latest"
-    args = fake_mcp.calls[-1]["body"]["params"]["arguments"]
-    assert args["workload"] == "foreground_chat_small"
-    assert args["constraints"] == {"max_size_b": 8, "instruct": True}
+
+    assert body == response
+    params = fake_mcp.calls[-1]["body"]["params"]
+    assert params["name"] == "hivemind.models.recommend@v1"
+    assert params["arguments"] == {"capability": "chat"}
+
+
+def test_models_recommend_forwards_manifest_vram_budget(fake_mcp):
+    fake_mcp.set_response(
+        "hivemind.models.recommend@v1",
+        {
+            "capability": "chat",
+            "recommended_model": "llama3.1:8b",
+            "backend": "ollama",
+        },
+    )
+
+    hivemind_tools.models_recommend(
+        hm_url(fake_mcp),
+        capability="chat",
+        vram_budget_mb=8192,
+    )
+
+    params = fake_mcp.calls[-1]["body"]["params"]
+    assert params["name"] == "hivemind.models.recommend@v1"
+    assert params["arguments"] == {
+        "capability": "chat",
+        "vram_budget_mb": 8192,
+    }
 
 
 def test_human_approval_request_passes_summary_and_risk(fake_mcp):

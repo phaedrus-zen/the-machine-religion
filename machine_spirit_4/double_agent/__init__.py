@@ -34,10 +34,15 @@ from .blackboard import (
 from .depth_picker import (
     CLASS_PRIORITY_PATTERNS,
     DEPTH_CODER_PRIORITY_PATTERNS,
+    DEPTH_FALLBACK_MIN_TOTAL_PARAM_B,
+    DEPTH_FAST_TOOL_FALLBACK_MODEL,
+    DEPTH_MIN_TOTAL_PARAM_B,
+    DEPTH_PREFERRED_CLUSTER_TARGET,
     DEPTH_PRIORITY_PATTERNS,
     ENV_OVERRIDE as MS4_DEPTH_MODEL_ENV,
     DepthChoice,
     choose_depth_model,
+    depth_fallback_model,
 )
 from .plan_templates import (
     GAMESTREAM_LOBE_TYPE,
@@ -60,7 +65,11 @@ from .model_picker import (
     ForegroundChoice,
     choose_foreground_model,
 )
-from .router import RouteDecision, route as router_route
+from .router import (
+    RouteDecision,
+    is_reasoning_only_analytical,
+    route as router_route,
+)
 from .runner import (
     JobRunner,
     RunnerError,
@@ -87,6 +96,10 @@ __all__ = [
     "ConversationRevision",
     "DEFAULT_FOREGROUND_MODEL",
     "DEPTH_CODER_PRIORITY_PATTERNS",
+    "DEPTH_FALLBACK_MIN_TOTAL_PARAM_B",
+    "DEPTH_FAST_TOOL_FALLBACK_MODEL",
+    "DEPTH_MIN_TOTAL_PARAM_B",
+    "DEPTH_PREFERRED_CLUSTER_TARGET",
     "DEPTH_PRIORITY_PATTERNS",
     "DepthChoice",
     "DoubleAgentWorker",
@@ -109,10 +122,12 @@ __all__ = [
     "_reset_default_blackboard_for_tests",
     "_reset_default_runner_for_tests",
     "build_face_lobe_context_block",
+    "is_reasoning_only_analytical",
     "build_gamestream_benchmark_plan",
     "build_gamestream_chat_runner",
     "build_real_chat_runner",
     "choose_depth_model",
+    "depth_fallback_model",
     "choose_foreground_model",
     "default_blackboard",
     "default_runner",
